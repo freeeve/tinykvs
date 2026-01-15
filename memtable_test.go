@@ -123,6 +123,49 @@ func TestMemtableIteratorSeek(t *testing.T) {
 	}
 }
 
+func TestMemtableIteratorValueAndValid(t *testing.T) {
+	mt := NewMemtable()
+
+	mt.Put([]byte("key1"), Int64Value(42), 1)
+	mt.Put([]byte("key2"), StringValue("hello"), 2)
+
+	iter := mt.Iterator()
+	defer iter.Close()
+
+	// Before Next(), Valid should be false
+	if iter.Valid() {
+		t.Error("Valid() should be false before Next()")
+	}
+
+	// After Next(), should be valid with correct value
+	if !iter.Next() {
+		t.Fatal("Next() should return true")
+	}
+	if !iter.Valid() {
+		t.Error("Valid() should be true after Next()")
+	}
+
+	val := iter.Value()
+	if val.Type != ValueTypeInt64 || val.Int64 != 42 {
+		t.Errorf("Value() = %+v, want Int64(42)", val)
+	}
+
+	// Second entry
+	if !iter.Next() {
+		t.Fatal("Next() should return true for second entry")
+	}
+	val = iter.Value()
+	if val.Type != ValueTypeString || string(val.Bytes) != "hello" {
+		t.Errorf("Value() = %+v, want String(hello)", val)
+	}
+
+	// After exhausting, Valid should be false
+	iter.Next() // exhaust
+	if iter.Valid() {
+		t.Error("Valid() should be false after exhausting iterator")
+	}
+}
+
 func TestMemtableSizeTracking(t *testing.T) {
 	mt := NewMemtable()
 

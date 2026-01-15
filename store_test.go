@@ -56,6 +56,119 @@ func TestStoreBasicCRUD(t *testing.T) {
 	}
 }
 
+func TestStoreAllValueTypes(t *testing.T) {
+	dir := t.TempDir()
+
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Float64
+	if err := store.PutFloat64([]byte("float"), 3.14159); err != nil {
+		t.Fatalf("PutFloat64 failed: %v", err)
+	}
+	floatVal, err := store.GetFloat64([]byte("float"))
+	if err != nil {
+		t.Fatalf("GetFloat64 failed: %v", err)
+	}
+	if floatVal != 3.14159 {
+		t.Errorf("GetFloat64 = %v, want 3.14159", floatVal)
+	}
+
+	// Bool
+	if err := store.PutBool([]byte("bool_true"), true); err != nil {
+		t.Fatalf("PutBool failed: %v", err)
+	}
+	if err := store.PutBool([]byte("bool_false"), false); err != nil {
+		t.Fatalf("PutBool failed: %v", err)
+	}
+	boolVal, err := store.GetBool([]byte("bool_true"))
+	if err != nil {
+		t.Fatalf("GetBool failed: %v", err)
+	}
+	if boolVal != true {
+		t.Errorf("GetBool = %v, want true", boolVal)
+	}
+	boolVal, err = store.GetBool([]byte("bool_false"))
+	if err != nil {
+		t.Fatalf("GetBool failed: %v", err)
+	}
+	if boolVal != false {
+		t.Errorf("GetBool = %v, want false", boolVal)
+	}
+
+	// Bytes
+	testBytes := []byte{0x00, 0x01, 0x02, 0xFF, 0xFE}
+	if err := store.PutBytes([]byte("bytes"), testBytes); err != nil {
+		t.Fatalf("PutBytes failed: %v", err)
+	}
+	bytesVal, err := store.GetBytes([]byte("bytes"))
+	if err != nil {
+		t.Fatalf("GetBytes failed: %v", err)
+	}
+	if string(bytesVal) != string(testBytes) {
+		t.Errorf("GetBytes = %v, want %v", bytesVal, testBytes)
+	}
+
+	// Test Value constructors
+	v := Int64Value(123)
+	if v.Type != ValueTypeInt64 || v.Int64 != 123 {
+		t.Errorf("Int64Value = %+v, want Int64=123", v)
+	}
+
+	v = Float64Value(2.718)
+	if v.Type != ValueTypeFloat64 || v.Float64 != 2.718 {
+		t.Errorf("Float64Value = %+v, want Float64=2.718", v)
+	}
+
+	v = BoolValue(true)
+	if v.Type != ValueTypeBool || v.Bool != true {
+		t.Errorf("BoolValue = %+v, want Bool=true", v)
+	}
+
+	v = BytesValue([]byte("test"))
+	if v.Type != ValueTypeBytes || string(v.Bytes) != "test" {
+		t.Errorf("BytesValue = %+v, want Bytes=test", v)
+	}
+}
+
+func TestOptionsPresets(t *testing.T) {
+	dir := t.TempDir()
+
+	// Test LowMemoryOptions
+	lowOpts := LowMemoryOptions(dir)
+	if lowOpts.MemtableSize != 1*1024*1024 {
+		t.Errorf("LowMemoryOptions.MemtableSize = %d, want 1MB", lowOpts.MemtableSize)
+	}
+	if lowOpts.BlockCacheSize != 0 {
+		t.Errorf("LowMemoryOptions.BlockCacheSize = %d, want 0", lowOpts.BlockCacheSize)
+	}
+
+	// Test HighPerformanceOptions
+	highOpts := HighPerformanceOptions(dir)
+	if highOpts.MemtableSize != 64*1024*1024 {
+		t.Errorf("HighPerformanceOptions.MemtableSize = %d, want 64MB", highOpts.MemtableSize)
+	}
+	if highOpts.BlockCacheSize != 512*1024*1024 {
+		t.Errorf("HighPerformanceOptions.BlockCacheSize = %d, want 512MB", highOpts.BlockCacheSize)
+	}
+
+	// Verify stores can be opened with each preset
+	store1, err := Open(dir+"/low", lowOpts)
+	if err != nil {
+		t.Fatalf("Open with LowMemoryOptions failed: %v", err)
+	}
+	store1.Close()
+
+	store2, err := Open(dir+"/high", highOpts)
+	if err != nil {
+		t.Fatalf("Open with HighPerformanceOptions failed: %v", err)
+	}
+	store2.Close()
+}
+
 func TestStorePersistence(t *testing.T) {
 	dir := t.TempDir()
 
@@ -252,40 +365,6 @@ func TestStoreStats(t *testing.T) {
 	stats = store.Stats()
 	if stats.MemtableCount != 10 {
 		t.Errorf("memtable count = %d, want 10", stats.MemtableCount)
-	}
-}
-
-func TestStoreAllValueTypes(t *testing.T) {
-	dir := t.TempDir()
-
-	store, err := Open(dir, DefaultOptions(dir))
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	defer store.Close()
-
-	// Test all types
-	store.PutInt64([]byte("int"), 12345)
-	store.PutFloat64([]byte("float"), 3.14159)
-	store.PutBool([]byte("bool"), true)
-	store.PutString([]byte("string"), "hello")
-	store.PutBytes([]byte("bytes"), []byte{0x01, 0x02, 0x03})
-
-	// Verify
-	if v, _ := store.GetInt64([]byte("int")); v != 12345 {
-		t.Errorf("int = %d, want 12345", v)
-	}
-	if v, _ := store.GetFloat64([]byte("float")); v != 3.14159 {
-		t.Errorf("float = %f, want 3.14159", v)
-	}
-	if v, _ := store.GetBool([]byte("bool")); v != true {
-		t.Errorf("bool = %v, want true", v)
-	}
-	if v, _ := store.GetString([]byte("string")); v != "hello" {
-		t.Errorf("string = %s, want hello", v)
-	}
-	if v, _ := store.GetBytes([]byte("bytes")); len(v) != 3 {
-		t.Errorf("bytes len = %d, want 3", len(v))
 	}
 }
 

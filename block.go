@@ -134,14 +134,14 @@ func (b *BlockBuilder) Reset() {
 	b.size = 0
 }
 
-// Size returns the current uncompressed block size.
-func (b *BlockBuilder) Size() int {
-	return b.size
-}
-
 // Count returns the number of entries in the block.
 func (b *BlockBuilder) Count() int {
 	return len(b.entries)
+}
+
+// Size returns the current uncompressed block size.
+func (b *BlockBuilder) Size() int {
+	return b.size
 }
 
 // FirstKey returns the first key in the block, or nil if empty.

@@ -175,16 +175,3 @@ func (r *Reader) GetLevels() [][]*SSTable {
 	}
 	return levels
 }
-
-// GetL0Tables returns a copy of L0 tables.
-func (r *Reader) GetL0Tables() []*SSTable {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	if len(r.levels) == 0 {
-		return nil
-	}
-	tables := make([]*SSTable, len(r.levels[0]))
-	copy(tables, r.levels[0])
-	return tables
-}
