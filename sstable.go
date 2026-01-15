@@ -236,6 +236,9 @@ type SSTableWriter struct {
 	minSeq        uint64
 	maxSeq        uint64
 	numTombstones uint64
+
+	// Reusable buffer for encoding values
+	encodeBuf []byte
 }
 
 // NewSSTableWriter creates a new SSTable writer.
@@ -252,6 +255,7 @@ func NewSSTableWriter(id uint32, path string, numKeys uint, opts Options) (*SSTa
 		id:           id,
 		blockBuilder: NewBlockBuilder(opts.BlockSize),
 		indexBuilder: NewIndexBuilder(),
+		encodeBuf:    make([]byte, 0, 128),
 	}
 
 	// Only create bloom filter if not disabled
@@ -281,16 +285,16 @@ func (w *SSTableWriter) Add(entry Entry) error {
 		w.numTombstones++
 	}
 
-	// Encode value
-	encodedValue := EncodeValue(entry.Value)
+	// Encode value using reusable buffer
+	w.encodeBuf = AppendEncodedValue(w.encodeBuf[:0], entry.Value)
 
 	// Try to add to current block
-	if !w.blockBuilder.Add(entry.Key, encodedValue) {
+	if !w.blockBuilder.Add(entry.Key, w.encodeBuf) {
 		// Block is full, flush it
 		if err := w.flushDataBlock(); err != nil {
 			return err
 		}
-		w.blockBuilder.Add(entry.Key, encodedValue)
+		w.blockBuilder.Add(entry.Key, w.encodeBuf)
 	}
 
 	w.lastKey = entry.Key

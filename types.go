@@ -132,6 +132,80 @@ func AppendEncodedValue(dst []byte, v Value) []byte {
 	return dst
 }
 
+// DecodeValueZeroCopy deserializes a value without copying byte data.
+// The returned Value's Bytes field points into the input data slice.
+// Caller must ensure data outlives the returned Value.
+// This is faster but the Value is only valid while data is valid.
+func DecodeValueZeroCopy(data []byte) (Value, int, error) {
+	if len(data) < 1 {
+		return Value{}, 0, ErrInvalidValue
+	}
+
+	v := Value{Type: ValueType(data[0])}
+	consumed := 1
+
+	switch v.Type {
+	case ValueTypeInt64:
+		if len(data) < 9 {
+			return Value{}, 0, ErrInvalidValue
+		}
+		v.Int64 = int64(binary.LittleEndian.Uint64(data[1:]))
+		consumed = 9
+
+	case ValueTypeFloat64:
+		if len(data) < 9 {
+			return Value{}, 0, ErrInvalidValue
+		}
+		v.Float64 = math.Float64frombits(binary.LittleEndian.Uint64(data[1:]))
+		consumed = 9
+
+	case ValueTypeBool:
+		if len(data) < 2 {
+			return Value{}, 0, ErrInvalidValue
+		}
+		v.Bool = data[1] != 0
+		consumed = 2
+
+	case ValueTypeString, ValueTypeBytes:
+		if len(data) < 2 {
+			return Value{}, 0, ErrInvalidValue
+		}
+		isPointer := data[1] == 1
+		if isPointer {
+			if len(data) < 2+DataPointerSize {
+				return Value{}, 0, ErrInvalidValue
+			}
+			// Embed pointer data directly to avoid allocation
+			v.Pointer = &DataPointer{
+				FileID:      binary.LittleEndian.Uint32(data[2:]),
+				BlockOffset: binary.LittleEndian.Uint32(data[6:]),
+				DataOffset:  binary.LittleEndian.Uint16(data[10:]),
+				Length:      binary.LittleEndian.Uint32(data[12:]),
+			}
+			consumed = 2 + DataPointerSize
+		} else {
+			if len(data) < 6 {
+				return Value{}, 0, ErrInvalidValue
+			}
+			length := binary.LittleEndian.Uint32(data[2:])
+			if len(data) < 6+int(length) {
+				return Value{}, 0, ErrInvalidValue
+			}
+			// Zero-copy: slice into source buffer
+			v.Bytes = data[6 : 6+length]
+			consumed = 6 + int(length)
+		}
+
+	case ValueTypeTombstone:
+		consumed = 1
+
+	default:
+		return Value{}, 0, ErrInvalidValue
+	}
+
+	return v, consumed, nil
+}
+
 // DecodeValue deserializes a value from bytes.
 // Returns the value and number of bytes consumed.
 func DecodeValue(data []byte) (Value, int, error) {

@@ -77,9 +77,13 @@ func (b *BlockBuilder) Add(key, value []byte) bool {
 		return false // Block is full
 	}
 
+	// Copy value to avoid issues with reused buffers
+	valueCopy := make([]byte, len(value))
+	copy(valueCopy, value)
+
 	b.entries = append(b.entries, BlockEntry{
 		Key:   key,
-		Value: value,
+		Value: valueCopy,
 	})
 	b.size += entrySize
 	return true

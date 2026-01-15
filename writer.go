@@ -1,7 +1,6 @@
 package tinykvs
 
 import (
-	"container/heap"
 	"context"
 	"fmt"
 	"os"
@@ -345,8 +344,15 @@ func (w *Writer) compactL0ToL1() {
 		}
 	}
 
-	// Merge all tables
-	allTables := append(l0Tables, l1Tables...)
+	// Reverse L0 tables so newer tables (appended last) come first
+	// The merge iterator uses index order to determine which entry is newer
+	reversedL0 := make([]*SSTable, len(l0Tables))
+	for i, t := range l0Tables {
+		reversedL0[len(l0Tables)-1-i] = t
+	}
+
+	// Merge all tables (reversed L0 first, then L1)
+	allTables := append(reversedL0, l1Tables...)
 	newTables, err := w.mergeTables(allTables, 1)
 	if err != nil {
 		return
@@ -577,8 +583,7 @@ type heapEntry struct {
 
 type entryHeap []heapEntry
 
-func (h entryHeap) Len() int { return len(h) }
-func (h entryHeap) Less(i, j int) bool {
+func (h entryHeap) less(i, j int) bool {
 	cmp := CompareKeys(h[i].entry.Key, h[j].entry.Key)
 	if cmp != 0 {
 		return cmp < 0
@@ -586,16 +591,58 @@ func (h entryHeap) Less(i, j int) bool {
 	// Same key: prefer lower tableIndex (newer)
 	return h[i].tableIndex < h[j].tableIndex
 }
-func (h entryHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
-func (h *entryHeap) Push(x interface{}) {
-	*h = append(*h, x.(heapEntry))
+
+// Inline heap operations to avoid interface{} boxing allocations
+
+func (h *entryHeap) push(x heapEntry) {
+	*h = append(*h, x)
+	h.up(len(*h) - 1)
 }
-func (h *entryHeap) Pop() interface{} {
+
+func (h *entryHeap) pop() heapEntry {
 	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[0 : n-1]
+	n := len(old) - 1
+	old[0], old[n] = old[n], old[0]
+	h.down(0, n)
+	x := old[n]
+	*h = old[:n]
 	return x
+}
+
+func (h entryHeap) up(j int) {
+	for {
+		i := (j - 1) / 2 // parent
+		if i == j || !h.less(j, i) {
+			break
+		}
+		h[i], h[j] = h[j], h[i]
+		j = i
+	}
+}
+
+func (h entryHeap) down(i, n int) {
+	for {
+		j1 := 2*i + 1
+		if j1 >= n || j1 < 0 { // j1 < 0 after int overflow
+			break
+		}
+		j := j1 // left child
+		if j2 := j1 + 1; j2 < n && h.less(j2, j1) {
+			j = j2 // = 2*i + 2  // right child
+		}
+		if !h.less(j, i) {
+			break
+		}
+		h[i], h[j] = h[j], h[i]
+		i = j
+	}
+}
+
+func (h *entryHeap) init() {
+	n := len(*h)
+	for i := n/2 - 1; i >= 0; i-- {
+		h.down(i, n)
+	}
 }
 
 func newMergeIterator(tables []*SSTable, cache *LRUCache, verify bool) *mergeIterator {
@@ -605,7 +652,6 @@ func newMergeIterator(tables []*SSTable, cache *LRUCache, verify bool) *mergeIte
 		verify: verify,
 		heap:   &entryHeap{},
 	}
-	heap.Init(m.heap)
 
 	// Initialize iterators and push first entry from each
 	for i, t := range tables {
@@ -620,26 +666,27 @@ func newMergeIterator(tables []*SSTable, cache *LRUCache, verify bool) *mergeIte
 		m.iterators = append(m.iterators, iter)
 
 		if iter.Next() {
-			heap.Push(m.heap, heapEntry{
+			*m.heap = append(*m.heap, heapEntry{
 				entry:      iter.Entry(),
 				tableIndex: i,
 				iterator:   iter,
 			})
 		}
 	}
+	m.heap.init()
 
 	return m
 }
 
 func (m *mergeIterator) Next() bool {
-	for m.heap.Len() > 0 {
-		// Pop minimum
-		he := heap.Pop(m.heap).(heapEntry)
+	for len(*m.heap) > 0 {
+		// Pop minimum (no interface{} boxing)
+		he := m.heap.pop()
 		m.current = he.entry
 
 		// Advance that iterator
 		if he.iterator.Next() {
-			heap.Push(m.heap, heapEntry{
+			m.heap.push(heapEntry{
 				entry:      he.iterator.Entry(),
 				tableIndex: he.tableIndex,
 				iterator:   he.iterator,
@@ -720,7 +767,8 @@ func (it *sstableIterator) Entry() Entry {
 	}
 
 	be := it.block.Entries[it.entryIdx]
-	value, _, _ := DecodeValue(be.Value)
+	// Use zero-copy decode - block data is valid while iterator is on this block
+	value, _, _ := DecodeValueZeroCopy(be.Value)
 	return Entry{
 		Key:   be.Key,
 		Value: value,

@@ -376,6 +376,201 @@ func TestStoreFlushTrigger(t *testing.T) {
 	}
 }
 
+func TestStoreUpdateAcrossLevels(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 1024 // Small memtable to trigger frequent flushes
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Phase 1: Write initial values and flush to L0
+	keys := []string{"alpha", "beta", "gamma", "delta"}
+	for _, key := range keys {
+		store.PutString([]byte(key), "version1")
+	}
+	store.Flush()
+
+	// Verify initial values
+	for _, key := range keys {
+		val, err := store.GetString([]byte(key))
+		if err != nil || val != "version1" {
+			t.Errorf("Get(%s) = %q, want version1", key, val)
+		}
+	}
+
+	// Phase 2: Compact L0 to L1
+	store.Compact()
+
+	// Verify values still correct after compaction
+	for _, key := range keys {
+		val, err := store.GetString([]byte(key))
+		if err != nil || val != "version1" {
+			t.Errorf("After compact, Get(%s) = %q, want version1", key, val)
+		}
+	}
+
+	// Phase 3: Update some keys (new values go to memtable)
+	store.PutString([]byte("alpha"), "version2")
+	store.PutString([]byte("gamma"), "version2")
+
+	// Verify updates are visible (memtable shadows L1)
+	if val, _ := store.GetString([]byte("alpha")); val != "version2" {
+		t.Errorf("Get(alpha) = %q, want version2", val)
+	}
+	if val, _ := store.GetString([]byte("gamma")); val != "version2" {
+		t.Errorf("Get(gamma) = %q, want version2", val)
+	}
+	// Unchanged keys still return old value
+	if val, _ := store.GetString([]byte("beta")); val != "version1" {
+		t.Errorf("Get(beta) = %q, want version1", val)
+	}
+
+	// Phase 4: Flush updates to L0
+	store.Flush()
+
+	// Verify values still correct
+	if val, _ := store.GetString([]byte("alpha")); val != "version2" {
+		t.Errorf("After flush, Get(alpha) = %q, want version2", val)
+	}
+	if val, _ := store.GetString([]byte("beta")); val != "version1" {
+		t.Errorf("After flush, Get(beta) = %q, want version1", val)
+	}
+
+	// Phase 5: Update again and compact
+	store.PutString([]byte("alpha"), "version3")
+	store.PutString([]byte("beta"), "version3")
+	store.Flush()
+	store.Compact()
+
+	// Final verification
+	expected := map[string]string{
+		"alpha": "version3",
+		"beta":  "version3",
+		"gamma": "version2",
+		"delta": "version1",
+	}
+	for key, want := range expected {
+		got, err := store.GetString([]byte(key))
+		if err != nil || got != want {
+			t.Errorf("Final Get(%s) = %q, want %q", key, got, want)
+		}
+	}
+
+	store.Close()
+
+	// Phase 6: Reopen and verify persistence
+	store, err = Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	for key, want := range expected {
+		got, err := store.GetString([]byte(key))
+		if err != nil || got != want {
+			t.Errorf("After reopen, Get(%s) = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestStoreDeleteAcrossLevels(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 1024
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Write and flush to L0, then compact to L1
+	store.PutString([]byte("key1"), "value1")
+	store.PutString([]byte("key2"), "value2")
+	store.PutString([]byte("key3"), "value3")
+	store.Flush()
+	store.Compact()
+
+	// Delete key2 (tombstone goes to memtable)
+	store.Delete([]byte("key2"))
+
+	// Verify delete is visible
+	_, err = store.Get([]byte("key2"))
+	if err != ErrKeyNotFound {
+		t.Errorf("Get(key2) after delete: got %v, want ErrKeyNotFound", err)
+	}
+
+	// key1 and key3 still exist
+	if _, err := store.Get([]byte("key1")); err != nil {
+		t.Errorf("Get(key1): %v", err)
+	}
+	if _, err := store.Get([]byte("key3")); err != nil {
+		t.Errorf("Get(key3): %v", err)
+	}
+
+	// Flush and compact (tombstone merges with L1)
+	store.Flush()
+	store.Compact()
+
+	// Delete should persist
+	_, err = store.Get([]byte("key2"))
+	if err != ErrKeyNotFound {
+		t.Errorf("After compact, Get(key2): got %v, want ErrKeyNotFound", err)
+	}
+
+	store.Close()
+
+	// Reopen and verify
+	store, err = Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	_, err = store.Get([]byte("key2"))
+	if err != ErrKeyNotFound {
+		t.Errorf("After reopen, Get(key2): got %v, want ErrKeyNotFound", err)
+	}
+}
+
+func TestStoreMultipleUpdates(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 512 // Very small to trigger many flushes
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Repeatedly update the same key with flushes in between
+	key := []byte("counter")
+	for i := 1; i <= 10; i++ {
+		store.PutInt64(key, int64(i))
+		store.Flush()
+
+		got, err := store.GetInt64(key)
+		if err != nil || got != int64(i) {
+			t.Errorf("After update %d: got %d, want %d", i, got, i)
+		}
+	}
+
+	// Compact everything
+	store.Compact()
+
+	// Final value should be 10
+	got, err := store.GetInt64(key)
+	if err != nil || got != 10 {
+		t.Errorf("After compact: got %d, want 10", got)
+	}
+}
+
 func BenchmarkStorePut(b *testing.B) {
 	dir := b.TempDir()
 
@@ -444,5 +639,36 @@ func BenchmarkStoreMixed(b *testing.B) {
 			key := fmt.Sprintf("key%08d", i%1000)
 			store.Get([]byte(key))
 		}
+	}
+}
+
+func BenchmarkCompaction(b *testing.B) {
+	for _, numKeys := range []int{10000, 50000} {
+		b.Run(fmt.Sprintf("keys=%d", numKeys), func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				dir := b.TempDir()
+				opts := DefaultOptions(dir)
+				opts.MemtableSize = 64 * 1024 // 64KB to create multiple L0 tables
+
+				store, err := Open(dir, opts)
+				if err != nil {
+					b.Fatalf("Open failed: %v", err)
+				}
+
+				// Write keys to create multiple L0 tables
+				for j := 0; j < numKeys; j++ {
+					key := fmt.Sprintf("key%08d", j)
+					store.PutString([]byte(key), "value that is long enough to fill blocks quickly")
+				}
+				store.Flush()
+
+				b.StartTimer()
+				store.Compact()
+				b.StopTimer()
+
+				store.Close()
+			}
+		})
 	}
 }

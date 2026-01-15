@@ -1,5 +1,8 @@
 # TinyKVS
 
+[![CI](https://github.com/freeeve/tinykvs/actions/workflows/ci.yml/badge.svg)](https://github.com/freeeve/tinykvs/actions/workflows/ci.yml)
+[![Coverage Status](https://coveralls.io/repos/github/freeeve/tinykvs/badge.svg?branch=main)](https://coveralls.io/github/freeeve/tinykvs?branch=main)
+
 A low-memory, sorted key-value store for Go built on LSM-tree architecture with zstd compression.
 
 ## Features
@@ -198,10 +201,16 @@ func HighPerformanceOptions(dir string) Options  // Max throughput
 | Bloom filters | ~1.2MB per 1M keys |
 | Sparse index | ~5KB per 1M keys |
 
-For minimal memory, use `LowMemoryOptions()`:
+For reduced memory, use `LowMemoryOptions()`:
 - 1MB memtable
 - No block cache
-- Total: ~2MB overhead for 1M keys
+- Total: ~2MB overhead + bloom filters (~1.2MB per 1M keys)
+
+For absolute minimal memory (billions of records), use `UltraLowMemoryOptions()`:
+- 1MB memtable
+- No block cache
+- No bloom filters
+- Total: ~2MB overhead regardless of dataset size
 
 ## Performance
 
@@ -279,6 +288,93 @@ for _, level := range stats.Levels {
     fmt.Printf("L%d: %d tables, %d keys\n", level.Level, level.NumTables, level.NumKeys)
 }
 ```
+
+### Storing Structs
+
+TinyKVS stores primitive types and byte slices natively. For structs, serialize to bytes using your preferred encoding. Here are common patterns:
+
+#### JSON (simple, human-readable)
+
+```go
+import "encoding/json"
+
+type User struct {
+    Name  string `json:"name"`
+    Email string `json:"email"`
+    Age   int    `json:"age"`
+}
+
+// Write
+user := User{Name: "Alice", Email: "alice@example.com", Age: 30}
+data, _ := json.Marshal(user)
+store.PutBytes([]byte("user:1"), data)
+
+// Read
+data, _ := store.GetBytes([]byte("user:1"))
+var user User
+json.Unmarshal(data, &user)
+```
+
+#### Gob (Go-native, efficient for Go-to-Go)
+
+```go
+import (
+    "bytes"
+    "encoding/gob"
+)
+
+// Write
+var buf bytes.Buffer
+gob.NewEncoder(&buf).Encode(user)
+store.PutBytes([]byte("user:1"), buf.Bytes())
+
+// Read
+data, _ := store.GetBytes([]byte("user:1"))
+var user User
+gob.NewDecoder(bytes.NewReader(data)).Decode(&user)
+```
+
+#### MessagePack (compact, fast)
+
+```go
+import "github.com/vmihailenco/msgpack/v5"
+
+// Write
+data, _ := msgpack.Marshal(user)
+store.PutBytes([]byte("user:1"), data)
+
+// Read
+data, _ := store.GetBytes([]byte("user:1"))
+var user User
+msgpack.Unmarshal(data, &user)
+```
+
+#### Protocol Buffers (schema-defined, cross-language)
+
+```go
+import "google.golang.org/protobuf/proto"
+
+// Assuming User is a generated protobuf message
+// Write
+data, _ := proto.Marshal(user)
+store.PutBytes([]byte("user:1"), data)
+
+// Read
+data, _ := store.GetBytes([]byte("user:1"))
+user := &pb.User{}
+proto.Unmarshal(data, user)
+```
+
+#### Comparison
+
+| Format | Size | Speed | Cross-language | Schema |
+|--------|------|-------|----------------|--------|
+| JSON | Largest | Slow | Yes | No |
+| Gob | Medium | Fast | Go only | No |
+| MessagePack | Small | Fast | Yes | No |
+| Protobuf | Smallest | Fastest | Yes | Required |
+
+For most Go applications, **MessagePack** offers a good balance. Use **Protobuf** for cross-language systems or when schema evolution matters.
 
 ## License
 

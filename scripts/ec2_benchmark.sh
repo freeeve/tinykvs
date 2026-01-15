@@ -324,7 +324,7 @@ launch_instance() {
         --security-group-ids "$SG_ID" \
         --user-data "$USER_DATA" \
         $KEY_OPTION \
-        --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":50,"VolumeType":"gp3"}}]' \
+        --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":100,"VolumeType":"gp3"}}]' \
         --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=tinykvs-benchmark}]" \
         --region "$REGION" \
         --query "Instances[0].InstanceId" \
