@@ -43,7 +43,8 @@ func (m *Memtable) Put(key []byte, value Value, seq uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	update := make([]*skiplistNode, maxHeight)
+	// Use stack-allocated array to avoid heap allocation
+	var update [maxHeight]*skiplistNode
 	x := m.head
 
 	// Find insert position from top level down

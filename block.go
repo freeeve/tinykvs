@@ -3,9 +3,33 @@ package tinykvs
 import (
 	"encoding/binary"
 	"hash/crc32"
+	"sync"
 
 	"github.com/klauspost/compress/zstd"
 )
+
+// Pooled zstd decoder for efficient reuse
+var zstdDecoderPool = sync.Pool{
+	New: func() interface{} {
+		decoder, _ := zstd.NewReader(nil)
+		return decoder
+	},
+}
+
+// Pooled zstd encoders by compression level
+var zstdEncoderPools [5]sync.Pool
+
+func init() {
+	for i := 0; i <= 4; i++ {
+		level := i
+		zstdEncoderPools[i] = sync.Pool{
+			New: func() interface{} {
+				encoder, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(level)))
+				return encoder
+			},
+		}
+	}
+}
 
 // Block types
 const (
@@ -79,15 +103,16 @@ func (b *BlockBuilder) Build(blockType uint8, compressionLevel int) ([]byte, err
 
 	uncompressedSize := len(buf)
 
-	// Compress with zstd
-	level := zstd.EncoderLevelFromZstd(compressionLevel)
-	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(level))
-	if err != nil {
-		return nil, err
+	// Compress with pooled zstd encoder
+	poolIdx := compressionLevel
+	if poolIdx < 0 {
+		poolIdx = 0
+	} else if poolIdx > 4 {
+		poolIdx = 4
 	}
-	defer encoder.Close()
-
+	encoder := zstdEncoderPools[poolIdx].Get().(*zstd.Encoder)
 	compressed := encoder.EncodeAll(buf, make([]byte, 0, len(buf)))
+	zstdEncoderPools[poolIdx].Put(encoder)
 
 	// Append footer: checksum(4) + uncompressed_size(4) + compressed_size(4)
 	checksum := crc32.ChecksumIEEE(compressed)
@@ -129,6 +154,8 @@ func (b *BlockBuilder) Entries() []BlockEntry {
 }
 
 // DecodeBlock decompresses and parses a block.
+// The returned Block's entries reference the internal decompressed buffer,
+// so the Block should not be modified and is only valid while cached.
 func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
 	if len(data) < BlockFooterSize {
 		return nil, ErrCorruptedData
@@ -150,14 +177,10 @@ func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
 		return nil, ErrChecksumMismatch
 	}
 
-	// Decompress
-	decoder, err := zstd.NewReader(nil)
-	if err != nil {
-		return nil, err
-	}
-	defer decoder.Close()
-
+	// Decompress using pooled decoder
+	decoder := zstdDecoderPool.Get().(*zstd.Decoder)
 	decompressed, err := decoder.DecodeAll(compressed, make([]byte, 0, uncompressedSize))
+	zstdDecoderPool.Put(decoder)
 	if err != nil {
 		return nil, err
 	}
@@ -170,35 +193,33 @@ func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
 	blockType := decompressed[0]
 	numEntries := binary.LittleEndian.Uint16(decompressed[1:])
 
-	// Parse entries
-	entries := make([]BlockEntry, 0, numEntries)
+	// Parse entries with zero-copy (point directly into decompressed buffer)
+	entries := make([]BlockEntry, numEntries)
 	pos := 3
 
 	for i := uint16(0); i < numEntries; i++ {
 		if pos+4 > len(decompressed) {
 			return nil, ErrCorruptedData
 		}
-		keyLen := binary.LittleEndian.Uint32(decompressed[pos:])
+		keyLen := int(binary.LittleEndian.Uint32(decompressed[pos:]))
 		pos += 4
 
-		if pos+int(keyLen)+4 > len(decompressed) {
+		if pos+keyLen+4 > len(decompressed) {
 			return nil, ErrCorruptedData
 		}
-		key := make([]byte, keyLen)
-		copy(key, decompressed[pos:pos+int(keyLen)])
-		pos += int(keyLen)
+		// Zero-copy: slice into decompressed buffer
+		entries[i].Key = decompressed[pos : pos+keyLen]
+		pos += keyLen
 
-		valLen := binary.LittleEndian.Uint32(decompressed[pos:])
+		valLen := int(binary.LittleEndian.Uint32(decompressed[pos:]))
 		pos += 4
 
-		if pos+int(valLen) > len(decompressed) {
+		if pos+valLen > len(decompressed) {
 			return nil, ErrCorruptedData
 		}
-		value := make([]byte, valLen)
-		copy(value, decompressed[pos:pos+int(valLen)])
-		pos += int(valLen)
-
-		entries = append(entries, BlockEntry{Key: key, Value: value})
+		// Zero-copy: slice into decompressed buffer
+		entries[i].Value = decompressed[pos : pos+valLen]
+		pos += valLen
 	}
 
 	return &Block{

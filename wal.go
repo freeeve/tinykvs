@@ -45,6 +45,9 @@ type WAL struct {
 	block    []byte
 	blockPos int
 
+	// Reusable encode buffer
+	encodeBuf []byte
+
 	mu sync.Mutex
 }
 
@@ -56,11 +59,12 @@ func OpenWAL(path string, syncMode WALSyncMode) (*WAL, error) {
 	}
 
 	return &WAL{
-		file:     file,
-		path:     path,
-		syncMode: syncMode,
-		block:    make([]byte, walBlockSize),
-		blockPos: 0,
+		file:      file,
+		path:      path,
+		syncMode:  syncMode,
+		block:     make([]byte, walBlockSize),
+		blockPos:  0,
+		encodeBuf: make([]byte, 0, 512),
 	}, nil
 }
 
@@ -264,13 +268,18 @@ func (w *WAL) Truncate() error {
 	return err
 }
 
-// encodeEntry serializes a WAL entry.
+// encodeEntry serializes a WAL entry into the reusable buffer.
 func (w *WAL) encodeEntry(entry WALEntry) []byte {
 	valueBytes := EncodeValue(entry.Value)
 
 	// Format: op(1) + seq(8) + key_len(4) + key + value
 	size := 1 + 8 + 4 + len(entry.Key) + len(valueBytes)
-	buf := make([]byte, 0, size)
+
+	// Reuse buffer, grow if needed
+	if cap(w.encodeBuf) < size {
+		w.encodeBuf = make([]byte, 0, size*2)
+	}
+	buf := w.encodeBuf[:0]
 
 	buf = append(buf, entry.Operation)
 	buf = binary.LittleEndian.AppendUint64(buf, entry.Sequence)
@@ -278,6 +287,7 @@ func (w *WAL) encodeEntry(entry WALEntry) []byte {
 	buf = append(buf, entry.Key...)
 	buf = append(buf, valueBytes...)
 
+	w.encodeBuf = buf
 	return buf
 }
 
