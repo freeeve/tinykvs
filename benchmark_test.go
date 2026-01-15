@@ -305,10 +305,10 @@ func Test100MRecords(t *testing.T) {
 	batchSize := 1_000_000
 
 	dir := t.TempDir()
-	opts := UltraLowMemoryOptions(dir) // Use ultra low memory settings
-	opts.MemtableSize = 1 * 1024 * 1024   // 1MB memtable
-	opts.BlockCacheSize = 0               // No cache during writes
-	opts.WALSyncMode = WALSyncNone        // Faster writes for benchmark
+	opts := UltraLowMemoryOptions(dir)  // Use ultra low memory settings
+	opts.MemtableSize = 1 * 1024 * 1024 // 1MB memtable
+	opts.BlockCacheSize = 0             // No cache during writes
+	opts.WALSyncMode = WALSyncNone      // Faster writes for benchmark
 
 	t.Logf("Starting 100M record test")
 	t.Logf("Directory: %s", dir)

@@ -15,9 +15,16 @@ type Reader struct {
 
 // NewReader creates a new reader.
 func NewReader(memtable *Memtable, levels [][]*SSTable, cache *LRUCache, opts Options) *Reader {
+	// Make a deep copy of levels to avoid sharing with Store
+	// Store and Reader use different mutexes, so sharing would cause races
+	levelsCopy := make([][]*SSTable, len(levels))
+	for i, level := range levels {
+		levelsCopy[i] = make([]*SSTable, len(level))
+		copy(levelsCopy[i], level)
+	}
 	return &Reader{
 		memtable: memtable,
-		levels:   levels,
+		levels:   levelsCopy,
 		cache:    cache,
 		opts:     opts,
 	}
