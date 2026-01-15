@@ -166,6 +166,27 @@ func TestMemtableIteratorValueAndValid(t *testing.T) {
 	}
 }
 
+func TestMemtableIteratorNilCurrent(t *testing.T) {
+	mt := NewMemtable()
+	mt.Put([]byte("key"), Int64Value(42), 1)
+
+	iter := mt.Iterator()
+	defer iter.Close()
+
+	// Before calling Next(), current is nil
+	// These should return safe defaults, not panic
+	if iter.Key() != nil {
+		t.Error("Key() before Next() should return nil")
+	}
+	if iter.Value().Type != 0 {
+		t.Error("Value() before Next() should return zero Value")
+	}
+	entry := iter.Entry()
+	if entry.Key != nil {
+		t.Error("Entry() before Next() should return zero Entry")
+	}
+}
+
 func TestMemtableSizeTracking(t *testing.T) {
 	mt := NewMemtable()
 

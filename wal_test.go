@@ -245,6 +245,70 @@ func TestWALMultipleBlocks(t *testing.T) {
 	}
 }
 
+func TestWALOpenError(t *testing.T) {
+	// Try to open WAL in non-existent directory
+	_, err := OpenWAL("/nonexistent/path/test.wal", WALSyncPerWrite)
+	if err == nil {
+		t.Error("OpenWAL should fail for non-existent directory")
+	}
+}
+
+func TestWALTruncateBefore(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.wal")
+
+	wal, err := OpenWAL(path, WALSyncPerWrite)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+
+	// Write entries with sequences 1-10
+	for i := uint64(1); i <= 10; i++ {
+		entry := WALEntry{
+			Operation: OpPut,
+			Key:       []byte(string(rune('a' + i - 1))),
+			Value:     Int64Value(int64(i)),
+			Sequence:  i,
+		}
+		if err := wal.Append(entry); err != nil {
+			t.Fatalf("Append failed: %v", err)
+		}
+	}
+	wal.Sync()
+
+	// Truncate entries before sequence 6
+	if err := wal.TruncateBefore(6); err != nil {
+		t.Fatalf("TruncateBefore failed: %v", err)
+	}
+
+	wal.Close()
+
+	// Reopen and recover
+	wal, err = OpenWAL(path, WALSyncPerWrite)
+	if err != nil {
+		t.Fatalf("OpenWAL (reopen) failed: %v", err)
+	}
+	defer wal.Close()
+
+	recovered, err := wal.Recover()
+	if err != nil {
+		t.Fatalf("Recover failed: %v", err)
+	}
+
+	// Should only have entries 6-10 (5 entries)
+	if len(recovered) != 5 {
+		t.Errorf("recovered %d entries, want 5", len(recovered))
+	}
+
+	// Verify sequences
+	for i, e := range recovered {
+		expectedSeq := uint64(6 + i)
+		if e.Sequence != expectedSeq {
+			t.Errorf("entry %d: sequence = %d, want %d", i, e.Sequence, expectedSeq)
+		}
+	}
+}
+
 func BenchmarkWALAppend(b *testing.B) {
 	dir := b.TempDir()
 	path := filepath.Join(dir, "test.wal")

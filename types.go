@@ -142,7 +142,7 @@ func DecodeValueZeroCopy(data []byte) (Value, int, error) {
 	}
 
 	v := Value{Type: ValueType(data[0])}
-	consumed := 1
+	var consumed int
 
 	switch v.Type {
 	case ValueTypeInt64:
@@ -214,7 +214,7 @@ func DecodeValue(data []byte) (Value, int, error) {
 	}
 
 	v := Value{Type: ValueType(data[0])}
-	consumed := 1
+	var consumed int
 
 	switch v.Type {
 	case ValueTypeInt64:

@@ -389,6 +389,36 @@ func TestStoreLowMemoryOptions(t *testing.T) {
 	}
 }
 
+func TestStoreUltraLowMemoryOptions(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := UltraLowMemoryOptions(dir)
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Should work with ultra low memory (no bloom, no cache)
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("key%03d", i)
+		store.PutString([]byte(key), "value")
+	}
+	store.Flush()
+
+	// Verify reads work without bloom filter
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("key%03d", i)
+		val, err := store.GetString([]byte(key))
+		if err != nil {
+			t.Errorf("Get(%s) failed: %v", key, err)
+		}
+		if val != "value" {
+			t.Errorf("Get(%s) = %s, want value", key, val)
+		}
+	}
+}
+
 func TestStoreClosedOperations(t *testing.T) {
 	dir := t.TempDir()
 
@@ -407,6 +437,69 @@ func TestStoreClosedOperations(t *testing.T) {
 	}
 	if err := store.Delete([]byte("key")); err != ErrStoreClosed {
 		t.Errorf("Delete on closed store: %v, want ErrStoreClosed", err)
+	}
+}
+
+func TestStoreTypeMismatchErrors(t *testing.T) {
+	dir := t.TempDir()
+
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Store a string value
+	store.PutString([]byte("str"), "hello")
+
+	// Try to get it as wrong types
+	_, err = store.GetInt64([]byte("str"))
+	if err == nil {
+		t.Error("GetInt64 on string should fail")
+	}
+
+	_, err = store.GetFloat64([]byte("str"))
+	if err == nil {
+		t.Error("GetFloat64 on string should fail")
+	}
+
+	_, err = store.GetBool([]byte("str"))
+	if err == nil {
+		t.Error("GetBool on string should fail")
+	}
+}
+
+func TestStoreWALRecoveryWithDelete(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write data including a delete
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	store.PutString([]byte("key1"), "value1")
+	store.PutString([]byte("key2"), "value2")
+	store.Delete([]byte("key1")) // Delete key1
+	store.Close()                // Close without flush - data in WAL only
+
+	// Reopen and verify delete was recovered
+	store, err = Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	// key1 should be deleted
+	_, err = store.Get([]byte("key1"))
+	if err != ErrKeyNotFound {
+		t.Errorf("key1 should be deleted, got err=%v", err)
+	}
+
+	// key2 should exist
+	val, err := store.GetString([]byte("key2"))
+	if err != nil || val != "value2" {
+		t.Errorf("key2 = %q, err=%v, want value2", val, err)
 	}
 }
 
@@ -650,6 +743,105 @@ func TestStoreMultipleUpdates(t *testing.T) {
 	}
 }
 
+func TestStoreReadFromL1(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 1024 // Small memtable
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Write enough data to trigger flush and create L0 tables
+	for i := 0; i < 200; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		store.PutString([]byte(key), "value")
+	}
+	store.Flush()
+
+	// Compact to move data to L1 (non-overlapping, uses binary search)
+	store.Compact()
+
+	// Read keys - this exercises findTableForKey binary search
+	for i := 0; i < 200; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		val, err := store.GetString([]byte(key))
+		if err != nil {
+			t.Errorf("Get(%s) from L1 failed: %v", key, err)
+		}
+		if val != "value" {
+			t.Errorf("Get(%s) = %q, want value", key, val)
+		}
+	}
+
+	// Read non-existent keys (exercises binary search miss paths)
+	_, err = store.Get([]byte("aaa"))
+	if err != ErrKeyNotFound {
+		t.Errorf("Get(aaa) should be ErrKeyNotFound, got %v", err)
+	}
+	_, err = store.Get([]byte("zzz"))
+	if err != ErrKeyNotFound {
+		t.Errorf("Get(zzz) should be ErrKeyNotFound, got %v", err)
+	}
+	_, err = store.Get([]byte("key00050x"))
+	if err != ErrKeyNotFound {
+		t.Errorf("Get(key00050x) should be ErrKeyNotFound, got %v", err)
+	}
+
+	store.Close()
+}
+
+func TestStoreCompactWithTombstones(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 512
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Write data
+	for i := 0; i < 50; i++ {
+		key := fmt.Sprintf("key%03d", i)
+		store.PutString([]byte(key), "value")
+	}
+	store.Flush()
+
+	// Delete some keys
+	for i := 0; i < 25; i++ {
+		key := fmt.Sprintf("key%03d", i)
+		store.Delete([]byte(key))
+	}
+	store.Flush()
+
+	// Compact - tombstones should be preserved (not at last level)
+	store.Compact()
+
+	// Deleted keys should still return ErrKeyNotFound
+	for i := 0; i < 25; i++ {
+		key := fmt.Sprintf("key%03d", i)
+		_, err := store.Get([]byte(key))
+		if err != ErrKeyNotFound {
+			t.Errorf("Get(%s) should be deleted, got %v", key, err)
+		}
+	}
+
+	// Non-deleted keys should still exist
+	for i := 25; i < 50; i++ {
+		key := fmt.Sprintf("key%03d", i)
+		_, err := store.GetString([]byte(key))
+		if err != nil {
+			t.Errorf("Get(%s) failed: %v", key, err)
+		}
+	}
+
+	store.Close()
+}
+
 func BenchmarkStorePut(b *testing.B) {
 	dir := b.TempDir()
 
@@ -749,5 +941,325 @@ func BenchmarkCompaction(b *testing.B) {
 				store.Close()
 			}
 		})
+	}
+}
+
+func TestReaderAddSSTableLevelExpansion(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+
+	// Create a reader with no levels
+	mt := NewMemtable()
+	cache := NewLRUCache(1024 * 1024)
+	reader := NewReader(mt, nil, cache, opts)
+
+	// Create a test SSTable
+	path := dir + "/test.sst"
+	writer, err := NewSSTableWriter(1, path, 10, opts)
+	if err != nil {
+		t.Fatalf("NewSSTableWriter failed: %v", err)
+	}
+	writer.Add(Entry{Key: []byte("key"), Value: Int64Value(42), Sequence: 1})
+	writer.Finish(0)
+	writer.Close()
+
+	sst, err := OpenSSTable(1, path)
+	if err != nil {
+		t.Fatalf("OpenSSTable failed: %v", err)
+	}
+	defer sst.Close()
+
+	// Add to level 5 (should expand the levels slice)
+	reader.AddSSTable(5, sst)
+
+	levels := reader.GetLevels()
+	if len(levels) < 6 {
+		t.Errorf("levels should have expanded to at least 6, got %d", len(levels))
+	}
+	if len(levels[5]) != 1 {
+		t.Errorf("level 5 should have 1 table, got %d", len(levels[5]))
+	}
+}
+
+func TestReaderImmutableMemtable(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+
+	mt := NewMemtable()
+	cache := NewLRUCache(1024 * 1024)
+	reader := NewReader(mt, nil, cache, opts)
+
+	// Create an immutable memtable with a key
+	imm := NewMemtable()
+	imm.Put([]byte("immkey"), StringValue("immvalue"), 1)
+	reader.AddImmutable(imm)
+
+	// Should find the key in immutable
+	val, err := reader.Get([]byte("immkey"))
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if val.String() != "immvalue" {
+		t.Errorf("value = %s, want immvalue", val.String())
+	}
+
+	// Test tombstone in immutable
+	imm2 := NewMemtable()
+	imm2.Put([]byte("tombkey"), TombstoneValue(), 2)
+	reader.AddImmutable(imm2)
+
+	_, err = reader.Get([]byte("tombkey"))
+	if err != ErrKeyNotFound {
+		t.Errorf("expected ErrKeyNotFound for tombstone in immutable, got %v", err)
+	}
+}
+
+func TestMemtableIteratorExhaustion(t *testing.T) {
+	mt := NewMemtable()
+	mt.Put([]byte("a"), Int64Value(1), 1)
+
+	iter := mt.Iterator()
+	defer iter.Close()
+
+	// Advance to first entry
+	if !iter.Next() {
+		t.Fatal("Next() should return true")
+	}
+	if string(iter.Key()) != "a" {
+		t.Errorf("key = %s, want a", iter.Key())
+	}
+
+	// Exhaust the iterator
+	if iter.Next() {
+		t.Error("Next() should return false after exhaustion")
+	}
+
+	// After exhaustion, current becomes nil
+	// These should return safe defaults
+	if iter.Key() != nil {
+		t.Error("Key() after exhaustion should be nil")
+	}
+	if iter.Value().Type != 0 {
+		t.Error("Value() after exhaustion should be zero")
+	}
+	if iter.Entry().Key != nil {
+		t.Error("Entry() after exhaustion should be zero")
+	}
+	if iter.Valid() {
+		t.Error("Valid() after exhaustion should be false")
+	}
+
+	// Calling Next() again should still return false
+	if iter.Next() {
+		t.Error("Next() should return false when already exhausted")
+	}
+}
+
+func TestScanPrefix(t *testing.T) {
+	dir := t.TempDir()
+
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Insert keys with different prefixes
+	testData := []struct {
+		key   string
+		value int64
+	}{
+		{"user:1:name", 1},
+		{"user:1:email", 2},
+		{"user:2:name", 3},
+		{"user:2:email", 4},
+		{"order:100", 5},
+		{"order:101", 6},
+		{"product:abc", 7},
+	}
+
+	for _, d := range testData {
+		if err := store.PutInt64([]byte(d.key), d.value); err != nil {
+			t.Fatalf("PutInt64 failed: %v", err)
+		}
+	}
+
+	// Test scanning prefix "user:1:"
+	var results []string
+	err = store.ScanPrefix([]byte("user:1:"), func(key []byte, value Value) bool {
+		results = append(results, string(key))
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Errorf("expected 2 results for user:1:, got %d: %v", len(results), results)
+	}
+
+	// Test scanning prefix "user:"
+	results = nil
+	err = store.ScanPrefix([]byte("user:"), func(key []byte, value Value) bool {
+		results = append(results, string(key))
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+
+	if len(results) != 4 {
+		t.Errorf("expected 4 results for user:, got %d: %v", len(results), results)
+	}
+
+	// Test scanning prefix "order:"
+	results = nil
+	err = store.ScanPrefix([]byte("order:"), func(key []byte, value Value) bool {
+		results = append(results, string(key))
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Errorf("expected 2 results for order:, got %d: %v", len(results), results)
+	}
+
+	// Test scanning non-existent prefix
+	results = nil
+	err = store.ScanPrefix([]byte("nonexistent:"), func(key []byte, value Value) bool {
+		results = append(results, string(key))
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+
+	if len(results) != 0 {
+		t.Errorf("expected 0 results for nonexistent:, got %d", len(results))
+	}
+
+	// Test early termination
+	count := 0
+	err = store.ScanPrefix([]byte("user:"), func(key []byte, value Value) bool {
+		count++
+		return count < 2 // Stop after 2
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+
+	if count != 2 {
+		t.Errorf("expected callback called 2 times, got %d", count)
+	}
+}
+
+func TestScanPrefixAcrossLevels(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 1024 // Small memtable to force flushes
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Insert keys in batches with flushes
+	for i := 0; i < 50; i++ {
+		key := fmt.Sprintf("key:%03d", i)
+		if err := store.PutInt64([]byte(key), int64(i)); err != nil {
+			t.Fatalf("PutInt64 failed: %v", err)
+		}
+	}
+	store.Flush()
+
+	for i := 50; i < 100; i++ {
+		key := fmt.Sprintf("key:%03d", i)
+		if err := store.PutInt64([]byte(key), int64(i)); err != nil {
+			t.Fatalf("PutInt64 failed: %v", err)
+		}
+	}
+	store.Flush()
+
+	// Update some keys (creates duplicates across levels)
+	for i := 25; i < 75; i++ {
+		key := fmt.Sprintf("key:%03d", i)
+		if err := store.PutInt64([]byte(key), int64(i*10)); err != nil {
+			t.Fatalf("PutInt64 failed: %v", err)
+		}
+	}
+
+	// Scan all keys with prefix "key:"
+	var results []string
+	var values []int64
+	err = store.ScanPrefix([]byte("key:"), func(key []byte, value Value) bool {
+		results = append(results, string(key))
+		values = append(values, value.Int64)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+
+	if len(results) != 100 {
+		t.Errorf("expected 100 results, got %d", len(results))
+	}
+
+	// Verify keys are sorted
+	for i := 1; i < len(results); i++ {
+		if results[i] <= results[i-1] {
+			t.Errorf("keys not sorted: %s <= %s", results[i], results[i-1])
+		}
+	}
+
+	// Verify updated values (keys 25-74 should have value*10)
+	for i, key := range results {
+		var keyNum int
+		fmt.Sscanf(key, "key:%d", &keyNum)
+		expectedValue := int64(keyNum)
+		if keyNum >= 25 && keyNum < 75 {
+			expectedValue = int64(keyNum * 10)
+		}
+		if values[i] != expectedValue {
+			t.Errorf("key %s: value = %d, want %d", key, values[i], expectedValue)
+		}
+	}
+}
+
+func TestConvenienceFunctionsErrorPath(t *testing.T) {
+	dir := t.TempDir()
+
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Test error path for each convenience function with nonexistent key
+	_, err = store.GetString([]byte("nonexistent"))
+	if err != ErrKeyNotFound {
+		t.Errorf("GetString should return ErrKeyNotFound, got %v", err)
+	}
+
+	_, err = store.GetBytes([]byte("nonexistent"))
+	if err != ErrKeyNotFound {
+		t.Errorf("GetBytes should return ErrKeyNotFound, got %v", err)
+	}
+
+	_, err = store.GetInt64([]byte("nonexistent"))
+	if err != ErrKeyNotFound {
+		t.Errorf("GetInt64 should return ErrKeyNotFound, got %v", err)
+	}
+
+	_, err = store.GetFloat64([]byte("nonexistent"))
+	if err != ErrKeyNotFound {
+		t.Errorf("GetFloat64 should return ErrKeyNotFound, got %v", err)
+	}
+
+	_, err = store.GetBool([]byte("nonexistent"))
+	if err != ErrKeyNotFound {
+		t.Errorf("GetBool should return ErrKeyNotFound, got %v", err)
 	}
 }

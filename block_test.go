@@ -2,6 +2,7 @@ package tinykvs
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 )
 
@@ -193,10 +194,9 @@ func TestDecodeBlockNoVerification(t *testing.T) {
 	// Just corrupt the checksum in footer
 	data[len(data)-BlockFooterSize] ^= 0xFF
 
-	// Should not error when not verifying
-	_, err = DecodeBlock(data, false)
-	// This might still error if the corruption affects decompression
-	// but checksum specifically should not be checked
+	// Should not error when not verifying checksum
+	// (may still fail if corruption affects decompression, but that's OK)
+	_, _ = DecodeBlock(data, false)
 }
 
 func TestDecodeBlockInvalidData(t *testing.T) {
@@ -204,6 +204,44 @@ func TestDecodeBlockInvalidData(t *testing.T) {
 	_, err := DecodeBlock([]byte{1, 2, 3}, true)
 	if err != ErrCorruptedData {
 		t.Errorf("expected ErrCorruptedData for short data, got %v", err)
+	}
+}
+
+func TestDecodeBlockCompressedSizeMismatch(t *testing.T) {
+	builder := NewBlockBuilder(4096)
+	builder.Add([]byte("key"), []byte("value"))
+
+	data, err := builder.Build(BlockTypeData, 1)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Corrupt the compressedSize field in footer (last 12 bytes: checksum, uncompressed, compressed)
+	// compressed size is at offset len(data)-4
+	origCompressedSize := binary.LittleEndian.Uint32(data[len(data)-4:])
+	binary.LittleEndian.PutUint32(data[len(data)-4:], origCompressedSize+100) // make it wrong
+
+	_, err = DecodeBlock(data, false)
+	if err != ErrCorruptedData {
+		t.Errorf("expected ErrCorruptedData for compressed size mismatch, got %v", err)
+	}
+}
+
+func TestDecodeBlockChecksumMismatch(t *testing.T) {
+	builder := NewBlockBuilder(4096)
+	builder.Add([]byte("key"), []byte("value"))
+
+	data, err := builder.Build(BlockTypeData, 1)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Corrupt the checksum (first 4 bytes of footer, at len(data)-12)
+	data[len(data)-BlockFooterSize] ^= 0xFF
+
+	_, err = DecodeBlock(data, true) // with verification
+	if err != ErrChecksumMismatch {
+		t.Errorf("expected ErrChecksumMismatch, got %v", err)
 	}
 }
 

@@ -22,8 +22,9 @@ type skiplistNode struct {
 type Memtable struct {
 	head   *skiplistNode
 	height int
-	size   int64 // Approximate size in bytes (atomic)
-	count  int64 // Number of entries (atomic)
+	size   int64  // Approximate size in bytes (atomic)
+	count  int64  // Number of entries (atomic)
+	minSeq uint64 // Minimum sequence number in this memtable (atomic)
 
 	mu  sync.RWMutex
 	rng *rand.Rand
@@ -94,6 +95,9 @@ func (m *Memtable) Put(key []byte, value Value, seq uint64) {
 
 	atomic.AddInt64(&m.size, entrySize)
 	atomic.AddInt64(&m.count, 1)
+
+	// Track minimum sequence (set only on first insert)
+	atomic.CompareAndSwapUint64(&m.minSeq, 0, seq)
 }
 
 // Get retrieves an entry by key.
@@ -134,6 +138,11 @@ func (m *Memtable) Size() int64 {
 // Count returns the number of entries.
 func (m *Memtable) Count() int64 {
 	return atomic.LoadInt64(&m.count)
+}
+
+// MinSequence returns the minimum sequence number in this memtable.
+func (m *Memtable) MinSequence() uint64 {
+	return atomic.LoadUint64(&m.minSeq)
 }
 
 // randomHeight generates a random height for a new node.

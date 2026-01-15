@@ -139,10 +139,54 @@ func TestIndexSerializeDeserialize(t *testing.T) {
 }
 
 func TestIndexDeserializeInvalid(t *testing.T) {
-	// Too short
-	_, err := DeserializeIndex([]byte{1, 2, 3})
-	if err != ErrCorruptedData {
-		t.Errorf("expected ErrCorruptedData, got %v", err)
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{"too short", []byte{1, 2, 3}},
+		{"minkey length truncated", []byte{0, 0, 0, 0, 0, 0, 0, 0}}, // numKeys but no minKeyLen
+		{"minkey data truncated", []byte{0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0}}, // claims 10 byte minkey
+		{"maxkey length truncated", []byte{
+			0, 0, 0, 0, 0, 0, 0, 0, // numKeys
+			1, 0, 0, 0, // minKeyLen = 1
+			'a',        // minKey
+		}}, // no maxKeyLen
+		{"maxkey data truncated", []byte{
+			0, 0, 0, 0, 0, 0, 0, 0, // numKeys
+			1, 0, 0, 0, // minKeyLen = 1
+			'a',        // minKey
+			10, 0, 0, 0, // maxKeyLen = 10 (but only 0 bytes follow)
+		}},
+		{"numEntries truncated", []byte{
+			0, 0, 0, 0, 0, 0, 0, 0, // numKeys
+			1, 0, 0, 0, 'a', // minKey
+			1, 0, 0, 0, 'z', // maxKey
+			// no numEntries
+		}},
+		{"entry keyLen truncated", []byte{
+			0, 0, 0, 0, 0, 0, 0, 0, // numKeys
+			1, 0, 0, 0, 'a', // minKey
+			1, 0, 0, 0, 'z', // maxKey
+			1, 0, 0, 0, // numEntries = 1
+			// no entry keyLen
+		}},
+		{"entry data truncated", []byte{
+			0, 0, 0, 0, 0, 0, 0, 0, // numKeys
+			1, 0, 0, 0, 'a', // minKey
+			1, 0, 0, 0, 'z', // maxKey
+			1, 0, 0, 0, // numEntries = 1
+			3, 0, 0, 0, // keyLen = 3
+			'k', 'e', 'y', // key but no offset/size (needs 12 more bytes)
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := DeserializeIndex(tt.data)
+			if err != ErrCorruptedData {
+				t.Errorf("expected ErrCorruptedData, got %v", err)
+			}
+		})
 	}
 }
 

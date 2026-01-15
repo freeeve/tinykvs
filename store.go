@@ -491,3 +491,19 @@ func (s *Store) GetBytes(key []byte) ([]byte, error) {
 	}
 	return val.GetBytes(), nil
 }
+
+// ScanPrefix iterates over all keys with the given prefix in sorted order.
+// The callback receives the key and value bytes directly (zero-copy).
+// Return false from the callback to stop iteration.
+// Keys are deduplicated (newest version wins) and tombstones are skipped.
+func (s *Store) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool) error {
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return ErrStoreClosed
+	}
+	reader := s.reader
+	s.mu.RUnlock()
+
+	return reader.ScanPrefix(prefix, fn)
+}

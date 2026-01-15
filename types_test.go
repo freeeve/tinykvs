@@ -163,3 +163,117 @@ func BenchmarkDecodeValue(b *testing.B) {
 		DecodeValue(encoded)
 	}
 }
+
+func TestDecodeValueZeroCopy(t *testing.T) {
+	tests := []struct {
+		name  string
+		value Value
+	}{
+		{"int64", Int64Value(12345)},
+		{"float64", Float64Value(3.14159)},
+		{"bool true", BoolValue(true)},
+		{"bool false", BoolValue(false)},
+		{"string", StringValue("hello world")},
+		{"bytes", BytesValue([]byte{0x01, 0x02, 0x03})},
+		{"tombstone", TombstoneValue()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			encoded := EncodeValue(tt.value)
+			decoded, consumed, err := DecodeValueZeroCopy(encoded)
+			if err != nil {
+				t.Fatalf("DecodeValueZeroCopy failed: %v", err)
+			}
+			if consumed != len(encoded) {
+				t.Errorf("consumed %d bytes, encoded %d bytes", consumed, len(encoded))
+			}
+			if decoded.Type != tt.value.Type {
+				t.Errorf("type mismatch: got %d, want %d", decoded.Type, tt.value.Type)
+			}
+		})
+	}
+}
+
+func TestDecodeValueErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{"empty", []byte{}},
+		{"int64 truncated", []byte{byte(ValueTypeInt64), 1, 2, 3}},           // needs 9 bytes
+		{"float64 truncated", []byte{byte(ValueTypeFloat64), 1, 2, 3, 4}},   // needs 9 bytes
+		{"bool truncated", []byte{byte(ValueTypeBool)}},                      // needs 2 bytes
+		{"string no flag", []byte{byte(ValueTypeString)}},                    // needs flag byte
+		{"string inline truncated", []byte{byte(ValueTypeString), 0, 10, 0, 0, 0}}, // claims 10 bytes
+		{"invalid type", []byte{99}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := DecodeValue(tt.data)
+			if err != ErrInvalidValue {
+				t.Errorf("expected ErrInvalidValue, got %v", err)
+			}
+		})
+	}
+}
+
+func TestDecodeValueZeroCopyErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{"empty", []byte{}},
+		{"int64 truncated", []byte{byte(ValueTypeInt64), 1, 2, 3}},
+		{"string pointer truncated", []byte{byte(ValueTypeString), 1, 1, 2}}, // pointer flag but not enough data
+		{"invalid type", []byte{99}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := DecodeValueZeroCopy(tt.data)
+			if err != ErrInvalidValue {
+				t.Errorf("expected ErrInvalidValue, got %v", err)
+			}
+		})
+	}
+}
+
+func TestDecodeEntryErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{"too short for key len", []byte{1, 2}},
+		{"key len exceeds data", []byte{10, 0, 0, 0, 1, 2, 3}}, // claims 10 byte key
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := DecodeEntry(tt.data)
+			if err != ErrInvalidValue {
+				t.Errorf("expected ErrInvalidValue, got %v", err)
+			}
+		})
+	}
+}
+
+func TestValueStringAndGetBytes(t *testing.T) {
+	// Test String() on non-string types
+	iv := Int64Value(42)
+	if iv.String() != "" {
+		t.Errorf("Int64Value.String() should return empty, got %q", iv.String())
+	}
+
+	// Test GetBytes() on non-bytes types
+	if iv.GetBytes() != nil {
+		t.Error("Int64Value.GetBytes() should return nil")
+	}
+
+	// Test GetBytes on string type
+	sv := StringValue("test")
+	if string(sv.GetBytes()) != "test" {
+		t.Errorf("StringValue.GetBytes() = %q, want test", sv.GetBytes())
+	}
+}

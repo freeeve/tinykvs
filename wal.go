@@ -72,7 +72,11 @@ func OpenWAL(path string, syncMode WALSyncMode) (*WAL, error) {
 func (w *WAL) Append(entry WALEntry) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	return w.appendUnlocked(entry)
+}
 
+// appendUnlocked is the internal unlocked version of Append.
+func (w *WAL) appendUnlocked(entry WALEntry) error {
 	// Encode entry
 	data := w.encodeEntry(entry)
 
@@ -173,6 +177,22 @@ func (w *WAL) Recover() ([]WALEntry, error) {
 		return nil, err
 	}
 
+	entries, err := w.recoverUnlocked()
+	if err != nil {
+		return nil, err
+	}
+
+	// Seek to end for appending
+	if _, err := w.file.Seek(0, io.SeekEnd); err != nil {
+		return nil, err
+	}
+
+	return entries, nil
+}
+
+// recoverUnlocked is the internal unlocked version of Recover.
+// Caller must hold w.mu and position the file at the start.
+func (w *WAL) recoverUnlocked() ([]WALEntry, error) {
 	var entries []WALEntry
 	var fragmentBuffer []byte
 
@@ -236,11 +256,6 @@ func (w *WAL) Recover() ([]WALEntry, error) {
 		}
 	}
 
-	// Seek to end for appending
-	if _, err := w.file.Seek(0, io.SeekEnd); err != nil {
-		return nil, err
-	}
-
 	return entries, nil
 }
 
@@ -266,6 +281,50 @@ func (w *WAL) Truncate() error {
 	_, err := w.file.Seek(0, io.SeekStart)
 	w.blockPos = 0
 	return err
+}
+
+// TruncateBefore removes WAL entries with sequence < minSeq.
+// This is used for partial WAL cleanup when some memtables are still pending flush.
+func (w *WAL) TruncateBefore(minSeq uint64) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Read all entries
+	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+
+	entries, err := w.recoverUnlocked()
+	if err != nil {
+		return err
+	}
+
+	// Filter entries to keep
+	var kept []WALEntry
+	for _, e := range entries {
+		if e.Sequence >= minSeq {
+			kept = append(kept, e)
+		}
+	}
+
+	// Truncate and rewrite
+	if err := w.file.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	w.blockPos = 0
+
+	// Rewrite kept entries
+	for _, e := range kept {
+		if err := w.appendUnlocked(e); err != nil {
+			return err
+		}
+	}
+
+	// Sync to ensure durability
+	return w.file.Sync()
 }
 
 // encodeEntry serializes a WAL entry into the reusable buffer.

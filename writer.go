@@ -211,10 +211,21 @@ func (w *Writer) flushMemtable(mt *Memtable) error {
 	w.flushMu.Unlock()
 	w.reader.RemoveImmutable(mt)
 
-	// Truncate WAL if all immutables are flushed
+	// Truncate WAL entries that have been flushed
 	w.flushMu.Lock()
 	if len(w.immutables) == 0 {
+		// All flushed, fully truncate
 		w.wal.Truncate()
+	} else {
+		// Find minimum sequence of remaining immutables
+		minSeq := w.immutables[0].MinSequence()
+		for _, imm := range w.immutables[1:] {
+			if seq := imm.MinSequence(); seq < minSeq {
+				minSeq = seq
+			}
+		}
+		// Truncate entries before the oldest unflushed memtable
+		w.wal.TruncateBefore(minSeq)
 	}
 	w.flushMu.Unlock()
 

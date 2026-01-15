@@ -3,9 +3,14 @@ package tinykvs
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 )
+
+func writeFile(path string, data []byte) error {
+	return os.WriteFile(path, data, 0644)
+}
 
 func TestSSTableWriteRead(t *testing.T) {
 	dir := t.TempDir()
@@ -399,6 +404,37 @@ func TestSSTableSize(t *testing.T) {
 
 	if sst.Size() == 0 {
 		t.Error("Size should be > 0")
+	}
+}
+
+func TestOpenSSTableInvalid(t *testing.T) {
+	dir := t.TempDir()
+
+	// Test non-existent file
+	_, err := OpenSSTable(1, filepath.Join(dir, "nonexistent.sst"))
+	if err == nil {
+		t.Error("OpenSSTable should fail for non-existent file")
+	}
+
+	// Test file too small
+	smallPath := filepath.Join(dir, "small.sst")
+	if err := writeFile(smallPath, []byte("too small")); err != nil {
+		t.Fatalf("Failed to create small file: %v", err)
+	}
+	_, err = OpenSSTable(1, smallPath)
+	if err != ErrInvalidSSTable {
+		t.Errorf("OpenSSTable should fail with ErrInvalidSSTable for small file, got %v", err)
+	}
+
+	// Test file with wrong magic
+	wrongMagicPath := filepath.Join(dir, "wrongmagic.sst")
+	wrongMagic := make([]byte, SSTableFooterSize)
+	if err := writeFile(wrongMagicPath, wrongMagic); err != nil {
+		t.Fatalf("Failed to create wrong magic file: %v", err)
+	}
+	_, err = OpenSSTable(1, wrongMagicPath)
+	if err != ErrInvalidSSTable {
+		t.Errorf("OpenSSTable should fail with ErrInvalidSSTable for wrong magic, got %v", err)
 	}
 }
 
