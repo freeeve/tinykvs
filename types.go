@@ -1,6 +1,7 @@
 package tinykvs
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"math"
@@ -65,26 +66,9 @@ var (
 
 // CompareKeys performs lexicographic comparison of two keys.
 // Returns -1 if a < b, 0 if a == b, 1 if a > b.
+// Uses bytes.Compare which is assembly-optimized on most platforms.
 func CompareKeys(a, b []byte) int {
-	minLen := len(a)
-	if len(b) < minLen {
-		minLen = len(b)
-	}
-	for i := 0; i < minLen; i++ {
-		if a[i] < b[i] {
-			return -1
-		}
-		if a[i] > b[i] {
-			return 1
-		}
-	}
-	if len(a) < len(b) {
-		return -1
-	}
-	if len(a) > len(b) {
-		return 1
-	}
-	return 0
+	return bytes.Compare(a, b)
 }
 
 // EncodedSize returns the serialized size of a value.
@@ -110,37 +94,42 @@ func (v *Value) EncodedSize() int {
 
 // EncodeValue serializes a value to bytes.
 func EncodeValue(v Value) []byte {
-	buf := make([]byte, 0, v.EncodedSize())
-	buf = append(buf, byte(v.Type))
+	return AppendEncodedValue(make([]byte, 0, v.EncodedSize()), v)
+}
+
+// AppendEncodedValue appends the encoded value to dst and returns the result.
+// This avoids allocation when dst has sufficient capacity.
+func AppendEncodedValue(dst []byte, v Value) []byte {
+	dst = append(dst, byte(v.Type))
 
 	switch v.Type {
 	case ValueTypeInt64:
-		buf = binary.LittleEndian.AppendUint64(buf, uint64(v.Int64))
+		dst = binary.LittleEndian.AppendUint64(dst, uint64(v.Int64))
 	case ValueTypeFloat64:
-		buf = binary.LittleEndian.AppendUint64(buf, math.Float64bits(v.Float64))
+		dst = binary.LittleEndian.AppendUint64(dst, math.Float64bits(v.Float64))
 	case ValueTypeBool:
 		if v.Bool {
-			buf = append(buf, 1)
+			dst = append(dst, 1)
 		} else {
-			buf = append(buf, 0)
+			dst = append(dst, 0)
 		}
 	case ValueTypeString, ValueTypeBytes:
 		if v.Pointer != nil {
-			buf = append(buf, 1) // Flag: 1 = pointer
-			buf = binary.LittleEndian.AppendUint32(buf, v.Pointer.FileID)
-			buf = binary.LittleEndian.AppendUint32(buf, v.Pointer.BlockOffset)
-			buf = binary.LittleEndian.AppendUint16(buf, v.Pointer.DataOffset)
-			buf = binary.LittleEndian.AppendUint32(buf, v.Pointer.Length)
+			dst = append(dst, 1) // Flag: 1 = pointer
+			dst = binary.LittleEndian.AppendUint32(dst, v.Pointer.FileID)
+			dst = binary.LittleEndian.AppendUint32(dst, v.Pointer.BlockOffset)
+			dst = binary.LittleEndian.AppendUint16(dst, v.Pointer.DataOffset)
+			dst = binary.LittleEndian.AppendUint32(dst, v.Pointer.Length)
 		} else {
-			buf = append(buf, 0) // Flag: 0 = inline data
-			buf = binary.LittleEndian.AppendUint32(buf, uint32(len(v.Bytes)))
-			buf = append(buf, v.Bytes...)
+			dst = append(dst, 0) // Flag: 0 = inline data
+			dst = binary.LittleEndian.AppendUint32(dst, uint32(len(v.Bytes)))
+			dst = append(dst, v.Bytes...)
 		}
 	case ValueTypeTombstone:
 		// No additional data
 	}
 
-	return buf
+	return dst
 }
 
 // DecodeValue deserializes a value from bytes.

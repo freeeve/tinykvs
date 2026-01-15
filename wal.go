@@ -270,10 +270,8 @@ func (w *WAL) Truncate() error {
 
 // encodeEntry serializes a WAL entry into the reusable buffer.
 func (w *WAL) encodeEntry(entry WALEntry) []byte {
-	valueBytes := EncodeValue(entry.Value)
-
 	// Format: op(1) + seq(8) + key_len(4) + key + value
-	size := 1 + 8 + 4 + len(entry.Key) + len(valueBytes)
+	size := 1 + 8 + 4 + len(entry.Key) + entry.Value.EncodedSize()
 
 	// Reuse buffer, grow if needed
 	if cap(w.encodeBuf) < size {
@@ -285,7 +283,7 @@ func (w *WAL) encodeEntry(entry WALEntry) []byte {
 	buf = binary.LittleEndian.AppendUint64(buf, entry.Sequence)
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(entry.Key)))
 	buf = append(buf, entry.Key...)
-	buf = append(buf, valueBytes...)
+	buf = AppendEncodedValue(buf, entry.Value)
 
 	w.encodeBuf = buf
 	return buf

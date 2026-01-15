@@ -73,19 +73,14 @@ func (idx *Index) Search(key []byte) int {
 		return -1
 	}
 
-	// Key is less than all keys in this SSTable
-	if CompareKeys(key, idx.MinKey) < 0 {
-		return -1
-	}
-
-	// Key is greater than all keys in this SSTable
+	// Quick bounds check for keys beyond max
 	if CompareKeys(key, idx.MaxKey) > 0 {
 		return -1
 	}
 
 	// Binary search for the last entry with Key <= target
 	lo, hi := 0, len(idx.Entries)-1
-	result := 0
+	result := -1
 
 	for lo <= hi {
 		mid := (lo + hi) / 2
