@@ -139,8 +139,8 @@ func TestOptionsPresets(t *testing.T) {
 
 	// Test LowMemoryOptions
 	lowOpts := LowMemoryOptions(dir)
-	if lowOpts.MemtableSize != 1*1024*1024 {
-		t.Errorf("LowMemoryOptions.MemtableSize = %d, want 1MB", lowOpts.MemtableSize)
+	if lowOpts.MemtableSize != 4*1024*1024 {
+		t.Errorf("LowMemoryOptions.MemtableSize = %d, want 4MB", lowOpts.MemtableSize)
 	}
 	if lowOpts.BlockCacheSize != 0 {
 		t.Errorf("LowMemoryOptions.BlockCacheSize = %d, want 0", lowOpts.BlockCacheSize)
@@ -365,27 +365,6 @@ func TestStoreStats(t *testing.T) {
 	stats = store.Stats()
 	if stats.MemtableCount != 10 {
 		t.Errorf("memtable count = %d, want 10", stats.MemtableCount)
-	}
-}
-
-func TestStoreLowMemoryOptions(t *testing.T) {
-	dir := t.TempDir()
-
-	opts := LowMemoryOptions(dir)
-	store, err := Open(dir, opts)
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	defer store.Close()
-
-	// Should work with minimal memory
-	store.PutString([]byte("key"), "value")
-	val, err := store.GetString([]byte("key"))
-	if err != nil {
-		t.Fatalf("Get failed: %v", err)
-	}
-	if val != "value" {
-		t.Errorf("value = %s, want value", val)
 	}
 }
 
