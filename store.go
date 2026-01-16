@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 )
 
 // Store is the main key-value store.
@@ -53,7 +52,7 @@ func Open(path string, opts Options) (*Store, error) {
 		return nil, fmt.Errorf("failed to open lock file: %w", err)
 	}
 
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := acquireLock(lockFile); err != nil {
 		lockFile.Close()
 		return nil, ErrStoreLocked
 	}
@@ -161,31 +160,6 @@ func (s *Store) Put(key []byte, value Value) error {
 	return s.writer.Put(key, value)
 }
 
-// PutInt64 stores an int64 value.
-func (s *Store) PutInt64(key []byte, value int64) error {
-	return s.Put(key, Int64Value(value))
-}
-
-// PutFloat64 stores a float64 value.
-func (s *Store) PutFloat64(key []byte, value float64) error {
-	return s.Put(key, Float64Value(value))
-}
-
-// PutBool stores a bool value.
-func (s *Store) PutBool(key []byte, value bool) error {
-	return s.Put(key, BoolValue(value))
-}
-
-// PutString stores a string value.
-func (s *Store) PutString(key []byte, value string) error {
-	return s.Put(key, StringValue(value))
-}
-
-// PutBytes stores a byte slice value.
-func (s *Store) PutBytes(key []byte, value []byte) error {
-	return s.Put(key, BytesValue(value))
-}
-
 // Delete removes a key.
 func (s *Store) Delete(key []byte) error {
 	s.writeMu.Lock()
@@ -196,263 +170,6 @@ func (s *Store) Delete(key []byte) error {
 	}
 
 	return s.writer.Delete(key)
-}
-
-// Batch accumulates multiple operations to be applied atomically.
-type Batch struct {
-	ops []batchOp
-}
-
-type batchOp struct {
-	key    []byte
-	value  Value
-	delete bool
-}
-
-// NewBatch creates a new batch for atomic writes.
-func NewBatch() *Batch {
-	return &Batch{}
-}
-
-// Put adds a put operation to the batch.
-func (b *Batch) Put(key []byte, value Value) {
-	// Copy key to avoid issues if caller reuses buffer
-	keyCopy := make([]byte, len(key))
-	copy(keyCopy, key)
-	b.ops = append(b.ops, batchOp{key: keyCopy, value: value, delete: false})
-}
-
-// Delete adds a delete operation to the batch.
-func (b *Batch) Delete(key []byte) {
-	keyCopy := make([]byte, len(key))
-	copy(keyCopy, key)
-	b.ops = append(b.ops, batchOp{key: keyCopy, delete: true})
-}
-
-// PutString adds a string put operation.
-func (b *Batch) PutString(key []byte, value string) {
-	b.Put(key, StringValue(value))
-}
-
-// PutInt64 adds an int64 put operation.
-func (b *Batch) PutInt64(key []byte, value int64) {
-	b.Put(key, Int64Value(value))
-}
-
-// PutBytes adds a bytes put operation.
-func (b *Batch) PutBytes(key []byte, value []byte) {
-	b.Put(key, BytesValue(value))
-}
-
-// Len returns the number of operations in the batch.
-func (b *Batch) Len() int {
-	return len(b.ops)
-}
-
-// Reset clears the batch for reuse.
-func (b *Batch) Reset() {
-	b.ops = b.ops[:0]
-}
-
-// WriteBatch atomically applies all operations in the batch.
-// All operations are written to wal together before applying to memtable.
-func (s *Store) WriteBatch(batch *Batch) error {
-	if batch == nil || len(batch.ops) == 0 {
-		return nil
-	}
-
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
-	if s.closed {
-		return ErrStoreClosed
-	}
-
-	return s.writer.WriteBatch(batch.ops)
-}
-
-// PutIfNotExists stores a value only if the key doesn't exist.
-// Returns ErrKeyExists if the key already exists.
-func (s *Store) PutIfNotExists(key []byte, value Value) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
-	if s.closed {
-		return ErrStoreClosed
-	}
-
-	// Check if key exists
-	_, err := s.reader.Get(key)
-	if err == nil {
-		return ErrKeyExists
-	}
-	if err != ErrKeyNotFound {
-		return err
-	}
-
-	return s.writer.Put(key, value)
-}
-
-// PutIfEquals stores a value only if the current value equals expected.
-// Returns ErrConditionFailed if values don't match, ErrKeyNotFound if key doesn't exist.
-func (s *Store) PutIfEquals(key []byte, value Value, expected Value) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
-	if s.closed {
-		return ErrStoreClosed
-	}
-
-	// Get current value
-	current, err := s.reader.Get(key)
-	if err != nil {
-		return err
-	}
-
-	// Compare values
-	if !valuesEqual(current, expected) {
-		return ErrConditionFailed
-	}
-
-	return s.writer.Put(key, value)
-}
-
-// Increment atomically adds delta to an int64 value and returns the new value.
-// If key doesn't exist, it's treated as 0.
-// Returns error if existing value is not an int64.
-func (s *Store) Increment(key []byte, delta int64) (int64, error) {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
-	if s.closed {
-		return 0, ErrStoreClosed
-	}
-
-	// Get current value
-	var current int64
-	val, err := s.reader.Get(key)
-	if err == nil {
-		if val.Type != ValueTypeInt64 {
-			return 0, ErrTypeMismatch
-		}
-		current = val.Int64
-	} else if err != ErrKeyNotFound {
-		return 0, err
-	}
-
-	// Compute new value
-	newVal := current + delta
-
-	// Write new value
-	if err := s.writer.Put(key, Int64Value(newVal)); err != nil {
-		return 0, err
-	}
-
-	return newVal, nil
-}
-
-// DeleteRange deletes all keys in the range [start, end).
-// This is more efficient than deleting keys one by one.
-// Returns the number of keys deleted.
-func (s *Store) DeleteRange(start, end []byte) (int64, error) {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
-	if s.closed {
-		return 0, ErrStoreClosed
-	}
-
-	// Collect keys in range
-	var keys [][]byte
-	err := s.reader.ScanPrefix(nil, func(key []byte, _ Value) bool {
-		if CompareKeys(key, start) >= 0 && CompareKeys(key, end) < 0 {
-			keyCopy := make([]byte, len(key))
-			copy(keyCopy, key)
-			keys = append(keys, keyCopy)
-		}
-		// Stop if we've passed the end
-		return CompareKeys(key, end) < 0
-	})
-	if err != nil {
-		return 0, err
-	}
-
-	// Delete all keys in batch
-	if len(keys) == 0 {
-		return 0, nil
-	}
-
-	batch := &Batch{}
-	for _, key := range keys {
-		batch.Delete(key)
-	}
-
-	if err := s.writer.WriteBatch(batch.ops); err != nil {
-		return 0, err
-	}
-
-	return int64(len(keys)), nil
-}
-
-// DeletePrefix deletes all keys with the given prefix.
-// Returns the number of keys deleted.
-func (s *Store) DeletePrefix(prefix []byte) (int64, error) {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
-	if s.closed {
-		return 0, ErrStoreClosed
-	}
-
-	// Collect keys with prefix
-	var keys [][]byte
-	// Use reader directly since we already hold the lock
-	err := s.reader.ScanPrefix(prefix, func(key []byte, _ Value) bool {
-		keyCopy := make([]byte, len(key))
-		copy(keyCopy, key)
-		keys = append(keys, keyCopy)
-		return true
-	})
-	if err != nil {
-		return 0, err
-	}
-
-	if len(keys) == 0 {
-		return 0, nil
-	}
-
-	// Delete all keys in batch
-	batch := &Batch{}
-	for _, key := range keys {
-		batch.Delete(key)
-	}
-
-	if err := s.writer.WriteBatch(batch.ops); err != nil {
-		return 0, err
-	}
-
-	return int64(len(keys)), nil
-}
-
-// valuesEqual compares two values for equality.
-func valuesEqual(a, b Value) bool {
-	if a.Type != b.Type {
-		return false
-	}
-	switch a.Type {
-	case ValueTypeInt64:
-		return a.Int64 == b.Int64
-	case ValueTypeFloat64:
-		return a.Float64 == b.Float64
-	case ValueTypeBool:
-		return a.Bool == b.Bool
-	case ValueTypeString, ValueTypeBytes:
-		return string(a.Bytes) == string(b.Bytes)
-	case ValueTypeTombstone:
-		return true
-	default:
-		return false
-	}
 }
 
 // Flush forces all data to disk.
@@ -519,6 +236,37 @@ func (s *Store) Close() error {
 	return nil
 }
 
+// ScanPrefix iterates over all keys with the given prefix in sorted order.
+// The callback receives the key and value bytes directly (zero-copy).
+// Return false from the callback to stop iteration.
+// Keys are deduplicated (newest version wins) and tombstones are skipped.
+func (s *Store) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool) error {
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return ErrStoreClosed
+	}
+	reader := s.reader
+	s.mu.RUnlock()
+
+	return reader.ScanPrefix(prefix, fn)
+}
+
+// ScanRange iterates over all keys in the range [start, end) in sorted order.
+// The callback receives the key and value bytes directly (zero-copy).
+// Return false from the callback to stop iteration.
+func (s *Store) ScanRange(start, end []byte, fn func(key []byte, value Value) bool) error {
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return ErrStoreClosed
+	}
+	reader := s.reader
+	s.mu.RUnlock()
+
+	return reader.ScanRange(start, end, fn)
+}
+
 // Stats returns store statistics.
 func (s *Store) Stats() StoreStats {
 	s.mu.RLock()
@@ -567,6 +315,47 @@ type LevelStats struct {
 	Size      int64
 	NumKeys   uint64
 }
+
+// KeyLocation describes where a key is stored.
+type KeyLocation struct {
+	Level   int
+	TableID uint32
+}
+
+// FindKey returns the location of a key, or nil if in memtable or not found.
+func (s *Store) FindKey(key []byte) *KeyLocation {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Check each level
+	for level, tables := range s.levels {
+		for _, sst := range tables {
+			// Quick range check
+			if CompareKeys(key, sst.MinKey()) < 0 || CompareKeys(key, sst.MaxKey()) > 0 {
+				continue
+			}
+			// Check bloom filter
+			if sst.BloomFilter != nil && !sst.BloomFilter.MayContain(key) {
+				continue
+			}
+			// Try to get the key
+			_, found, err := sst.Get(key, s.cache, false)
+			if err == nil && found {
+				return &KeyLocation{Level: level, TableID: sst.ID}
+			}
+		}
+	}
+	return nil
+}
+
+// Errors
+var (
+	ErrStoreClosed     = errors.New("store is closed")
+	ErrStoreLocked     = errors.New("store is locked by another process")
+	ErrKeyExists       = errors.New("key already exists")
+	ErrConditionFailed = errors.New("condition failed")
+	ErrTypeMismatch    = errors.New("value type mismatch")
+)
 
 // Internal methods
 
@@ -961,121 +750,8 @@ func (s *Store) replaceTablesAfterCompaction(
 // releaseLock releases the exclusive lock file.
 func (s *Store) releaseLock() {
 	if s.lockFile != nil {
-		syscall.Flock(int(s.lockFile.Fd()), syscall.LOCK_UN)
+		releaseLockFile(s.lockFile)
 		s.lockFile.Close()
 		s.lockFile = nil
 	}
-}
-
-// Errors
-var (
-	ErrStoreClosed     = errors.New("store is closed")
-	ErrStoreLocked     = errors.New("store is locked by another process")
-	ErrKeyExists       = errors.New("key already exists")
-	ErrConditionFailed = errors.New("condition failed")
-	ErrTypeMismatch    = errors.New("value type mismatch")
-)
-
-// Convenience functions for common operations
-
-// GetString retrieves a string value by key.
-func (s *Store) GetString(key []byte) (string, error) {
-	val, err := s.Get(key)
-	if err != nil {
-		return "", err
-	}
-	return val.String(), nil
-}
-
-// GetInt64 retrieves an int64 value by key.
-func (s *Store) GetInt64(key []byte) (int64, error) {
-	val, err := s.Get(key)
-	if err != nil {
-		return 0, err
-	}
-	if val.Type != ValueTypeInt64 {
-		return 0, fmt.Errorf("expected int64, got %d", val.Type)
-	}
-	return val.Int64, nil
-}
-
-// GetFloat64 retrieves a float64 value by key.
-func (s *Store) GetFloat64(key []byte) (float64, error) {
-	val, err := s.Get(key)
-	if err != nil {
-		return 0, err
-	}
-	if val.Type != ValueTypeFloat64 {
-		return 0, fmt.Errorf("expected float64, got %d", val.Type)
-	}
-	return val.Float64, nil
-}
-
-// GetBool retrieves a bool value by key.
-func (s *Store) GetBool(key []byte) (bool, error) {
-	val, err := s.Get(key)
-	if err != nil {
-		return false, err
-	}
-	if val.Type != ValueTypeBool {
-		return false, fmt.Errorf("expected bool, got %d", val.Type)
-	}
-	return val.Bool, nil
-}
-
-// GetBytes retrieves a byte slice value by key.
-func (s *Store) GetBytes(key []byte) ([]byte, error) {
-	val, err := s.Get(key)
-	if err != nil {
-		return nil, err
-	}
-	return val.GetBytes(), nil
-}
-
-// ScanPrefix iterates over all keys with the given prefix in sorted order.
-// The callback receives the key and value bytes directly (zero-copy).
-// Return false from the callback to stop iteration.
-// Keys are deduplicated (newest version wins) and tombstones are skipped.
-func (s *Store) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool) error {
-	s.mu.RLock()
-	if s.closed {
-		s.mu.RUnlock()
-		return ErrStoreClosed
-	}
-	reader := s.reader
-	s.mu.RUnlock()
-
-	return reader.ScanPrefix(prefix, fn)
-}
-
-// KeyLocation describes where a key is stored.
-type KeyLocation struct {
-	Level   int
-	TableID uint32
-}
-
-// FindKey returns the location of a key, or nil if in memtable or not found.
-func (s *Store) FindKey(key []byte) *KeyLocation {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	// Check each level
-	for level, tables := range s.levels {
-		for _, sst := range tables {
-			// Quick range check
-			if CompareKeys(key, sst.MinKey()) < 0 || CompareKeys(key, sst.MaxKey()) > 0 {
-				continue
-			}
-			// Check bloom filter
-			if sst.BloomFilter != nil && !sst.BloomFilter.MayContain(key) {
-				continue
-			}
-			// Try to get the key
-			_, found, err := sst.Get(key, s.cache, false)
-			if err == nil && found {
-				return &KeyLocation{Level: level, TableID: sst.ID}
-			}
-		}
-	}
-	return nil
 }

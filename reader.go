@@ -655,3 +655,439 @@ func (s *sstablePrefixSource) close() {
 		s.block = nil
 	}
 }
+
+// ScanRange iterates over all keys in [start, end) in sorted order.
+// Keys are deduplicated (newest version wins) and tombstones are skipped.
+// Return false from the callback to stop iteration early.
+func (r *reader) ScanRange(start, end []byte, fn func(key []byte, value Value) bool) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// Build a range scanner with all sources
+	scanner := newRangeScanner(start, end, r.cache, r.opts.VerifyChecksums)
+
+	// Add memtable (highest priority - index 0)
+	scanner.addMemtable(r.memtable, 0)
+
+	// Add immutable memtables (newest first)
+	for i := len(r.immutables) - 1; i >= 0; i-- {
+		scanner.addMemtable(r.immutables[i], len(r.immutables)-i)
+	}
+
+	// Add SSTable levels
+	baseIdx := len(r.immutables) + 1
+	for level := 0; level < len(r.levels); level++ {
+		tables := r.levels[level]
+		if level == 0 {
+			// L0: add all tables that may overlap with range (newest first)
+			for i := len(tables) - 1; i >= 0; i-- {
+				if rangeOverlaps(start, end, tables[i].MinKey(), tables[i].MaxKey()) {
+					scanner.addSSTable(tables[i], baseIdx)
+					baseIdx++
+				}
+			}
+		} else {
+			// L1+: add tables that overlap with range
+			for _, t := range tables {
+				if rangeOverlaps(start, end, t.MinKey(), t.MaxKey()) {
+					scanner.addSSTable(t, baseIdx)
+					baseIdx++
+				}
+			}
+		}
+	}
+
+	scanner.init()
+
+	// Iterate and call callback
+	var lastKey []byte
+	for scanner.next() {
+		entry := scanner.entry()
+
+		// Skip duplicates (newer version already seen)
+		if lastKey != nil && CompareKeys(entry.Key, lastKey) == 0 {
+			continue
+		}
+		lastKey = entry.Key
+
+		// Skip tombstones
+		if entry.Value.IsTombstone() {
+			continue
+		}
+
+		// Check if we've passed the end
+		if CompareKeys(entry.Key, end) >= 0 {
+			break
+		}
+
+		if !fn(entry.Key, entry.Value) {
+			break
+		}
+	}
+
+	scanner.close()
+	return nil
+}
+
+// rangeOverlaps returns true if [start, end) overlaps with [minKey, maxKey].
+func rangeOverlaps(start, end, minKey, maxKey []byte) bool {
+	// Range overlaps if start < maxKey AND end > minKey
+	// i.e., NOT (start >= maxKey OR end <= minKey)
+	if CompareKeys(start, maxKey) > 0 {
+		return false
+	}
+	if CompareKeys(end, minKey) <= 0 {
+		return false
+	}
+	return true
+}
+
+// rangeScanner merges entries from memtables and SSTables for range scanning.
+type rangeScanner struct {
+	start   []byte
+	end     []byte
+	cache   *lruCache
+	verify  bool
+	heap    rangeHeap
+	current Entry
+}
+
+type rangeHeapEntry struct {
+	entry    Entry
+	priority int // lower = newer/higher priority
+	source   rangeSource
+}
+
+type rangeSource interface {
+	next() bool
+	entry() Entry
+	close()
+}
+
+type rangeHeap []rangeHeapEntry
+
+func (h rangeHeap) less(i, j int) bool {
+	cmp := CompareKeys(h[i].entry.Key, h[j].entry.Key)
+	if cmp != 0 {
+		return cmp < 0
+	}
+	return h[i].priority < h[j].priority
+}
+
+func (h *rangeHeap) push(x rangeHeapEntry) {
+	*h = append(*h, x)
+	h.up(len(*h) - 1)
+}
+
+func (h *rangeHeap) pop() rangeHeapEntry {
+	old := *h
+	n := len(old) - 1
+	old[0], old[n] = old[n], old[0]
+	h.down(0, n)
+	x := old[n]
+	*h = old[:n]
+	return x
+}
+
+func (h rangeHeap) up(j int) {
+	for {
+		i := (j - 1) / 2
+		if i == j || !h.less(j, i) {
+			break
+		}
+		h[i], h[j] = h[j], h[i]
+		j = i
+	}
+}
+
+func (h rangeHeap) down(i, n int) {
+	for {
+		j1 := 2*i + 1
+		if j1 >= n || j1 < 0 {
+			break
+		}
+		j := j1
+		if j2 := j1 + 1; j2 < n && h.less(j2, j1) {
+			j = j2
+		}
+		if !h.less(j, i) {
+			break
+		}
+		h[i], h[j] = h[j], h[i]
+		i = j
+	}
+}
+
+func (h *rangeHeap) init() {
+	n := len(*h)
+	for i := n/2 - 1; i >= 0; i-- {
+		h.down(i, n)
+	}
+}
+
+func newRangeScanner(start, end []byte, cache *lruCache, verify bool) *rangeScanner {
+	return &rangeScanner{
+		start:  start,
+		end:    end,
+		cache:  cache,
+		verify: verify,
+		heap:   make(rangeHeap, 0, 8),
+	}
+}
+
+func (s *rangeScanner) addMemtable(mt *memtable, priority int) {
+	src := &memtableRangeSource{mt: mt, start: s.start, end: s.end}
+	src.seekToStart()
+	if src.valid {
+		s.heap = append(s.heap, rangeHeapEntry{
+			entry:    src.entry(),
+			priority: priority,
+			source:   src,
+		})
+	} else {
+		src.close()
+	}
+}
+
+func (s *rangeScanner) addSSTable(sst *SSTable, priority int) {
+	src := &sstableRangeSource{
+		sst:    sst,
+		start:  s.start,
+		end:    s.end,
+		cache:  s.cache,
+		verify: s.verify,
+	}
+	src.seekToStart()
+	if src.valid {
+		s.heap = append(s.heap, rangeHeapEntry{
+			entry:    src.entry(),
+			priority: priority,
+			source:   src,
+		})
+	} else {
+		src.close()
+	}
+}
+
+func (s *rangeScanner) init() {
+	s.heap.init()
+}
+
+func (s *rangeScanner) next() bool {
+	if len(s.heap) == 0 {
+		return false
+	}
+
+	he := s.heap.pop()
+	s.current = he.entry
+
+	if he.source.next() {
+		s.heap.push(rangeHeapEntry{
+			entry:    he.source.entry(),
+			priority: he.priority,
+			source:   he.source,
+		})
+	} else {
+		he.source.close()
+	}
+
+	return true
+}
+
+func (s *rangeScanner) entry() Entry {
+	return s.current
+}
+
+func (s *rangeScanner) close() {
+	for _, he := range s.heap {
+		he.source.close()
+	}
+}
+
+// memtableRangeSource wraps a memtable iterator for range scanning.
+type memtableRangeSource struct {
+	mt    *memtable
+	start []byte
+	end   []byte
+	iter  *memtableIterator
+	valid bool
+}
+
+func (s *memtableRangeSource) seekToStart() {
+	s.iter = s.mt.Iterator()
+	if s.iter.Seek(s.start) {
+		key := s.iter.Key()
+		s.valid = CompareKeys(key, s.end) < 0
+	}
+}
+
+func (s *memtableRangeSource) next() bool {
+	if !s.iter.Next() {
+		s.valid = false
+		return false
+	}
+	key := s.iter.Key()
+	s.valid = CompareKeys(key, s.end) < 0
+	return s.valid
+}
+
+func (s *memtableRangeSource) entry() Entry {
+	return s.iter.Entry()
+}
+
+func (s *memtableRangeSource) close() {
+	if s.iter != nil {
+		s.iter.Close()
+	}
+}
+
+// sstableRangeSource wraps an SSTable for range scanning.
+type sstableRangeSource struct {
+	sst       *SSTable
+	start     []byte
+	end       []byte
+	cache     *lruCache
+	verify    bool
+	blockIdx  int
+	entryIdx  int
+	block     *Block
+	valid     bool
+	fromCache bool
+}
+
+func (s *sstableRangeSource) seekToStart() {
+	// Ensure index is loaded for lazy-loaded SSTables
+	if err := s.sst.ensureIndex(); err != nil {
+		s.valid = false
+		return
+	}
+
+	// Check if SSTable might contain keys in range
+	if !rangeOverlaps(s.start, s.end, s.sst.Index.MinKey, s.sst.Index.MaxKey) {
+		s.valid = false
+		return
+	}
+
+	// Find starting block using index
+	s.blockIdx = s.sst.Index.Search(s.start)
+	if s.blockIdx < 0 {
+		s.blockIdx = 0
+	}
+
+	// Load the block
+	if err := s.loadBlock(); err != nil {
+		s.valid = false
+		return
+	}
+
+	// Find first entry >= start in block
+	for s.entryIdx = 0; s.entryIdx < len(s.block.Entries); s.entryIdx++ {
+		key := s.block.Entries[s.entryIdx].Key
+		if CompareKeys(key, s.start) >= 0 {
+			s.valid = CompareKeys(key, s.end) < 0
+			return
+		}
+	}
+
+	// Not found in this block, try next
+	s.blockIdx++
+	s.entryIdx = -1
+	s.valid = s.next()
+}
+
+func (s *sstableRangeSource) loadBlock() error {
+	if s.blockIdx >= len(s.sst.Index.Entries) {
+		return ErrKeyNotFound
+	}
+
+	// Release previous block if we owned it
+	if s.block != nil && !s.fromCache {
+		s.block.Release()
+		s.block = nil
+	}
+
+	ie := s.sst.Index.Entries[s.blockIdx]
+	cacheKey := cacheKey{FileID: s.sst.ID, BlockOffset: ie.BlockOffset}
+
+	// Try cache first
+	if s.cache != nil {
+		if cached, found := s.cache.Get(cacheKey); found {
+			s.block = cached
+			s.fromCache = true
+			return nil
+		}
+	}
+
+	// Read from disk
+	blockData := make([]byte, ie.BlockSize)
+	if _, err := s.sst.file.ReadAt(blockData, int64(ie.BlockOffset)); err != nil {
+		return err
+	}
+
+	block, err := DecodeBlock(blockData, s.verify)
+	if err != nil {
+		return err
+	}
+
+	if s.cache != nil {
+		s.cache.Put(cacheKey, block)
+		s.fromCache = true
+	} else {
+		s.fromCache = false
+	}
+	s.block = block
+	return nil
+}
+
+func (s *sstableRangeSource) next() bool {
+	s.entryIdx++
+
+	// Try next entry in current block
+	if s.block != nil && s.entryIdx < len(s.block.Entries) {
+		key := s.block.Entries[s.entryIdx].Key
+		s.valid = CompareKeys(key, s.end) < 0
+		return s.valid
+	}
+
+	// Move to next block
+	s.blockIdx++
+	s.entryIdx = 0
+
+	if s.blockIdx >= len(s.sst.Index.Entries) {
+		s.valid = false
+		return false
+	}
+
+	if err := s.loadBlock(); err != nil {
+		s.valid = false
+		return false
+	}
+
+	if len(s.block.Entries) == 0 {
+		s.valid = false
+		return false
+	}
+
+	key := s.block.Entries[0].Key
+	s.valid = CompareKeys(key, s.end) < 0
+	return s.valid
+}
+
+func (s *sstableRangeSource) entry() Entry {
+	if !s.valid || s.block == nil || s.entryIdx >= len(s.block.Entries) {
+		return Entry{}
+	}
+	be := s.block.Entries[s.entryIdx]
+	val, _, _ := DecodeValue(be.Value)
+	return Entry{
+		Key:   be.Key,
+		Value: val,
+	}
+}
+
+func (s *sstableRangeSource) close() {
+	if s.block != nil && !s.fromCache {
+		s.block.Release()
+		s.block = nil
+	}
+}

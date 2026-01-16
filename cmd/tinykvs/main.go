@@ -50,6 +50,8 @@ func main() {
 		cmdExport(args)
 	case "import":
 		cmdImport(args)
+	case "shell":
+		cmdShell(args)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -77,6 +79,7 @@ Commands:
   info     Show which level/SSTable contains a key
   export   Export store to CSV file
   import   Import data from CSV file
+  shell    Interactive SQL-like query shell
 
 Environment:
   TINYKVS_STORE  Default store directory (used if -dir not specified)
@@ -995,6 +998,25 @@ func cmdImport(args []string) {
 	}
 
 	fmt.Fprintf(os.Stderr, "\rImported %d keys (%d errors)\n", count, errors)
+}
+
+func cmdShell(args []string) {
+	fs := flag.NewFlagSet("shell", flag.ExitOnError)
+	dir := fs.String("dir", "", "Path to store directory (required)")
+	fs.Parse(args)
+
+	storeDir := requireDir(*dir)
+
+	opts := tinykvs.DefaultOptions(storeDir)
+	store, err := tinykvs.Open(storeDir, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	shell := NewShell(store)
+	shell.Run()
 }
 
 func printValue(key []byte, val tinykvs.Value) {

@@ -7,6 +7,13 @@
 *.test
 *.out
 coverage.out
+# Binaries
+/tinykvs
+/cmd/tinykvs/tinykvs
+
+# Profiling
+*.prof
+*.log
 
 # IDE
 .idea/

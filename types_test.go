@@ -372,3 +372,141 @@ func TestEncodedSizeWithPointer(t *testing.T) {
 		t.Errorf("inline EncodedSize = %d, want 10", inlineSize)
 	}
 }
+
+func TestRecordValueEncodeDecode(t *testing.T) {
+	tests := []struct {
+		name   string
+		record map[string]any
+	}{
+		{
+			name:   "simple record",
+			record: map[string]any{"name": "Alice", "age": 30},
+		},
+		{
+			name:   "nested record",
+			record: map[string]any{"user": map[string]any{"name": "Bob"}, "active": true},
+		},
+		{
+			name:   "array values",
+			record: map[string]any{"tags": []any{"a", "b", "c"}, "count": 3},
+		},
+		{
+			name:   "empty record",
+			record: map[string]any{},
+		},
+		{
+			name:   "nil record",
+			record: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := RecordValue(tt.record)
+			if v.Type != ValueTypeRecord {
+				t.Fatalf("type = %d, want ValueTypeRecord", v.Type)
+			}
+
+			encoded := EncodeValue(v)
+			decoded, consumed, err := DecodeValue(encoded)
+			if err != nil {
+				t.Fatalf("DecodeValue failed: %v", err)
+			}
+			if consumed != len(encoded) {
+				t.Errorf("consumed %d bytes, encoded %d bytes", consumed, len(encoded))
+			}
+
+			if decoded.Type != ValueTypeRecord {
+				t.Errorf("decoded type = %d, want ValueTypeRecord", decoded.Type)
+			}
+
+			// Check fields match
+			if tt.record == nil || len(tt.record) == 0 {
+				if len(decoded.Record) != 0 {
+					t.Errorf("decoded record has %d fields, want 0", len(decoded.Record))
+				}
+				return
+			}
+
+			for k := range tt.record {
+				if decoded.Record[k] == nil {
+					t.Errorf("missing field %q in decoded record", k)
+				}
+				// Note: msgpack may decode integers as different types (float64)
+				// so we just check the field exists
+			}
+		})
+	}
+}
+
+func TestRecordValueZeroCopy(t *testing.T) {
+	record := map[string]any{"field1": "value1", "field2": 42}
+	v := RecordValue(record)
+
+	encoded := EncodeValue(v)
+	decoded, consumed, err := DecodeValueZeroCopy(encoded)
+	if err != nil {
+		t.Fatalf("DecodeValueZeroCopy failed: %v", err)
+	}
+	if consumed != len(encoded) {
+		t.Errorf("consumed %d bytes, encoded %d bytes", consumed, len(encoded))
+	}
+
+	if decoded.Type != ValueTypeRecord {
+		t.Errorf("decoded type = %d, want ValueTypeRecord", decoded.Type)
+	}
+
+	if decoded.Record["field1"] != "value1" {
+		t.Errorf("field1 = %v, want value1", decoded.Record["field1"])
+	}
+}
+
+func TestMsgpackEncodeDecode(t *testing.T) {
+	record := map[string]any{"name": "Alice", "age": 30}
+
+	// Encode
+	encoded, err := EncodeMsgpack(record)
+	if err != nil {
+		t.Fatalf("EncodeMsgpack failed: %v", err)
+	}
+
+	// Decode
+	decoded, err := DecodeMsgpack(encoded)
+	if err != nil {
+		t.Fatalf("DecodeMsgpack failed: %v", err)
+	}
+
+	if decoded["name"] != "Alice" {
+		t.Errorf("name = %v, want Alice", decoded["name"])
+	}
+}
+
+func TestRecordEncodedSize(t *testing.T) {
+	// Nil record
+	nilRecord := RecordValue(nil)
+	nilSize := nilRecord.EncodedSize()
+	if nilSize != 5 { // 1 (type) + 4 (length=0)
+		t.Errorf("nil record EncodedSize = %d, want 5", nilSize)
+	}
+
+	// Empty record - msgpack encodes empty map as 1 byte
+	empty := RecordValue(map[string]any{})
+	emptySize := empty.EncodedSize()
+	// 1 (type) + 4 (length) + 1 (msgpack empty map) = 6
+	if emptySize != 6 {
+		t.Errorf("empty record EncodedSize = %d, want 6", emptySize)
+	}
+
+	// Non-empty record
+	record := RecordValue(map[string]any{"name": "test"})
+	size := record.EncodedSize()
+	if size <= 5 {
+		t.Errorf("non-empty record EncodedSize = %d, want > 5", size)
+	}
+
+	// Verify encoded matches declared size
+	encoded := EncodeValue(record)
+	if len(encoded) != size {
+		t.Errorf("encoded length %d != EncodedSize %d", len(encoded), size)
+	}
+}

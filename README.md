@@ -95,6 +95,32 @@ func (s *Store) GetInt64(key []byte) (int64, error)
 func (s *Store) GetFloat64(key []byte) (float64, error)
 func (s *Store) GetBool(key []byte) (bool, error)
 func (s *Store) GetBytes(key []byte) ([]byte, error)
+
+// Struct and map storage (uses msgpack internally)
+func (s *Store) PutStruct(key []byte, v any) error
+func (s *Store) GetStruct(key []byte, dest any) error
+func (s *Store) PutMap(key []byte, fields map[string]any) error
+func (s *Store) GetMap(key []byte) (map[string]any, error)
+
+// JSON storage (stores as string, queryable in shell)
+func (s *Store) PutJson(key []byte, v any) error
+func (s *Store) GetJson(key []byte, dest any) error
+```
+
+### Batch Operations
+
+```go
+// Create a batch for atomic writes
+batch := tinykvs.NewBatch()
+batch.Put(key, value)
+batch.PutString(key, "value")
+batch.PutInt64(key, 42)
+batch.PutStruct(key, myStruct)
+batch.PutMap(key, map[string]any{"field": "value"})
+batch.Delete(key)
+
+// Apply atomically
+store.WriteBatch(batch)
 ```
 
 ### Range Scans
@@ -114,6 +140,7 @@ type Value struct {
     Float64 float64
     Bool    bool
     Bytes   []byte
+    Record  map[string]any  // For struct/map storage
 }
 
 // Value constructors
@@ -122,6 +149,7 @@ func Float64Value(v float64) Value
 func BoolValue(v bool) Value
 func StringValue(v string) Value
 func BytesValue(v []byte) Value
+func RecordValue(v map[string]any) Value
 ```
 
 ### Configuration
@@ -352,92 +380,180 @@ for _, level := range stats.Levels {
 }
 ```
 
-### Storing Structs
+### Storing Structs and Maps
 
-TinyKVS stores primitive types and byte slices natively. For structs, serialize to bytes using your preferred encoding. Here are common patterns:
-
-#### JSON (simple, human-readable)
+TinyKVS has built-in support for storing Go structs and maps using msgpack serialization:
 
 ```go
-import "encoding/json"
-
-type User struct {
-    Name  string `json:"name"`
-    Email string `json:"email"`
-    Age   int    `json:"age"`
+type Address struct {
+    City    string `msgpack:"city"`
+    Country string `msgpack:"country"`
 }
 
-// Write
-user := User{Name: "Alice", Email: "alice@example.com", Age: 30}
-data, _ := json.Marshal(user)
-store.PutBytes([]byte("user:1"), data)
+type User struct {
+    Name    string  `msgpack:"name"`
+    Email   string  `msgpack:"email"`
+    Age     int     `msgpack:"age"`
+    Address Address `msgpack:"address"`
+}
 
-// Read
-data, _ := store.GetBytes([]byte("user:1"))
-var user User
-json.Unmarshal(data, &user)
+// Store a struct
+user := User{
+    Name:    "Alice",
+    Email:   "alice@example.com",
+    Age:     30,
+    Address: Address{City: "NYC", Country: "USA"},
+}
+store.PutStruct([]byte("user:1"), user)
+
+// Retrieve into a struct
+var retrieved User
+store.GetStruct([]byte("user:1"), &retrieved)
+
+// Store a map directly
+store.PutMap([]byte("config:app"), map[string]any{
+    "debug":   true,
+    "timeout": 30,
+})
+
+// Retrieve as map
+config, _ := store.GetMap([]byte("config:app"))
 ```
 
-#### Gob (Go-native, efficient for Go-to-Go)
+Nested structs are fully supported and can be queried in the interactive shell.
+
+#### JSON Storage
+
+For human-readable storage or shell querying:
 
 ```go
-import (
-    "bytes"
-    "encoding/gob"
-)
+// Store as JSON string
+store.PutJson([]byte("user:2"), User{Name: "Bob", Age: 25})
 
-// Write
+// Retrieve from JSON
+var user User
+store.GetJson([]byte("user:2"), &user)
+```
+
+#### Manual Serialization
+
+For other formats (Gob, Protobuf, etc.), serialize to bytes:
+
+```go
+// Gob
 var buf bytes.Buffer
 gob.NewEncoder(&buf).Encode(user)
 store.PutBytes([]byte("user:1"), buf.Bytes())
 
-// Read
-data, _ := store.GetBytes([]byte("user:1"))
-var user User
-gob.NewDecoder(bytes.NewReader(data)).Decode(&user)
-```
-
-#### MessagePack (compact, fast)
-
-```go
-import "github.com/vmihailenco/msgpack/v5"
-
-// Write
-data, _ := msgpack.Marshal(user)
-store.PutBytes([]byte("user:1"), data)
-
-// Read
-data, _ := store.GetBytes([]byte("user:1"))
-var user User
-msgpack.Unmarshal(data, &user)
-```
-
-#### Protocol Buffers (schema-defined, cross-language)
-
-```go
-import "google.golang.org/protobuf/proto"
-
-// Assuming User is a generated protobuf message
-// Write
+// Protobuf
 data, _ := proto.Marshal(user)
 store.PutBytes([]byte("user:1"), data)
-
-// Read
-data, _ := store.GetBytes([]byte("user:1"))
-user := &pb.User{}
-proto.Unmarshal(data, user)
 ```
 
-#### Comparison
+## Interactive Shell
 
-| Format | Size | Speed | Cross-language | Schema |
-|--------|------|-------|----------------|--------|
-| JSON | Largest | Slow | Yes | No |
-| Gob | Medium | Fast | Go only | No |
-| MessagePack | Small | Fast | Yes | No |
-| Protobuf | Smallest | Fastest | Yes | Required |
+TinyKVS includes an interactive SQL-like shell for exploring and manipulating data:
 
-For most Go applications, **MessagePack** offers a good balance. Use **Protobuf** for cross-language systems or when schema evolution matters.
+```bash
+go install github.com/freeeve/tinykvs/cmd/tinykvs@latest
+tinykvs /path/to/db
+```
+
+### SQL Commands
+
+```sql
+-- Query data
+SELECT * FROM kv WHERE k = 'user:1'
+SELECT * FROM kv WHERE k LIKE 'user:%'
+SELECT * FROM kv WHERE k BETWEEN 'a' AND 'z' LIMIT 10
+SELECT * FROM kv LIMIT 100
+
+-- Extract record fields
+SELECT v.name, v.age FROM kv WHERE k = 'user:1'
+SELECT v.address.city FROM kv WHERE k = 'user:1'
+
+-- Insert data (JSON auto-detected as records)
+INSERT INTO kv VALUES ('user:1', '{"name":"Alice","age":30}')
+INSERT INTO kv VALUES ('key', 'simple string value')
+
+-- Update and delete
+UPDATE kv SET v = 'newvalue' WHERE k = 'key'
+DELETE FROM kv WHERE k = 'key'
+DELETE FROM kv WHERE k LIKE 'temp:%'
+```
+
+### Shell Commands
+
+```
+\help      Show help
+\stats     Show store statistics
+\flush     Flush memtable to disk
+\compact   Run compaction
+\tables    Show table schema
+\export    Export all data to CSV
+\import    Import data from CSV
+\quit      Exit shell
+```
+
+### CSV Import/Export
+
+Export creates a simple `key,value` CSV:
+```csv
+key,value
+user:1,{"name":"Alice","age":30}
+counter,42
+flag,true
+```
+
+Import auto-detects the format:
+
+**2 columns (key,value)** - values auto-detect type:
+```csv
+key,value
+user:1,hello
+user:2,42
+user:3,{"name":"Bob"}
+```
+
+**3+ columns** - first column is key, rest become record fields:
+```csv
+id,name,age,active
+user:1,Alice,30,true
+user:2,Bob,25,false
+```
+This creates records like `{"name":"Alice","age":30,"active":true}`
+
+**Type hints** - prevent unwanted auto-detection (e.g., zip codes):
+```csv
+id,zip:string,count:int,price:float,active:bool,data:json
+item:1,02134,100,19.99,true,{"x":1}
+```
+Supported hints: `string`, `int`, `float`, `bool`, `json`
+
+### Nested Field Access
+
+Records with nested structures support dot notation for field access:
+
+```sql
+-- Given: {"name":"Alice","address":{"city":"NYC","geo":{"lat":40.7}}}
+
+SELECT v.name FROM kv WHERE k = 'user:1'           -- Alice
+SELECT v.address.city FROM kv WHERE k = 'user:1'   -- NYC
+SELECT v.`address.geo.lat` FROM kv WHERE k = 'user:1'  -- 40.7 (3+ levels need backticks)
+```
+
+### Streaming Aggregations
+
+Aggregation functions compute results in a single pass with O(1) memory:
+
+```sql
+SELECT count() FROM kv                              -- count all rows
+SELECT count() FROM kv WHERE k LIKE 'user:%'        -- count with filter
+SELECT sum(v.age), avg(v.age) FROM kv               -- sum and average
+SELECT min(v.score), max(v.score) FROM kv           -- min and max
+SELECT count(), sum(v.price), avg(v.price) FROM kv  -- multiple aggregates
+SELECT sum(v.stats.count) FROM kv                   -- nested fields work too
+```
 
 ## License
 

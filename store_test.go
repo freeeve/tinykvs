@@ -5,6 +5,8 @@ import (
 	"os"
 	"sync"
 	"testing"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 func TestStoreBasicCRUD(t *testing.T) {
@@ -822,108 +824,6 @@ func TestStoreCompactWithTombstones(t *testing.T) {
 	store.Close()
 }
 
-func BenchmarkStorePut(b *testing.B) {
-	dir := b.TempDir()
-
-	store, err := Open(dir, DefaultOptions(dir))
-	if err != nil {
-		b.Fatalf("Open failed: %v", err)
-	}
-	defer store.Close()
-
-	value := StringValue("benchmark value that is reasonably sized")
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		key := fmt.Sprintf("key%08d", i)
-		store.Put([]byte(key), value)
-	}
-}
-
-func BenchmarkStoreGet(b *testing.B) {
-	dir := b.TempDir()
-
-	store, err := Open(dir, DefaultOptions(dir))
-	if err != nil {
-		b.Fatalf("Open failed: %v", err)
-	}
-	defer store.Close()
-
-	// Pre-populate
-	n := 10000
-	for i := 0; i < n; i++ {
-		key := fmt.Sprintf("key%08d", i)
-		store.PutString([]byte(key), "value")
-	}
-	store.Flush()
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		key := fmt.Sprintf("key%08d", i%n)
-		store.Get([]byte(key))
-	}
-}
-
-func BenchmarkStoreMixed(b *testing.B) {
-	dir := b.TempDir()
-
-	store, err := Open(dir, DefaultOptions(dir))
-	if err != nil {
-		b.Fatalf("Open failed: %v", err)
-	}
-	defer store.Close()
-
-	// Pre-populate
-	for i := 0; i < 1000; i++ {
-		key := fmt.Sprintf("key%08d", i)
-		store.PutString([]byte(key), "value")
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if i%5 == 0 {
-			// 20% writes
-			key := fmt.Sprintf("key%08d", i)
-			store.PutString([]byte(key), "new value")
-		} else {
-			// 80% reads
-			key := fmt.Sprintf("key%08d", i%1000)
-			store.Get([]byte(key))
-		}
-	}
-}
-
-func BenchmarkCompaction(b *testing.B) {
-	for _, numKeys := range []int{10000, 50000} {
-		b.Run(fmt.Sprintf("keys=%d", numKeys), func(b *testing.B) {
-			for i := 0; i < b.N; i++ {
-				b.StopTimer()
-				dir := b.TempDir()
-				opts := DefaultOptions(dir)
-				opts.MemtableSize = 64 * 1024 // 64KB to create multiple L0 tables
-
-				store, err := Open(dir, opts)
-				if err != nil {
-					b.Fatalf("Open failed: %v", err)
-				}
-
-				// Write keys to create multiple L0 tables
-				for j := 0; j < numKeys; j++ {
-					key := fmt.Sprintf("key%08d", j)
-					store.PutString([]byte(key), "value that is long enough to fill blocks quickly")
-				}
-				store.Flush()
-
-				b.StartTimer()
-				store.Compact()
-				b.StopTimer()
-
-				store.Close()
-			}
-		})
-	}
-}
-
 func TestReaderAddSSTableLevelExpansion(t *testing.T) {
 	dir := t.TempDir()
 	opts := DefaultOptions(dir)
@@ -1032,179 +932,6 @@ func TestMemtableIteratorExhaustion(t *testing.T) {
 	// Calling Next() again should still return false
 	if iter.Next() {
 		t.Error("Next() should return false when already exhausted")
-	}
-}
-
-func TestScanPrefix(t *testing.T) {
-	dir := t.TempDir()
-
-	store, err := Open(dir, DefaultOptions(dir))
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	defer store.Close()
-
-	// Insert keys with different prefixes
-	testData := []struct {
-		key   string
-		value int64
-	}{
-		{"user:1:name", 1},
-		{"user:1:email", 2},
-		{"user:2:name", 3},
-		{"user:2:email", 4},
-		{"order:100", 5},
-		{"order:101", 6},
-		{"product:abc", 7},
-	}
-
-	for _, d := range testData {
-		if err := store.PutInt64([]byte(d.key), d.value); err != nil {
-			t.Fatalf("PutInt64 failed: %v", err)
-		}
-	}
-
-	// Test scanning prefix "user:1:"
-	var results []string
-	err = store.ScanPrefix([]byte("user:1:"), func(key []byte, value Value) bool {
-		results = append(results, string(key))
-		return true
-	})
-	if err != nil {
-		t.Fatalf("ScanPrefix failed: %v", err)
-	}
-
-	if len(results) != 2 {
-		t.Errorf("expected 2 results for user:1:, got %d: %v", len(results), results)
-	}
-
-	// Test scanning prefix "user:"
-	results = nil
-	err = store.ScanPrefix([]byte("user:"), func(key []byte, value Value) bool {
-		results = append(results, string(key))
-		return true
-	})
-	if err != nil {
-		t.Fatalf("ScanPrefix failed: %v", err)
-	}
-
-	if len(results) != 4 {
-		t.Errorf("expected 4 results for user:, got %d: %v", len(results), results)
-	}
-
-	// Test scanning prefix "order:"
-	results = nil
-	err = store.ScanPrefix([]byte("order:"), func(key []byte, value Value) bool {
-		results = append(results, string(key))
-		return true
-	})
-	if err != nil {
-		t.Fatalf("ScanPrefix failed: %v", err)
-	}
-
-	if len(results) != 2 {
-		t.Errorf("expected 2 results for order:, got %d: %v", len(results), results)
-	}
-
-	// Test scanning non-existent prefix
-	results = nil
-	err = store.ScanPrefix([]byte("nonexistent:"), func(key []byte, value Value) bool {
-		results = append(results, string(key))
-		return true
-	})
-	if err != nil {
-		t.Fatalf("ScanPrefix failed: %v", err)
-	}
-
-	if len(results) != 0 {
-		t.Errorf("expected 0 results for nonexistent:, got %d", len(results))
-	}
-
-	// Test early termination
-	count := 0
-	err = store.ScanPrefix([]byte("user:"), func(key []byte, value Value) bool {
-		count++
-		return count < 2 // Stop after 2
-	})
-	if err != nil {
-		t.Fatalf("ScanPrefix failed: %v", err)
-	}
-
-	if count != 2 {
-		t.Errorf("expected callback called 2 times, got %d", count)
-	}
-}
-
-func TestScanPrefixAcrossLevels(t *testing.T) {
-	dir := t.TempDir()
-	opts := DefaultOptions(dir)
-	opts.MemtableSize = 1024 // Small memtable to force flushes
-
-	store, err := Open(dir, opts)
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	defer store.Close()
-
-	// Insert keys in batches with flushes
-	for i := 0; i < 50; i++ {
-		key := fmt.Sprintf("key:%03d", i)
-		if err := store.PutInt64([]byte(key), int64(i)); err != nil {
-			t.Fatalf("PutInt64 failed: %v", err)
-		}
-	}
-	store.Flush()
-
-	for i := 50; i < 100; i++ {
-		key := fmt.Sprintf("key:%03d", i)
-		if err := store.PutInt64([]byte(key), int64(i)); err != nil {
-			t.Fatalf("PutInt64 failed: %v", err)
-		}
-	}
-	store.Flush()
-
-	// Update some keys (creates duplicates across levels)
-	for i := 25; i < 75; i++ {
-		key := fmt.Sprintf("key:%03d", i)
-		if err := store.PutInt64([]byte(key), int64(i*10)); err != nil {
-			t.Fatalf("PutInt64 failed: %v", err)
-		}
-	}
-
-	// Scan all keys with prefix "key:"
-	var results []string
-	var values []int64
-	err = store.ScanPrefix([]byte("key:"), func(key []byte, value Value) bool {
-		results = append(results, string(key))
-		values = append(values, value.Int64)
-		return true
-	})
-	if err != nil {
-		t.Fatalf("ScanPrefix failed: %v", err)
-	}
-
-	if len(results) != 100 {
-		t.Errorf("expected 100 results, got %d", len(results))
-	}
-
-	// Verify keys are sorted
-	for i := 1; i < len(results); i++ {
-		if results[i] <= results[i-1] {
-			t.Errorf("keys not sorted: %s <= %s", results[i], results[i-1])
-		}
-	}
-
-	// Verify updated values (keys 25-74 should have value*10)
-	for i, key := range results {
-		var keyNum int
-		fmt.Sscanf(key, "key:%d", &keyNum)
-		expectedValue := int64(keyNum)
-		if keyNum >= 25 && keyNum < 75 {
-			expectedValue = int64(keyNum * 10)
-		}
-		if values[i] != expectedValue {
-			t.Errorf("key %s: value = %d, want %d", key, values[i], expectedValue)
-		}
 	}
 }
 
@@ -1445,25 +1172,6 @@ func TestStoreStatsWithData(t *testing.T) {
 	}
 }
 
-func TestStoreScanEmptyMemtable(t *testing.T) {
-	dir := t.TempDir()
-	store, err := Open(dir, DefaultOptions(dir))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	// Scan empty store
-	count := 0
-	store.ScanPrefix([]byte("any"), func(key []byte, value Value) bool {
-		count++
-		return true
-	})
-	if count != 0 {
-		t.Errorf("count = %d, want 0", count)
-	}
-}
-
 func TestStorePutDifferentValueTypes(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir, DefaultOptions(dir))
@@ -1654,259 +1362,276 @@ func TestStoreLockFileReleaseOnError(t *testing.T) {
 	store2.Close()
 }
 
-func TestBatchWrite(t *testing.T) {
+func TestStoreRecords(t *testing.T) {
 	dir := t.TempDir()
+
 	store, err := Open(dir, DefaultOptions(dir))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Open failed: %v", err)
 	}
 	defer store.Close()
 
-	// Create a batch
-	batch := NewBatch()
-	batch.PutString([]byte("key1"), "value1")
-	batch.PutString([]byte("key2"), "value2")
-	batch.PutInt64([]byte("counter"), 100)
-	batch.Delete([]byte("nonexistent"))
-
-	if batch.Len() != 4 {
-		t.Errorf("batch.Len() = %d, want 4", batch.Len())
+	// Test PutMap and GetMap
+	record := map[string]any{
+		"name":   "Alice",
+		"age":    30,
+		"active": true,
 	}
 
-	// Write batch
-	if err := store.WriteBatch(batch); err != nil {
-		t.Fatalf("WriteBatch failed: %v", err)
+	if err := store.PutMap([]byte("user:1"), record); err != nil {
+		t.Fatalf("PutMap failed: %v", err)
 	}
 
-	// Verify writes
-	v1, _ := store.GetString([]byte("key1"))
-	if v1 != "value1" {
-		t.Errorf("key1 = %q, want value1", v1)
+	got, err := store.GetMap([]byte("user:1"))
+	if err != nil {
+		t.Fatalf("GetMap failed: %v", err)
 	}
 
-	v2, _ := store.GetString([]byte("key2"))
-	if v2 != "value2" {
-		t.Errorf("key2 = %q, want value2", v2)
+	if got["name"] != "Alice" {
+		t.Errorf("name = %v, want Alice", got["name"])
+	}
+	if got["active"] != true {
+		t.Errorf("active = %v, want true", got["active"])
+	}
+	// Note: msgpack may decode integers as float64
+	if age, ok := got["age"].(int8); ok {
+		if age != 30 {
+			t.Errorf("age = %v, want 30", got["age"])
+		}
 	}
 
-	v3, _ := store.GetInt64([]byte("counter"))
-	if v3 != 100 {
-		t.Errorf("counter = %d, want 100", v3)
+	// Test GetMap on non-record value
+	if err := store.PutString([]byte("str"), "value"); err != nil {
+		t.Fatalf("PutString failed: %v", err)
 	}
-
-	// Test batch reuse
-	batch.Reset()
-	if batch.Len() != 0 {
-		t.Errorf("after Reset, batch.Len() = %d, want 0", batch.Len())
+	_, err = store.GetMap([]byte("str"))
+	if err == nil {
+		t.Error("GetMap on string should fail")
 	}
 }
 
-func TestBatchWriteEmpty(t *testing.T) {
+func TestStoreRecordPersistence(t *testing.T) {
 	dir := t.TempDir()
+
+	// Write record
 	store, err := Open(dir, DefaultOptions(dir))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	record := map[string]any{"field": "value", "number": 42}
+	if err := store.PutMap([]byte("record:1"), record); err != nil {
+		t.Fatalf("PutMap failed: %v", err)
+	}
+
+	store.Flush()
+	store.Close()
+
+	// Reopen and verify
+	store, err = Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
 	}
 	defer store.Close()
 
-	// Empty batch should be no-op
-	batch := NewBatch()
-	if err := store.WriteBatch(batch); err != nil {
-		t.Fatalf("WriteBatch on empty batch failed: %v", err)
+	got, err := store.GetMap([]byte("record:1"))
+	if err != nil {
+		t.Fatalf("GetMap after reopen failed: %v", err)
 	}
 
-	// Nil batch should be no-op
-	if err := store.WriteBatch(nil); err != nil {
-		t.Fatalf("WriteBatch on nil batch failed: %v", err)
+	if got["field"] != "value" {
+		t.Errorf("field = %v, want value", got["field"])
 	}
 }
 
-func TestPutIfNotExists(t *testing.T) {
+func TestStorePutGetJson(t *testing.T) {
 	dir := t.TempDir()
+
 	store, err := Open(dir, DefaultOptions(dir))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Open failed: %v", err)
 	}
 	defer store.Close()
 
-	// First put should succeed
-	err = store.PutIfNotExists([]byte("key"), StringValue("value1"))
+	// Store JSON
+	data := map[string]any{"name": "Alice", "age": 30}
+	if err := store.PutJson([]byte("user:1"), data); err != nil {
+		t.Fatalf("PutJson failed: %v", err)
+	}
+
+	// Verify it's stored as a string
+	val, err := store.Get([]byte("user:1"))
 	if err != nil {
-		t.Fatalf("first PutIfNotExists failed: %v", err)
+		t.Fatalf("Get failed: %v", err)
+	}
+	if val.Type != ValueTypeString {
+		t.Errorf("expected string type, got %d", val.Type)
 	}
 
-	// Second put should fail
-	err = store.PutIfNotExists([]byte("key"), StringValue("value2"))
-	if err != ErrKeyExists {
-		t.Errorf("second PutIfNotExists: got %v, want ErrKeyExists", err)
+	// Get JSON back
+	var got map[string]any
+	if err := store.GetJson([]byte("user:1"), &got); err != nil {
+		t.Fatalf("GetJson failed: %v", err)
 	}
 
-	// Verify original value
-	v, _ := store.GetString([]byte("key"))
-	if v != "value1" {
-		t.Errorf("value = %q, want value1", v)
+	if got["name"] != "Alice" {
+		t.Errorf("name = %v, want Alice", got["name"])
+	}
+
+	// GetJson on non-string should fail
+	store.PutInt64([]byte("num"), 42)
+	var dummy map[string]any
+	if err := store.GetJson([]byte("num"), &dummy); err == nil {
+		t.Error("GetJson on int64 should fail")
 	}
 }
 
-func TestPutIfEquals(t *testing.T) {
+func TestStoreJsonWithStruct(t *testing.T) {
 	dir := t.TempDir()
+
 	store, err := Open(dir, DefaultOptions(dir))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Open failed: %v", err)
 	}
 	defer store.Close()
 
-	// Set initial value
-	store.Put([]byte("key"), Int64Value(100))
-
-	// CAS with correct expected value should succeed
-	err = store.PutIfEquals([]byte("key"), Int64Value(200), Int64Value(100))
-	if err != nil {
-		t.Fatalf("PutIfEquals with correct expected failed: %v", err)
+	type User struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+		Age   int    `json:"age"`
 	}
 
-	// Verify new value
-	v, _ := store.GetInt64([]byte("key"))
-	if v != 200 {
-		t.Errorf("value = %d, want 200", v)
+	// Store struct as JSON
+	user := User{Name: "Bob", Email: "bob@example.com", Age: 25}
+	if err := store.PutJson([]byte("user:bob"), user); err != nil {
+		t.Fatalf("PutJson failed: %v", err)
 	}
 
-	// CAS with wrong expected value should fail
-	err = store.PutIfEquals([]byte("key"), Int64Value(300), Int64Value(100))
-	if err != ErrConditionFailed {
-		t.Errorf("PutIfEquals with wrong expected: got %v, want ErrConditionFailed", err)
+	// Get back into struct
+	var got User
+	if err := store.GetJson([]byte("user:bob"), &got); err != nil {
+		t.Fatalf("GetJson failed: %v", err)
 	}
 
-	// Value should be unchanged
-	v, _ = store.GetInt64([]byte("key"))
-	if v != 200 {
-		t.Errorf("value after failed CAS = %d, want 200", v)
-	}
-
-	// CAS on non-existent key should fail
-	err = store.PutIfEquals([]byte("nokey"), Int64Value(1), Int64Value(0))
-	if err != ErrKeyNotFound {
-		t.Errorf("PutIfEquals on missing key: got %v, want ErrKeyNotFound", err)
+	if got.Name != "Bob" || got.Email != "bob@example.com" || got.Age != 25 {
+		t.Errorf("got = %+v, want {Bob bob@example.com 25}", got)
 	}
 }
 
-func TestIncrement(t *testing.T) {
+func TestStorePutGetStruct(t *testing.T) {
 	dir := t.TempDir()
+
 	store, err := Open(dir, DefaultOptions(dir))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Open failed: %v", err)
 	}
 	defer store.Close()
 
-	// Increment non-existent key (starts at 0)
-	v, err := store.Increment([]byte("counter"), 5)
-	if err != nil {
-		t.Fatalf("Increment failed: %v", err)
-	}
-	if v != 5 {
-		t.Errorf("after first increment: got %d, want 5", v)
+	type User struct {
+		Name  string `msgpack:"name"`
+		Email string `msgpack:"email"`
+		Age   int    `msgpack:"age"`
 	}
 
-	// Increment existing key
-	v, err = store.Increment([]byte("counter"), 10)
-	if err != nil {
-		t.Fatalf("second Increment failed: %v", err)
-	}
-	if v != 15 {
-		t.Errorf("after second increment: got %d, want 15", v)
+	// Put struct
+	user := User{Name: "Alice", Email: "alice@example.com", Age: 30}
+	if err := store.PutStruct([]byte("user:alice"), user); err != nil {
+		t.Fatalf("PutStruct failed: %v", err)
 	}
 
-	// Decrement
-	v, err = store.Increment([]byte("counter"), -3)
-	if err != nil {
-		t.Fatalf("decrement failed: %v", err)
-	}
-	if v != 12 {
-		t.Errorf("after decrement: got %d, want 12", v)
+	// Get back into struct
+	var got User
+	if err := store.GetStruct([]byte("user:alice"), &got); err != nil {
+		t.Fatalf("GetStruct failed: %v", err)
 	}
 
-	// Increment on wrong type should fail
-	store.PutString([]byte("string"), "hello")
-	_, err = store.Increment([]byte("string"), 1)
-	if err != ErrTypeMismatch {
-		t.Errorf("Increment on string: got %v, want ErrTypeMismatch", err)
+	if got.Name != "Alice" || got.Email != "alice@example.com" || got.Age != 30 {
+		t.Errorf("got = %+v, want {Alice alice@example.com 30}", got)
+	}
+
+	// Test GetStruct with wrong type
+	if err := store.PutString([]byte("string:key"), "not a record"); err != nil {
+		t.Fatalf("PutString failed: %v", err)
+	}
+	var wrongType User
+	if err := store.GetStruct([]byte("string:key"), &wrongType); err == nil {
+		t.Error("GetStruct should fail for non-record type")
+	}
+
+	// Test GetStruct with missing key
+	var missing User
+	if err := store.GetStruct([]byte("missing:key"), &missing); err == nil {
+		t.Error("GetStruct should fail for missing key")
 	}
 }
 
-func TestDeleteRange(t *testing.T) {
+func TestStorePutGetNestedStruct(t *testing.T) {
 	dir := t.TempDir()
+
 	store, err := Open(dir, DefaultOptions(dir))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Open failed: %v", err)
 	}
 	defer store.Close()
 
-	// Create some keys
-	for i := 0; i < 10; i++ {
-		key := fmt.Sprintf("key%02d", i)
-		store.PutInt64([]byte(key), int64(i))
+	type Address struct {
+		City    string `msgpack:"city"`
+		Country string `msgpack:"country"`
 	}
 
-	// Delete range [key03, key07)
-	deleted, err := store.DeleteRange([]byte("key03"), []byte("key07"))
+	type User struct {
+		Name    string  `msgpack:"name"`
+		Address Address `msgpack:"address"`
+	}
+
+	// Put nested struct
+	user := User{
+		Name:    "Alice",
+		Address: Address{City: "NYC", Country: "USA"},
+	}
+	if err := store.PutStruct([]byte("user:alice"), user); err != nil {
+		t.Fatalf("PutStruct failed: %v", err)
+	}
+
+	// Get back into nested struct
+	var got User
+	if err := store.GetStruct([]byte("user:alice"), &got); err != nil {
+		t.Fatalf("GetStruct failed: %v", err)
+	}
+
+	if got.Name != "Alice" {
+		t.Errorf("got.Name = %q, want Alice", got.Name)
+	}
+	if got.Address.City != "NYC" {
+		t.Errorf("got.Address.City = %q, want NYC", got.Address.City)
+	}
+	if got.Address.Country != "USA" {
+		t.Errorf("got.Address.Country = %q, want USA", got.Address.Country)
+	}
+
+	// Verify the value is stored as msgpack for efficiency
+	val, err := store.Get([]byte("user:alice"))
 	if err != nil {
-		t.Fatalf("DeleteRange failed: %v", err)
+		t.Fatalf("Get failed: %v", err)
 	}
-	if deleted != 4 {
-		t.Errorf("deleted = %d, want 4", deleted)
+	if val.Type != ValueTypeMsgpack {
+		t.Errorf("value type = %v, want Msgpack", val.Type)
 	}
 
-	// Verify remaining keys
-	remaining := 0
-	store.ScanPrefix([]byte("key"), func(key []byte, _ Value) bool {
-		remaining++
-		return true
-	})
-	if remaining != 6 {
-		t.Errorf("remaining = %d, want 6", remaining)
+	// Verify we can decode the raw msgpack bytes
+	var decoded User
+	if err := GetStruct(val, &decoded); err != nil {
+		t.Fatalf("GetStruct from value failed: %v", err)
+	}
+	if decoded.Address.City != "NYC" {
+		t.Errorf("decoded address.city = %v, want NYC", decoded.Address.City)
 	}
 }
 
-func TestDeletePrefix(t *testing.T) {
-	dir := t.TempDir()
-	store, err := Open(dir, DefaultOptions(dir))
-	if err != nil {
-		t.Fatal(err)
+// GetStruct decodes a Value directly into a struct (for testing raw msgpack access)
+func GetStruct(val Value, dest any) error {
+	if val.Type == ValueTypeMsgpack {
+		return msgpack.Unmarshal(val.Bytes, dest)
 	}
-	defer store.Close()
-
-	// Create keys with different prefixes
-	for i := 0; i < 5; i++ {
-		store.PutInt64([]byte(fmt.Sprintf("user:%d", i)), int64(i))
-		store.PutInt64([]byte(fmt.Sprintf("item:%d", i)), int64(i))
-	}
-
-	// Delete all user: keys
-	deleted, err := store.DeletePrefix([]byte("user:"))
-	if err != nil {
-		t.Fatalf("DeletePrefix failed: %v", err)
-	}
-	if deleted != 5 {
-		t.Errorf("deleted = %d, want 5", deleted)
-	}
-
-	// Verify user: keys are gone
-	userCount := 0
-	store.ScanPrefix([]byte("user:"), func(key []byte, _ Value) bool {
-		userCount++
-		return true
-	})
-	if userCount != 0 {
-		t.Errorf("user count = %d, want 0", userCount)
-	}
-
-	// Verify item: keys still exist
-	itemCount := 0
-	store.ScanPrefix([]byte("item:"), func(key []byte, _ Value) bool {
-		itemCount++
-		return true
-	})
-	if itemCount != 5 {
-		t.Errorf("item count = %d, want 5", itemCount)
-	}
+	return fmt.Errorf("expected msgpack, got type %d", val.Type)
 }

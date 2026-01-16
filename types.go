@@ -3,8 +3,11 @@ package tinykvs
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"math"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // ValueType represents the type of stored value.
@@ -17,6 +20,8 @@ const (
 	ValueTypeString
 	ValueTypeBytes
 	ValueTypeTombstone // Special type for deletions
+	ValueTypeRecord    // Structured record with named fields
+	ValueTypeMsgpack   // Raw msgpack bytes for efficient struct storage
 )
 
 // inlineThreshold determines when to store data inline vs pointer.
@@ -47,6 +52,9 @@ type Value struct {
 	// For strings/bytes - either inline data or pointer to block
 	Bytes   []byte       // Used for inline storage (small values)
 	Pointer *dataPointer // Used for large values stored in data blocks
+
+	// For records - map of field name to value
+	Record map[string]any // Used for ValueTypeRecord
 }
 
 // Entry represents a key-value pair with metadata.
@@ -85,6 +93,15 @@ func (v *Value) EncodedSize() int {
 			return 1 + 1 + dataPointerSize // type + flag + pointer
 		}
 		return 1 + 1 + 4 + len(v.Bytes) // type + flag + length + data
+	case ValueTypeRecord:
+		// For records, we need to encode first to know size
+		if v.Record == nil {
+			return 1 + 4 // type + length(0)
+		}
+		encoded, _ := msgpack.Marshal(v.Record)
+		return 1 + 4 + len(encoded) // type + length + msgpack data
+	case ValueTypeMsgpack:
+		return 1 + 4 + len(v.Bytes) // type + length + raw msgpack data
 	case ValueTypeTombstone:
 		return 1 // type only
 	default:
@@ -125,6 +142,18 @@ func appendEncodedValue(dst []byte, v Value) []byte {
 			dst = binary.LittleEndian.AppendUint32(dst, uint32(len(v.Bytes)))
 			dst = append(dst, v.Bytes...)
 		}
+	case ValueTypeRecord:
+		if v.Record == nil {
+			dst = binary.LittleEndian.AppendUint32(dst, 0)
+		} else {
+			encoded, _ := msgpack.Marshal(v.Record)
+			dst = binary.LittleEndian.AppendUint32(dst, uint32(len(encoded)))
+			dst = append(dst, encoded...)
+		}
+	case ValueTypeMsgpack:
+		// Raw msgpack bytes - store directly with length prefix
+		dst = binary.LittleEndian.AppendUint32(dst, uint32(len(v.Bytes)))
+		dst = append(dst, v.Bytes...)
 	case ValueTypeTombstone:
 		// No additional data
 	}
@@ -195,6 +224,34 @@ func DecodeValueZeroCopy(data []byte) (Value, int, error) {
 			v.Bytes = data[6 : 6+length]
 			consumed = 6 + int(length)
 		}
+
+	case ValueTypeRecord:
+		if len(data) < 5 {
+			return Value{}, 0, ErrInvalidValue
+		}
+		length := binary.LittleEndian.Uint32(data[1:])
+		if len(data) < 5+int(length) {
+			return Value{}, 0, ErrInvalidValue
+		}
+		if length > 0 {
+			v.Record = make(map[string]any)
+			if err := msgpack.Unmarshal(data[5:5+length], &v.Record); err != nil {
+				return Value{}, 0, ErrInvalidValue
+			}
+		}
+		consumed = 5 + int(length)
+
+	case ValueTypeMsgpack:
+		if len(data) < 5 {
+			return Value{}, 0, ErrInvalidValue
+		}
+		length := binary.LittleEndian.Uint32(data[1:])
+		if len(data) < 5+int(length) {
+			return Value{}, 0, ErrInvalidValue
+		}
+		// Zero-copy: slice into source buffer
+		v.Bytes = data[5 : 5+length]
+		consumed = 5 + int(length)
 
 	case ValueTypeTombstone:
 		consumed = 1
@@ -268,6 +325,35 @@ func DecodeValue(data []byte) (Value, int, error) {
 			copy(v.Bytes, data[6:6+length])
 			consumed = 6 + int(length)
 		}
+
+	case ValueTypeRecord:
+		if len(data) < 5 {
+			return Value{}, 0, ErrInvalidValue
+		}
+		length := binary.LittleEndian.Uint32(data[1:])
+		if len(data) < 5+int(length) {
+			return Value{}, 0, ErrInvalidValue
+		}
+		if length > 0 {
+			v.Record = make(map[string]any)
+			if err := msgpack.Unmarshal(data[5:5+length], &v.Record); err != nil {
+				return Value{}, 0, ErrInvalidValue
+			}
+		}
+		consumed = 5 + int(length)
+
+	case ValueTypeMsgpack:
+		if len(data) < 5 {
+			return Value{}, 0, ErrInvalidValue
+		}
+		length := binary.LittleEndian.Uint32(data[1:])
+		if len(data) < 5+int(length) {
+			return Value{}, 0, ErrInvalidValue
+		}
+		// Copy the bytes for safety
+		v.Bytes = make([]byte, length)
+		copy(v.Bytes, data[5:5+length])
+		consumed = 5 + int(length)
 
 	case ValueTypeTombstone:
 		// No additional data
@@ -348,6 +434,41 @@ func BytesValue(v []byte) Value {
 // TombstoneValue creates a tombstone Value for deletions.
 func TombstoneValue() Value {
 	return Value{Type: ValueTypeTombstone}
+}
+
+// RecordValue creates a Value containing a structured record.
+func RecordValue(fields map[string]any) Value {
+	return Value{Type: ValueTypeRecord, Record: fields}
+}
+
+// MsgpackValue creates a Value containing raw msgpack bytes.
+// This is more efficient than RecordValue for storing structs.
+func MsgpackValue(data []byte) Value {
+	return Value{Type: ValueTypeMsgpack, Bytes: data}
+}
+
+// DecodeMsgpack decodes msgpack bytes into a record map.
+func DecodeMsgpack(data []byte) (map[string]any, error) {
+	var record map[string]any
+	if err := msgpack.Unmarshal(data, &record); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+// EncodeMsgpack encodes a record map to msgpack bytes.
+func EncodeMsgpack(record map[string]any) ([]byte, error) {
+	return msgpack.Marshal(record)
+}
+
+// EncodeJson encodes any value to JSON bytes.
+func EncodeJson(data any) ([]byte, error) {
+	return json.Marshal(data)
+}
+
+// DecodeJson decodes JSON bytes into the provided destination.
+func DecodeJson(data []byte, dest any) error {
+	return json.Unmarshal(data, dest)
 }
 
 // IsTombstone returns true if this value represents a deletion.
