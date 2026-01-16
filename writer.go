@@ -28,6 +28,7 @@ type Writer struct {
 	flushCh    chan struct{}
 
 	// Compaction management
+	compactMu sync.Mutex
 	compactCh chan compactionTask
 
 	ctx    context.Context
@@ -327,6 +328,9 @@ func (w *Writer) runCompaction(task compactionTask) {
 }
 
 func (w *Writer) compactL0ToL1() {
+	w.compactMu.Lock()
+	defer w.compactMu.Unlock()
+
 	levels := w.reader.GetLevels()
 	if len(levels) == 0 || len(levels[0]) == 0 {
 		return
@@ -389,6 +393,9 @@ func (w *Writer) compactL0ToL1() {
 }
 
 func (w *Writer) compactLevelToNext(level int) {
+	w.compactMu.Lock()
+	defer w.compactMu.Unlock()
+
 	levels := w.reader.GetLevels()
 	if level >= len(levels) || len(levels[level]) == 0 {
 		return
