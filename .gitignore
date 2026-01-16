@@ -20,3 +20,4 @@ coverage.out
 # Test data
 /tmp/
 *.db/
+tinykvs-bench-arm64
