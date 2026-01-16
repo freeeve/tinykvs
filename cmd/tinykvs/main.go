@@ -434,6 +434,15 @@ func cmdCount(args []string) {
 		os.Exit(1)
 	}
 
+	// Open store to acquire lock (we read SSTables directly for speed)
+	opts := tinykvs.DefaultOptions(storeDir)
+	store, err := tinykvs.Open(storeDir, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
 	// Read manifest
 	manifestPath := filepath.Join(storeDir, "MANIFEST")
 	manifest, err := tinykvs.OpenManifest(manifestPath)
