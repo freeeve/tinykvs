@@ -2,6 +2,7 @@ package tinykvs
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 )
@@ -1595,4 +1596,60 @@ func TestStoreLargeValue(t *testing.T) {
 	if len(v) != len(largeValue) {
 		t.Errorf("value length = %d, want %d", len(v), len(largeValue))
 	}
+}
+
+func TestStoreLockFile(t *testing.T) {
+	dir := t.TempDir()
+
+	// Open first store
+	store1, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Try to open second store - should fail
+	_, err = Open(dir, DefaultOptions(dir))
+	if err != ErrStoreLocked {
+		t.Errorf("expected ErrStoreLocked, got %v", err)
+	}
+
+	// Close first store
+	store1.Close()
+
+	// Now opening should work
+	store2, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("failed to open store after close: %v", err)
+	}
+	store2.Close()
+}
+
+func TestStoreLockFileReleaseOnError(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a store to establish the directory structure
+	store1, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store1.Close()
+
+	// Corrupt the manifest to cause an error on open
+	// (This tests that the lock is released on error paths)
+	manifestPath := dir + "/MANIFEST"
+	os.WriteFile(manifestPath, []byte("corrupted"), 0644)
+
+	// Open should fail due to corrupt manifest
+	_, err = Open(dir, DefaultOptions(dir))
+	if err == nil {
+		t.Fatal("expected error opening corrupted store")
+	}
+
+	// Lock should be released, so we can fix and reopen
+	os.Remove(manifestPath)
+	store2, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("failed to reopen store after error: %v", err)
+	}
+	store2.Close()
 }

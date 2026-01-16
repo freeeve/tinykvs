@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 )
 
 // Store is the main key-value store.
@@ -29,8 +30,9 @@ type Store struct {
 	writer *Writer
 
 	// Synchronization
-	mu      sync.RWMutex
-	writeMu sync.Mutex // Single writer
+	mu       sync.RWMutex
+	writeMu  sync.Mutex // Single writer
+	lockFile *os.File   // Exclusive lock file
 
 	// State
 	nextID uint32 // Atomic SSTable ID counter
@@ -44,10 +46,23 @@ func Open(path string, opts Options) (*Store, error) {
 		return nil, err
 	}
 
+	// Acquire exclusive lock
+	lockPath := filepath.Join(path, "LOCK")
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open lock file: %w", err)
+	}
+
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		lockFile.Close()
+		return nil, ErrStoreLocked
+	}
+
 	opts.Dir = path
 
 	// Initialize store
 	s := &Store{
+		lockFile: lockFile,
 		opts:     opts,
 		dir:      path,
 		memtable: NewMemtable(),
@@ -59,6 +74,7 @@ func Open(path string, opts Options) (*Store, error) {
 	walPath := filepath.Join(path, "wal.log")
 	wal, err := OpenWAL(walPath, opts.WALSyncMode)
 	if err != nil {
+		s.releaseLock()
 		return nil, err
 	}
 	s.wal = wal
@@ -68,6 +84,7 @@ func Open(path string, opts Options) (*Store, error) {
 	manifest, err := OpenManifest(manifestPath)
 	if err != nil && !os.IsNotExist(err) {
 		wal.Close()
+		s.releaseLock()
 		return nil, err
 	}
 
@@ -77,6 +94,7 @@ func Open(path string, opts Options) (*Store, error) {
 		if err := s.loadSSTablesFromManifest(); err != nil {
 			manifest.Close()
 			wal.Close()
+			s.releaseLock()
 			return nil, err
 		}
 	} else {
@@ -86,12 +104,14 @@ func Open(path string, opts Options) (*Store, error) {
 		}
 		if err := s.loadSSTables(); err != nil {
 			wal.Close()
+			s.releaseLock()
 			return nil, err
 		}
 		// Create manifest from loaded SSTables
 		manifest, err = s.createManifestFromSSTables(manifestPath)
 		if err != nil {
 			wal.Close()
+			s.releaseLock()
 			return nil, err
 		}
 		s.manifest = manifest
@@ -107,6 +127,7 @@ func Open(path string, opts Options) (*Store, error) {
 	if err := s.recover(); err != nil {
 		s.manifest.Close()
 		wal.Close()
+		s.releaseLock()
 		return nil, err
 	}
 
@@ -233,6 +254,9 @@ func (s *Store) Close() error {
 		}
 	}
 	s.mu.Unlock()
+
+	// Release lock file
+	s.releaseLock()
 
 	s.closed = true
 	return nil
@@ -665,9 +689,19 @@ func (s *Store) replaceTablesAfterCompaction(
 	}
 }
 
+// releaseLock releases the exclusive lock file.
+func (s *Store) releaseLock() {
+	if s.lockFile != nil {
+		syscall.Flock(int(s.lockFile.Fd()), syscall.LOCK_UN)
+		s.lockFile.Close()
+		s.lockFile = nil
+	}
+}
+
 // Errors
 var (
 	ErrStoreClosed = errors.New("store is closed")
+	ErrStoreLocked = errors.New("store is locked by another process")
 )
 
 // Convenience functions for common operations
