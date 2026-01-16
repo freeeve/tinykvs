@@ -412,20 +412,6 @@ func (w *writer) compactL0ToL1() {
 
 	l0Tables := levels[0]
 
-	// Debug logging for compaction
-	var l0Size, l1Size int64
-	for _, t := range l0Tables {
-		l0Size += int64(t.Footer.FileSize)
-	}
-	if len(levels) > 1 {
-		for _, t := range levels[1] {
-			l1Size += int64(t.Footer.FileSize)
-		}
-	}
-	log.Printf("[compaction] Starting L0->L1: L0 tables=%d (%.2f MB), L1 tables=%d (%.2f MB)",
-		len(l0Tables), float64(l0Size)/(1024*1024),
-		len(levels[1]), float64(l1Size)/(1024*1024))
-
 	// Limit batch size if configured
 	if w.store.opts.L0CompactionBatchSize > 0 && len(l0Tables) > w.store.opts.L0CompactionBatchSize {
 		// Take oldest tables (at the beginning of the slice)
@@ -467,41 +453,6 @@ func (w *writer) compactL0ToL1() {
 		return
 	}
 	newTables := mergeRes.tables
-
-	// Debug: log actual disk sizes (stat) vs footer sizes
-	var newFooterSize, newStatSize int64
-	for _, t := range newTables {
-		newFooterSize += int64(t.Footer.FileSize)
-		newStatSize += t.Size() // Uses os.Stat result
-	}
-	var inputFooterSize, inputStatSize int64
-	var inputKeys uint64
-	for _, t := range l0Tables {
-		inputFooterSize += int64(t.Footer.FileSize)
-		inputStatSize += t.Size()
-		inputKeys += t.Footer.NumKeys
-	}
-	for _, t := range l1Tables {
-		inputFooterSize += int64(t.Footer.FileSize)
-		inputStatSize += t.Size()
-		inputKeys += t.Footer.NumKeys
-	}
-	var outputKeys uint64
-	for _, t := range newTables {
-		outputKeys += t.Footer.NumKeys
-	}
-	log.Printf("[compaction] Finished L0->L1: %d L0 + %d L1 -> %d new tables",
-		len(l0Tables), len(l1Tables), len(newTables))
-	log.Printf("[compaction]   Input:  footer=%.2f MB, stat=%.2f MB, keys=%d",
-		float64(inputFooterSize)/(1024*1024), float64(inputStatSize)/(1024*1024), inputKeys)
-	log.Printf("[compaction]   Output: footer=%.2f MB, stat=%.2f MB, keys=%d, uncompressed=%.2f MB",
-		float64(newFooterSize)/(1024*1024), float64(newStatSize)/(1024*1024), outputKeys,
-		float64(mergeRes.uncompressedBytes)/(1024*1024))
-	if inputStatSize > 0 {
-		log.Printf("[compaction]   Ratio: %.2f%% (output/input stat bytes), compression=%.1f%%",
-			float64(newStatSize)*100/float64(inputStatSize),
-			float64(newStatSize)*100/float64(mergeRes.uncompressedBytes))
-	}
 
 	// Update store with new tables
 	w.store.replaceTablesAfterCompaction(0, l0Tables, l1Tables, newTables)
@@ -719,15 +670,11 @@ func (w *writer) SetSequence(seq uint64) {
 
 // ForceCompact forces compaction of all L0 tables to L1.
 func (w *writer) ForceCompact() error {
-	iteration := 0
 	for {
 		levels := w.reader.GetLevels()
 		if len(levels) == 0 || len(levels[0]) == 0 {
-			log.Printf("[ForceCompact] Complete after %d iterations", iteration)
 			return nil // No more L0 tables
 		}
-		iteration++
-		log.Printf("[ForceCompact] Iteration %d: L0 has %d tables", iteration, len(levels[0]))
 		w.compactL0ToL1()
 	}
 }
@@ -977,5 +924,13 @@ func (it *sstableIterator) Entry() Entry {
 func sortTablesByMinKey(tables []*SSTable) {
 	sort.Slice(tables, func(i, j int) bool {
 		return CompareKeys(tables[i].MinKey(), tables[j].MinKey()) < 0
+	})
+}
+
+// sortTablesByID sorts tables by their ID (oldest first = lowest ID first).
+// This is critical for L0 tables to ensure correct compaction ordering.
+func sortTablesByID(tables []*SSTable) {
+	sort.Slice(tables, func(i, j int) bool {
+		return tables[i].ID < tables[j].ID
 	})
 }

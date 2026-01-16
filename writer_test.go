@@ -1028,3 +1028,77 @@ func TestCompactWithOverlappingL0(t *testing.T) {
 
 	store.Close()
 }
+
+// TestReopenAndCompactDataIntegrity verifies that reopening a store
+// and compacting doesn't lose data due to incorrect L0 table ordering.
+func TestReopenAndCompactDataIntegrity(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 1024            // Small to create many L0 tables
+	opts.L0CompactionTrigger = 100      // High so we don't auto-compact
+	opts.CompactionInterval = time.Hour // Disable background compaction
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Write same keys multiple times with different values
+	// This creates multiple L0 tables with overlapping keys
+	numKeys := 100
+	numRounds := 5
+	for round := 0; round < numRounds; round++ {
+		for i := 0; i < numKeys; i++ {
+			key := fmt.Sprintf("key%05d", i)
+			value := fmt.Sprintf("value-round%d", round)
+			if err := store.PutString([]byte(key), value); err != nil {
+				t.Fatalf("Put failed: %v", err)
+			}
+		}
+		// Flush after each round to create separate L0 tables
+		if err := store.Flush(); err != nil {
+			t.Fatalf("Flush failed: %v", err)
+		}
+	}
+
+	stats := store.Stats()
+	t.Logf("Before close: L0 tables=%d", stats.Levels[0].NumTables)
+
+	// Close the store
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	// Reopen with same settings
+	store, err = Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	stats = store.Stats()
+	t.Logf("After reopen: L0 tables=%d", stats.Levels[0].NumTables)
+
+	// Force compaction - this is where the bug could manifest
+	// if L0 tables are in wrong order after reload
+	if err := store.Compact(); err != nil {
+		t.Fatalf("Compact failed: %v", err)
+	}
+
+	stats = store.Stats()
+	t.Logf("After compact: L0=%d, L1=%d", stats.Levels[0].NumTables, stats.Levels[1].NumTables)
+
+	// Verify all keys have the value from the LAST round
+	expectedValue := fmt.Sprintf("value-round%d", numRounds-1)
+	for i := 0; i < numKeys; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		val, err := store.Get([]byte(key))
+		if err != nil {
+			t.Errorf("Get(%s) failed: %v", key, err)
+			continue
+		}
+		if val.String() != expectedValue {
+			t.Errorf("Get(%s) = %q, want %q (data loss - got older value)", key, val.String(), expectedValue)
+		}
+	}
+}

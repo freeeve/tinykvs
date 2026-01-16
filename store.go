@@ -690,6 +690,12 @@ func (s *Store) loadSSTables() error {
 		s.levels[level] = append(s.levels[level], r.sst)
 	}
 
+	// Sort L0 tables by ID (oldest first = lowest ID first)
+	// This is critical for correct compaction ordering
+	if len(s.levels) > 0 {
+		sortTablesByID(s.levels[0])
+	}
+
 	// Sort L1+ tables by min key
 	for level := 1; level < len(s.levels); level++ {
 		sortTablesByMinKey(s.levels[level])
@@ -762,6 +768,12 @@ func (s *Store) loadSSTablesFromManifest() error {
 			s.levels = append(s.levels, nil)
 		}
 		s.levels[level] = append(s.levels[level], r.sst)
+	}
+
+	// Sort L0 tables by ID (oldest first = lowest ID first)
+	// This is critical for correct compaction ordering
+	if len(s.levels) > 0 {
+		sortTablesByID(s.levels[0])
 	}
 
 	// Sort L1+ tables by min key
