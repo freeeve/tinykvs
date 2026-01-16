@@ -21,3 +21,4 @@ coverage.out
 /tmp/
 *.db/
 tinykvs-bench-arm64
+tinykvs-bench
