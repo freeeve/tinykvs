@@ -261,15 +261,6 @@ Block cache impact (random reads, 100K keys):
 
 Write time: 1h 28m for 1B records
 
-**snappy compression**
-
-| Operation | Throughput |
-|-----------|------------|
-| Sequential write | TBD |
-| Random read (no cache) | TBD |
-| Full scan | TBD |
-| Random prefix scan | TBD |
-
 Memory usage during benchmark:
 - Heap: 50-200 MB
 - Sys: 450-700 MB
