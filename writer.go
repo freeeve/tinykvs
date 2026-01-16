@@ -107,6 +107,57 @@ func (w *Writer) Delete(key []byte) error {
 	return w.Put(key, TombstoneValue())
 }
 
+// WriteBatch atomically writes all operations in the batch.
+func (w *Writer) WriteBatch(ops []batchOp) error {
+	if len(ops) == 0 {
+		return nil
+	}
+
+	// Allocate sequence numbers for all ops
+	startSeq := atomic.AddUint64(&w.sequence, uint64(len(ops))) - uint64(len(ops)) + 1
+
+	// Write all entries to WAL
+	for i, op := range ops {
+		seq := startSeq + uint64(i)
+		var entry WALEntry
+		if op.delete {
+			entry = WALEntry{
+				Operation: OpDelete,
+				Key:       op.key,
+				Value:     TombstoneValue(),
+				Sequence:  seq,
+			}
+		} else {
+			entry = WALEntry{
+				Operation: OpPut,
+				Key:       op.key,
+				Value:     op.value,
+				Sequence:  seq,
+			}
+		}
+		if err := w.wal.Append(entry); err != nil {
+			return err
+		}
+	}
+
+	// Apply all entries to memtable
+	for i, op := range ops {
+		seq := startSeq + uint64(i)
+		if op.delete {
+			w.memtable.Put(op.key, TombstoneValue(), seq)
+		} else {
+			w.memtable.Put(op.key, op.value, seq)
+		}
+	}
+
+	// Check if flush is needed
+	if w.memtable.Size() >= w.store.opts.MemtableSize {
+		w.triggerFlush()
+	}
+
+	return nil
+}
+
 // triggerFlush initiates an async flush.
 // Blocks if too many immutable memtables are pending (backpressure).
 func (w *Writer) triggerFlush() {

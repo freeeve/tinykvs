@@ -1653,3 +1653,182 @@ func TestStoreLockFileReleaseOnError(t *testing.T) {
 	}
 	store2.Close()
 }
+
+func TestBatchWrite(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Create a batch
+	batch := NewBatch()
+	batch.PutString([]byte("key1"), "value1")
+	batch.PutString([]byte("key2"), "value2")
+	batch.PutInt64([]byte("counter"), 100)
+	batch.Delete([]byte("nonexistent"))
+
+	if batch.Len() != 4 {
+		t.Errorf("batch.Len() = %d, want 4", batch.Len())
+	}
+
+	// Write batch
+	if err := store.WriteBatch(batch); err != nil {
+		t.Fatalf("WriteBatch failed: %v", err)
+	}
+
+	// Verify writes
+	v1, _ := store.GetString([]byte("key1"))
+	if v1 != "value1" {
+		t.Errorf("key1 = %q, want value1", v1)
+	}
+
+	v2, _ := store.GetString([]byte("key2"))
+	if v2 != "value2" {
+		t.Errorf("key2 = %q, want value2", v2)
+	}
+
+	v3, _ := store.GetInt64([]byte("counter"))
+	if v3 != 100 {
+		t.Errorf("counter = %d, want 100", v3)
+	}
+
+	// Test batch reuse
+	batch.Reset()
+	if batch.Len() != 0 {
+		t.Errorf("after Reset, batch.Len() = %d, want 0", batch.Len())
+	}
+}
+
+func TestBatchWriteEmpty(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Empty batch should be no-op
+	batch := NewBatch()
+	if err := store.WriteBatch(batch); err != nil {
+		t.Fatalf("WriteBatch on empty batch failed: %v", err)
+	}
+
+	// Nil batch should be no-op
+	if err := store.WriteBatch(nil); err != nil {
+		t.Fatalf("WriteBatch on nil batch failed: %v", err)
+	}
+}
+
+func TestPutIfNotExists(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// First put should succeed
+	err = store.PutIfNotExists([]byte("key"), StringValue("value1"))
+	if err != nil {
+		t.Fatalf("first PutIfNotExists failed: %v", err)
+	}
+
+	// Second put should fail
+	err = store.PutIfNotExists([]byte("key"), StringValue("value2"))
+	if err != ErrKeyExists {
+		t.Errorf("second PutIfNotExists: got %v, want ErrKeyExists", err)
+	}
+
+	// Verify original value
+	v, _ := store.GetString([]byte("key"))
+	if v != "value1" {
+		t.Errorf("value = %q, want value1", v)
+	}
+}
+
+func TestPutIfEquals(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Set initial value
+	store.Put([]byte("key"), Int64Value(100))
+
+	// CAS with correct expected value should succeed
+	err = store.PutIfEquals([]byte("key"), Int64Value(200), Int64Value(100))
+	if err != nil {
+		t.Fatalf("PutIfEquals with correct expected failed: %v", err)
+	}
+
+	// Verify new value
+	v, _ := store.GetInt64([]byte("key"))
+	if v != 200 {
+		t.Errorf("value = %d, want 200", v)
+	}
+
+	// CAS with wrong expected value should fail
+	err = store.PutIfEquals([]byte("key"), Int64Value(300), Int64Value(100))
+	if err != ErrConditionFailed {
+		t.Errorf("PutIfEquals with wrong expected: got %v, want ErrConditionFailed", err)
+	}
+
+	// Value should be unchanged
+	v, _ = store.GetInt64([]byte("key"))
+	if v != 200 {
+		t.Errorf("value after failed CAS = %d, want 200", v)
+	}
+
+	// CAS on non-existent key should fail
+	err = store.PutIfEquals([]byte("nokey"), Int64Value(1), Int64Value(0))
+	if err != ErrKeyNotFound {
+		t.Errorf("PutIfEquals on missing key: got %v, want ErrKeyNotFound", err)
+	}
+}
+
+func TestIncrement(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Increment non-existent key (starts at 0)
+	v, err := store.Increment([]byte("counter"), 5)
+	if err != nil {
+		t.Fatalf("Increment failed: %v", err)
+	}
+	if v != 5 {
+		t.Errorf("after first increment: got %d, want 5", v)
+	}
+
+	// Increment existing key
+	v, err = store.Increment([]byte("counter"), 10)
+	if err != nil {
+		t.Fatalf("second Increment failed: %v", err)
+	}
+	if v != 15 {
+		t.Errorf("after second increment: got %d, want 15", v)
+	}
+
+	// Decrement
+	v, err = store.Increment([]byte("counter"), -3)
+	if err != nil {
+		t.Fatalf("decrement failed: %v", err)
+	}
+	if v != 12 {
+		t.Errorf("after decrement: got %d, want 12", v)
+	}
+
+	// Increment on wrong type should fail
+	store.PutString([]byte("string"), "hello")
+	_, err = store.Increment([]byte("string"), 1)
+	if err != ErrTypeMismatch {
+		t.Errorf("Increment on string: got %v, want ErrTypeMismatch", err)
+	}
+}

@@ -198,6 +198,180 @@ func (s *Store) Delete(key []byte) error {
 	return s.writer.Delete(key)
 }
 
+// Batch accumulates multiple operations to be applied atomically.
+type Batch struct {
+	ops []batchOp
+}
+
+type batchOp struct {
+	key    []byte
+	value  Value
+	delete bool
+}
+
+// NewBatch creates a new batch for atomic writes.
+func NewBatch() *Batch {
+	return &Batch{}
+}
+
+// Put adds a put operation to the batch.
+func (b *Batch) Put(key []byte, value Value) {
+	// Copy key to avoid issues if caller reuses buffer
+	keyCopy := make([]byte, len(key))
+	copy(keyCopy, key)
+	b.ops = append(b.ops, batchOp{key: keyCopy, value: value, delete: false})
+}
+
+// Delete adds a delete operation to the batch.
+func (b *Batch) Delete(key []byte) {
+	keyCopy := make([]byte, len(key))
+	copy(keyCopy, key)
+	b.ops = append(b.ops, batchOp{key: keyCopy, delete: true})
+}
+
+// PutString adds a string put operation.
+func (b *Batch) PutString(key []byte, value string) {
+	b.Put(key, StringValue(value))
+}
+
+// PutInt64 adds an int64 put operation.
+func (b *Batch) PutInt64(key []byte, value int64) {
+	b.Put(key, Int64Value(value))
+}
+
+// PutBytes adds a bytes put operation.
+func (b *Batch) PutBytes(key []byte, value []byte) {
+	b.Put(key, BytesValue(value))
+}
+
+// Len returns the number of operations in the batch.
+func (b *Batch) Len() int {
+	return len(b.ops)
+}
+
+// Reset clears the batch for reuse.
+func (b *Batch) Reset() {
+	b.ops = b.ops[:0]
+}
+
+// WriteBatch atomically applies all operations in the batch.
+// All operations are written to WAL together before applying to memtable.
+func (s *Store) WriteBatch(batch *Batch) error {
+	if batch == nil || len(batch.ops) == 0 {
+		return nil
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	if s.closed {
+		return ErrStoreClosed
+	}
+
+	return s.writer.WriteBatch(batch.ops)
+}
+
+// PutIfNotExists stores a value only if the key doesn't exist.
+// Returns ErrKeyExists if the key already exists.
+func (s *Store) PutIfNotExists(key []byte, value Value) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	if s.closed {
+		return ErrStoreClosed
+	}
+
+	// Check if key exists
+	_, err := s.reader.Get(key)
+	if err == nil {
+		return ErrKeyExists
+	}
+	if err != ErrKeyNotFound {
+		return err
+	}
+
+	return s.writer.Put(key, value)
+}
+
+// PutIfEquals stores a value only if the current value equals expected.
+// Returns ErrConditionFailed if values don't match, ErrKeyNotFound if key doesn't exist.
+func (s *Store) PutIfEquals(key []byte, value Value, expected Value) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	if s.closed {
+		return ErrStoreClosed
+	}
+
+	// Get current value
+	current, err := s.reader.Get(key)
+	if err != nil {
+		return err
+	}
+
+	// Compare values
+	if !valuesEqual(current, expected) {
+		return ErrConditionFailed
+	}
+
+	return s.writer.Put(key, value)
+}
+
+// Increment atomically adds delta to an int64 value and returns the new value.
+// If key doesn't exist, it's treated as 0.
+// Returns error if existing value is not an int64.
+func (s *Store) Increment(key []byte, delta int64) (int64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	if s.closed {
+		return 0, ErrStoreClosed
+	}
+
+	// Get current value
+	var current int64
+	val, err := s.reader.Get(key)
+	if err == nil {
+		if val.Type != ValueTypeInt64 {
+			return 0, ErrTypeMismatch
+		}
+		current = val.Int64
+	} else if err != ErrKeyNotFound {
+		return 0, err
+	}
+
+	// Compute new value
+	newVal := current + delta
+
+	// Write new value
+	if err := s.writer.Put(key, Int64Value(newVal)); err != nil {
+		return 0, err
+	}
+
+	return newVal, nil
+}
+
+// valuesEqual compares two values for equality.
+func valuesEqual(a, b Value) bool {
+	if a.Type != b.Type {
+		return false
+	}
+	switch a.Type {
+	case ValueTypeInt64:
+		return a.Int64 == b.Int64
+	case ValueTypeFloat64:
+		return a.Float64 == b.Float64
+	case ValueTypeBool:
+		return a.Bool == b.Bool
+	case ValueTypeString, ValueTypeBytes:
+		return string(a.Bytes) == string(b.Bytes)
+	case ValueTypeTombstone:
+		return true
+	default:
+		return false
+	}
+}
+
 // Flush forces all data to disk.
 func (s *Store) Flush() error {
 	s.writeMu.Lock()
@@ -700,8 +874,11 @@ func (s *Store) releaseLock() {
 
 // Errors
 var (
-	ErrStoreClosed = errors.New("store is closed")
-	ErrStoreLocked = errors.New("store is locked by another process")
+	ErrStoreClosed     = errors.New("store is closed")
+	ErrStoreLocked     = errors.New("store is locked by another process")
+	ErrKeyExists       = errors.New("key already exists")
+	ErrConditionFailed = errors.New("condition failed")
+	ErrTypeMismatch    = errors.New("value type mismatch")
 )
 
 // Convenience functions for common operations
