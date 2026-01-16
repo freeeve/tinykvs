@@ -133,6 +133,9 @@ const (
 // BlockFooterSize is the size of the block footer in bytes.
 const BlockFooterSize = 13 // checksum(4) + uncompressed_size(4) + compressed_size(4) + compression_type(1)
 
+// LegacyBlockFooterSize is the v0.3.x footer size (no compression type byte).
+const LegacyBlockFooterSize = 12 // checksum(4) + uncompressed_size(4) + compressed_size(4)
+
 // Compression type markers in block footer
 const (
 	compressionTypeZstd   uint8 = 0
@@ -334,18 +337,47 @@ func (b *BlockBuilder) Entries() []BlockEntry {
 // so the Block should not be modified and is only valid while cached.
 // Call Block.Release() when done to return the buffer to the pool.
 func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
-	if len(data) < BlockFooterSize {
+	if len(data) < LegacyBlockFooterSize {
 		return nil, ErrCorruptedData
 	}
 
-	// Parse footer
-	footer := data[len(data)-BlockFooterSize:]
-	checksum := binary.LittleEndian.Uint32(footer[0:])
-	uncompressedSize := binary.LittleEndian.Uint32(footer[4:])
-	compressedSize := binary.LittleEndian.Uint32(footer[8:])
-	compType := footer[12]
+	// Try new format (13-byte footer) first, fall back to legacy (12-byte) if needed
+	var checksum, uncompressedSize, compressedSize uint32
+	var compType uint8
+	var compressed []byte
+	isLegacy := false
 
-	compressed := data[:len(data)-BlockFooterSize]
+	if len(data) >= BlockFooterSize {
+		// Try new format first
+		footer := data[len(data)-BlockFooterSize:]
+		checksum = binary.LittleEndian.Uint32(footer[0:])
+		uncompressedSize = binary.LittleEndian.Uint32(footer[4:])
+		compressedSize = binary.LittleEndian.Uint32(footer[8:])
+		compType = footer[12]
+		compressed = data[:len(data)-BlockFooterSize]
+
+		// Check if this looks like new format:
+		// - compressedSize must match
+		// - compType must be valid (0, 1, or 2)
+		if uint32(len(compressed)) != compressedSize || compType > compressionTypeNone {
+			// Try legacy format
+			isLegacy = true
+		}
+	} else {
+		isLegacy = true
+	}
+
+	if isLegacy {
+		if len(data) < LegacyBlockFooterSize {
+			return nil, ErrCorruptedData
+		}
+		footer := data[len(data)-LegacyBlockFooterSize:]
+		checksum = binary.LittleEndian.Uint32(footer[0:])
+		uncompressedSize = binary.LittleEndian.Uint32(footer[4:])
+		compressedSize = binary.LittleEndian.Uint32(footer[8:])
+		compType = compressionTypeZstd // Legacy files used zstd
+		compressed = data[:len(data)-LegacyBlockFooterSize]
+	}
 
 	if uint32(len(compressed)) != compressedSize {
 		return nil, ErrCorruptedData
