@@ -90,8 +90,8 @@ func runWrite(dir string, opts tinykvs.Options, numRecords int) {
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
 
-			fmt.Printf("Written: %dM / %dM (%.1f%%) | Batch: %.0f/s | Avg: %.0f/s | Heap: %dMB | Sys: %dMB\n",
-				(i+1)/1_000_000, numRecords/1_000_000, pct,
+			fmt.Printf("[%s] Written: %dM / %dM (%.1f%%) | Batch: %.0f/s | Avg: %.0f/s | Heap: %dMB | Sys: %dMB\n",
+				totalElapsed.Truncate(time.Second), (i+1)/1_000_000, numRecords/1_000_000, pct,
 				rate, avgRate, m.HeapAlloc/1024/1024, m.Sys/1024/1024)
 
 			lastReport = time.Now()
