@@ -5,7 +5,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/freeeve/tinykvs.svg)](https://pkg.go.dev/github.com/freeeve/tinykvs)
 [![Go Report Card](https://goreportcard.com/badge/github.com/freeeve/tinykvs)](https://goreportcard.com/report/github.com/freeeve/tinykvs)
 
-A low-memory, sorted key-value store for Go built on LSM-tree architecture with zstd compression.
+A low-memory, sorted key-value store for Go built on LSM-tree architecture with configurable compression (zstd, snappy, or none).
 
 ## Features
 
@@ -14,7 +14,7 @@ A low-memory, sorted key-value store for Go built on LSM-tree architecture with 
 - **Configurable memory** - Block cache, memtable size, bloom filters all tunable
 - **Concurrent access** - Concurrent reads and writes, optimized for read-heavy workloads
 - **Durability** - Write-ahead log with configurable sync modes
-- **Compression** - zstd compression with configurable levels
+- **Compression** - zstd (default), snappy, or none with configurable levels
 - **Bloom filters** - Fast negative lookups (can be disabled to save memory)
 
 ## Installation
@@ -97,6 +97,14 @@ func (s *Store) GetBool(key []byte) (bool, error)
 func (s *Store) GetBytes(key []byte) ([]byte, error)
 ```
 
+### Range Scans
+
+```go
+// Iterate over all keys with a given prefix (sorted order)
+// Return false from callback to stop iteration
+func (s *Store) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool) error
+```
+
 ### Value Types
 
 ```go
@@ -120,19 +128,27 @@ func BytesValue(v []byte) Value
 
 ```go
 type Options struct {
-    Dir              string        // Data directory
-    MemtableSize     int64         // Max memtable size before flush (default: 4MB)
-    BlockCacheSize   int64         // LRU cache size (default: 64MB, 0 to disable)
-    BlockSize        int           // Target block size (default: 4KB)
-    CompressionLevel int           // zstd level 1-4 (default: 1 = fastest)
-    BloomFPRate      float64       // Bloom filter false positive rate (default: 0.01)
-    WALSyncMode      WALSyncMode   // WAL sync behavior
-    VerifyChecksums  bool          // Verify on read (default: true)
+    Dir              string          // Data directory
+    MemtableSize     int64           // Max memtable size before flush (default: 4MB)
+    BlockCacheSize   int64           // LRU cache size (default: 64MB, 0 to disable)
+    BlockSize        int             // Target block size (default: 16KB)
+    CompressionType  CompressionType // zstd, snappy, or none (default: zstd)
+    CompressionLevel int             // zstd level 1-4 (default: 1 = fastest)
+    BloomFPRate      float64         // Bloom filter false positive rate (default: 0.01)
+    WALSyncMode      WALSyncMode     // WAL sync behavior
+    VerifyChecksums  bool            // Verify on read (default: true)
 }
+
+// Compression types
+const (
+    CompressionZstd   // Default, good compression and speed
+    CompressionSnappy // Faster, less compression
+    CompressionNone   // No compression
+)
 
 // Preset configurations
 func DefaultOptions(dir string) Options          // Balanced defaults
-func LowMemoryOptions(dir string) Options        // Minimal memory (1MB memtable, no cache, no bloom)
+func LowMemoryOptions(dir string) Options        // Minimal memory (4MB memtable, no cache, no bloom)
 func HighPerformanceOptions(dir string) Options  // Max throughput
 ```
 
@@ -168,7 +184,7 @@ func HighPerformanceOptions(dir string) Options  // Max throughput
 
 | Component | Choice | Rationale |
 |-----------|--------|-----------|
-| Compression | zstd | Fast, configurable ratio |
+| Compression | zstd/snappy/none | Configurable speed vs size tradeoff |
 | I/O | Explicit syscalls | Control over caching |
 | Index | Sparse (per block) | Low memory footprint |
 | Compaction | Leveled | Read-optimized |
@@ -178,7 +194,7 @@ func HighPerformanceOptions(dir string) Options  // Max throughput
 
 ```
 ┌────────────────────────────────────┐
-│ Data Block 0 (zstd compressed)     │
+│ Data Block 0 (compressed)          │
 │ Data Block 1                       │
 │ ...                                │
 │ Data Block N                       │
@@ -200,13 +216,13 @@ func HighPerformanceOptions(dir string) Options  // Max throughput
 | Block cache | Configurable (default 64MB) |
 | Memtable | Configurable (default 4MB) |
 | Bloom filters | ~1.2MB per 1M keys |
-| Sparse index | ~5KB per 1M keys |
+| Sparse index | ~140KB per 1M keys (with 16KB blocks) |
 
 For minimal memory (billions of records), use `LowMemoryOptions()`:
-- 1MB memtable
+- 4MB memtable
 - No block cache
 - No bloom filters
-- Total: ~2MB overhead regardless of dataset size
+- Index: ~140MB for 1B keys
 
 ## Performance
 
@@ -238,7 +254,7 @@ Ultra-low memory configuration with `GOMEMLIMIT=600MiB`:
 | WAL size | ~3-4 MB (bounded) |
 
 This configuration can sustain 1 billion sequential writes while staying within memory limits. The benchmark uses:
-- 1MB memtable
+- 4MB memtable
 - No block cache
 - No bloom filters
 - WAL sync disabled (for throughput)
@@ -281,7 +297,7 @@ store, _ := tinykvs.Open("/tmp/mydb", opts)
 For running on memory-constrained systems like t4g.micro (1GB RAM) with billions of records:
 
 ```go
-// Use LowMemoryOptions: 1MB memtable, no cache, no bloom filters
+// Use LowMemoryOptions: 4MB memtable, no cache, no bloom filters
 opts := tinykvs.LowMemoryOptions("/data/mydb")
 store, _ := tinykvs.Open("/data/mydb", opts)
 
@@ -290,6 +306,28 @@ store, _ := tinykvs.Open("/data/mydb", opts)
 ```
 
 This configuration can handle 1B+ records while staying within tight memory limits.
+
+### Prefix Scanning
+
+```go
+// Store user data with prefixed keys
+store.PutString([]byte("user:001:name"), "Alice")
+store.PutInt64([]byte("user:001:age"), 30)
+store.PutString([]byte("user:002:name"), "Bob")
+store.PutInt64([]byte("user:002:age"), 25)
+
+// Scan all keys for user:001
+store.ScanPrefix([]byte("user:001:"), func(key []byte, value tinykvs.Value) bool {
+    fmt.Printf("%s = %v\n", key, value)
+    return true // continue scanning
+})
+
+// Scan all users (returns keys in sorted order)
+store.ScanPrefix([]byte("user:"), func(key []byte, value tinykvs.Value) bool {
+    fmt.Printf("%s\n", key)
+    return true
+})
+```
 
 ### Statistics
 
