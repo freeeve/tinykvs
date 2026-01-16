@@ -8,7 +8,7 @@ import (
 )
 
 func TestMemtablePutGet(t *testing.T) {
-	mt := NewMemtable()
+	mt := newMemtable()
 
 	// Put some values
 	mt.Put([]byte("key1"), StringValue("value1"), 1)
@@ -40,7 +40,7 @@ func TestMemtablePutGet(t *testing.T) {
 }
 
 func TestMemtableUpdate(t *testing.T) {
-	mt := NewMemtable()
+	mt := newMemtable()
 
 	// Insert and update
 	mt.Put([]byte("key"), StringValue("v1"), 1)
@@ -64,7 +64,7 @@ func TestMemtableUpdate(t *testing.T) {
 }
 
 func TestMemtableIterator(t *testing.T) {
-	mt := NewMemtable()
+	mt := newMemtable()
 
 	// Insert in random order
 	keys := []string{"delta", "alpha", "charlie", "bravo"}
@@ -94,7 +94,7 @@ func TestMemtableIterator(t *testing.T) {
 }
 
 func TestMemtableIteratorSeek(t *testing.T) {
-	mt := NewMemtable()
+	mt := newMemtable()
 
 	for i := 0; i < 100; i++ {
 		key := fmt.Sprintf("key%03d", i)
@@ -124,7 +124,7 @@ func TestMemtableIteratorSeek(t *testing.T) {
 }
 
 func TestMemtableIteratorValueAndValid(t *testing.T) {
-	mt := NewMemtable()
+	mt := newMemtable()
 
 	mt.Put([]byte("key1"), Int64Value(42), 1)
 	mt.Put([]byte("key2"), StringValue("hello"), 2)
@@ -167,7 +167,7 @@ func TestMemtableIteratorValueAndValid(t *testing.T) {
 }
 
 func TestMemtableIteratorNilCurrent(t *testing.T) {
-	mt := NewMemtable()
+	mt := newMemtable()
 	mt.Put([]byte("key"), Int64Value(42), 1)
 
 	iter := mt.Iterator()
@@ -188,7 +188,7 @@ func TestMemtableIteratorNilCurrent(t *testing.T) {
 }
 
 func TestMemtableSizeTracking(t *testing.T) {
-	mt := NewMemtable()
+	mt := newMemtable()
 
 	if mt.Size() != 0 {
 		t.Errorf("initial size = %d, want 0", mt.Size())
@@ -201,7 +201,7 @@ func TestMemtableSizeTracking(t *testing.T) {
 }
 
 func TestMemtableConcurrentReads(t *testing.T) {
-	mt := NewMemtable()
+	mt := newMemtable()
 
 	// Pre-populate
 	for i := 0; i < 1000; i++ {
@@ -231,7 +231,7 @@ func TestMemtableConcurrentReads(t *testing.T) {
 }
 
 func BenchmarkMemtablePut(b *testing.B) {
-	mt := NewMemtable()
+	mt := newMemtable()
 	value := StringValue("benchmark value")
 
 	b.ResetTimer()
@@ -242,7 +242,7 @@ func BenchmarkMemtablePut(b *testing.B) {
 }
 
 func BenchmarkMemtablePutPregen(b *testing.B) {
-	mt := NewMemtable()
+	mt := newMemtable()
 	value := StringValue("benchmark value")
 
 	// Pre-generate keys to isolate Put allocations
@@ -258,7 +258,7 @@ func BenchmarkMemtablePutPregen(b *testing.B) {
 }
 
 func BenchmarkMemtableGet(b *testing.B) {
-	mt := NewMemtable()
+	mt := newMemtable()
 	value := StringValue("benchmark value")
 
 	// Pre-populate
@@ -275,7 +275,7 @@ func BenchmarkMemtableGet(b *testing.B) {
 }
 
 func BenchmarkMemtableIterator(b *testing.B) {
-	mt := NewMemtable()
+	mt := newMemtable()
 	value := StringValue("benchmark value")
 
 	for i := 0; i < 10000; i++ {
@@ -299,7 +299,7 @@ func BenchmarkMemtableIterator(b *testing.B) {
 }
 
 func TestMemtableIteratorEmpty(t *testing.T) {
-	mt := NewMemtable()
+	mt := newMemtable()
 	iter := mt.Iterator()
 	defer iter.Close()
 
@@ -309,7 +309,7 @@ func TestMemtableIteratorEmpty(t *testing.T) {
 }
 
 func TestMemtableLargeKeys(t *testing.T) {
-	mt := NewMemtable()
+	mt := newMemtable()
 
 	// Large key
 	largeKey := bytes.Repeat([]byte("x"), 10000)

@@ -541,4 +541,3 @@ func (m *Manifest) Sync() error {
 	}
 	return nil
 }
-

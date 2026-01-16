@@ -19,15 +19,15 @@ type Store struct {
 	dir  string
 
 	// Data structures
-	memtable *Memtable
-	wal      *WAL
+	memtable *memtable
+	wal      *wal
 	levels   [][]*SSTable // levels[0] = L0, levels[1] = L1, etc.
-	cache    *LRUCache
+	cache    *lruCache
 	manifest *Manifest // Tracks all SSTables
 
 	// Components
-	reader *Reader
-	writer *Writer
+	reader *reader
+	writer *writer
 
 	// Synchronization
 	mu       sync.RWMutex
@@ -65,14 +65,14 @@ func Open(path string, opts Options) (*Store, error) {
 		lockFile: lockFile,
 		opts:     opts,
 		dir:      path,
-		memtable: NewMemtable(),
+		memtable: newMemtable(),
 		levels:   make([][]*SSTable, opts.MaxLevels),
-		cache:    NewLRUCache(opts.BlockCacheSize),
+		cache:    newLRUCache(opts.BlockCacheSize),
 	}
 
-	// Open WAL
+	// Open wal
 	walPath := filepath.Join(path, "wal.log")
-	wal, err := OpenWAL(walPath, opts.WALSyncMode)
+	wal, err := openWAL(walPath, opts.WALSyncMode)
 	if err != nil {
 		s.releaseLock()
 		return nil, err
@@ -118,12 +118,12 @@ func Open(path string, opts Options) (*Store, error) {
 	}
 
 	// Initialize reader
-	s.reader = NewReader(s.memtable, s.levels, s.cache, opts)
+	s.reader = newReader(s.memtable, s.levels, s.cache, opts)
 
 	// Initialize writer
-	s.writer = NewWriter(s, s.memtable, wal, s.reader)
+	s.writer = newWriter(s, s.memtable, wal, s.reader)
 
-	// Recover from WAL
+	// Recover from wal
 	if err := s.recover(); err != nil {
 		s.manifest.Close()
 		wal.Close()
@@ -255,7 +255,7 @@ func (b *Batch) Reset() {
 }
 
 // WriteBatch atomically applies all operations in the batch.
-// All operations are written to WAL together before applying to memtable.
+// All operations are written to wal together before applying to memtable.
 func (s *Store) WriteBatch(batch *Batch) error {
 	if batch == nil || len(batch.ops) == 0 {
 		return nil
@@ -495,7 +495,7 @@ func (s *Store) Close() error {
 	// Flush remaining data
 	s.writer.Flush()
 
-	// Close WAL
+	// Close wal
 	s.wal.Close()
 
 	// Close manifest
@@ -525,8 +525,8 @@ func (s *Store) Stats() StoreStats {
 	defer s.mu.RUnlock()
 
 	stats := StoreStats{
-		MemtableSize:  s.writer.Memtable().Size(),
-		MemtableCount: s.writer.Memtable().Count(),
+		MemtableSize:  s.writer.getMemtable().Size(),
+		MemtableCount: s.writer.getMemtable().Count(),
 		CacheStats:    s.cache.Stats(),
 	}
 
@@ -579,9 +579,9 @@ func (s *Store) recover() error {
 	var maxSeq uint64
 	for _, entry := range entries {
 		switch entry.Operation {
-		case OpPut:
+		case opPut:
 			s.memtable.Put(entry.Key, entry.Value, entry.Sequence)
-		case OpDelete:
+		case opDelete:
 			s.memtable.Put(entry.Key, TombstoneValue(), entry.Sequence)
 		}
 		if entry.Sequence > maxSeq {

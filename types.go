@@ -19,21 +19,21 @@ const (
 	ValueTypeTombstone // Special type for deletions
 )
 
-// InlineThreshold determines when to store data inline vs pointer.
+// inlineThreshold determines when to store data inline vs pointer.
 // Values smaller than this are stored directly in the record.
-const InlineThreshold = 64
+const inlineThreshold = 64
 
 // DataPointer references variable-length data stored in data blocks.
-// Used for strings/bytes larger than InlineThreshold.
-type DataPointer struct {
+// Used for strings/bytes larger than inlineThreshold.
+type dataPointer struct {
 	FileID      uint32 // SSTable file identifier
 	BlockOffset uint32 // Offset to the data block within file
 	DataOffset  uint16 // Offset within the decompressed block
 	Length      uint32 // Total length of the data
 }
 
-// DataPointerSize is the serialized size of a DataPointer.
-const DataPointerSize = 14 // 4 + 4 + 2 + 4
+// dataPointerSize is the serialized size of a DataPointer.
+const dataPointerSize = 14 // 4 + 4 + 2 + 4
 
 // Value represents a typed value in the store.
 type Value struct {
@@ -46,7 +46,7 @@ type Value struct {
 
 	// For strings/bytes - either inline data or pointer to block
 	Bytes   []byte       // Used for inline storage (small values)
-	Pointer *DataPointer // Used for large values stored in data blocks
+	Pointer *dataPointer // Used for large values stored in data blocks
 }
 
 // Entry represents a key-value pair with metadata.
@@ -82,7 +82,7 @@ func (v *Value) EncodedSize() int {
 		return 1 + 1 // type + bool
 	case ValueTypeString, ValueTypeBytes:
 		if v.Pointer != nil {
-			return 1 + 1 + DataPointerSize // type + flag + pointer
+			return 1 + 1 + dataPointerSize // type + flag + pointer
 		}
 		return 1 + 1 + 4 + len(v.Bytes) // type + flag + length + data
 	case ValueTypeTombstone:
@@ -94,12 +94,12 @@ func (v *Value) EncodedSize() int {
 
 // EncodeValue serializes a value to bytes.
 func EncodeValue(v Value) []byte {
-	return AppendEncodedValue(make([]byte, 0, v.EncodedSize()), v)
+	return appendEncodedValue(make([]byte, 0, v.EncodedSize()), v)
 }
 
-// AppendEncodedValue appends the encoded value to dst and returns the result.
+// appendEncodedValue appends the encoded value to dst and returns the result.
 // This avoids allocation when dst has sufficient capacity.
-func AppendEncodedValue(dst []byte, v Value) []byte {
+func appendEncodedValue(dst []byte, v Value) []byte {
 	dst = append(dst, byte(v.Type))
 
 	switch v.Type {
@@ -172,17 +172,17 @@ func DecodeValueZeroCopy(data []byte) (Value, int, error) {
 		}
 		isPointer := data[1] == 1
 		if isPointer {
-			if len(data) < 2+DataPointerSize {
+			if len(data) < 2+dataPointerSize {
 				return Value{}, 0, ErrInvalidValue
 			}
 			// Embed pointer data directly to avoid allocation
-			v.Pointer = &DataPointer{
+			v.Pointer = &dataPointer{
 				FileID:      binary.LittleEndian.Uint32(data[2:]),
 				BlockOffset: binary.LittleEndian.Uint32(data[6:]),
 				DataOffset:  binary.LittleEndian.Uint16(data[10:]),
 				Length:      binary.LittleEndian.Uint32(data[12:]),
 			}
-			consumed = 2 + DataPointerSize
+			consumed = 2 + dataPointerSize
 		} else {
 			if len(data) < 6 {
 				return Value{}, 0, ErrInvalidValue
@@ -245,16 +245,16 @@ func DecodeValue(data []byte) (Value, int, error) {
 		isPointer := data[1] == 1
 		if isPointer {
 			// Pointer to data block
-			if len(data) < 2+DataPointerSize {
+			if len(data) < 2+dataPointerSize {
 				return Value{}, 0, ErrInvalidValue
 			}
-			v.Pointer = &DataPointer{
+			v.Pointer = &dataPointer{
 				FileID:      binary.LittleEndian.Uint32(data[2:]),
 				BlockOffset: binary.LittleEndian.Uint32(data[6:]),
 				DataOffset:  binary.LittleEndian.Uint16(data[10:]),
 				Length:      binary.LittleEndian.Uint32(data[12:]),
 			}
-			consumed = 2 + DataPointerSize
+			consumed = 2 + dataPointerSize
 		} else {
 			// Inline data
 			if len(data) < 6 {

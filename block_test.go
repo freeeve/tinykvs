@@ -8,7 +8,7 @@ import (
 )
 
 func TestBlockBuilderAddBuild(t *testing.T) {
-	builder := NewBlockBuilder(4096)
+	builder := newBlockBuilder(4096)
 
 	// Add entries
 	builder.Add([]byte("key1"), []byte("value1"))
@@ -24,7 +24,7 @@ func TestBlockBuilderAddBuild(t *testing.T) {
 	}
 
 	// Build and verify
-	data, err := builder.Build(BlockTypeData, 1)
+	data, err := builder.Build(blockTypeData, 1)
 	if err != nil {
 		t.Fatalf("Build failed: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestBlockBuilderAddBuild(t *testing.T) {
 }
 
 func TestBlockBuilderReset(t *testing.T) {
-	builder := NewBlockBuilder(4096)
+	builder := newBlockBuilder(4096)
 
 	builder.Add([]byte("key1"), []byte("value1"))
 	builder.Add([]byte("key2"), []byte("value2"))
@@ -51,7 +51,7 @@ func TestBlockBuilderReset(t *testing.T) {
 }
 
 func TestBlockBuilderFull(t *testing.T) {
-	builder := NewBlockBuilder(100) // Small block
+	builder := newBlockBuilder(100) // Small block
 
 	// First entry should fit
 	if !builder.Add([]byte("key1"), []byte("value1")) {
@@ -73,7 +73,7 @@ func TestBlockBuilderFull(t *testing.T) {
 }
 
 func TestBlockBuilderFirstKey(t *testing.T) {
-	builder := NewBlockBuilder(4096)
+	builder := newBlockBuilder(4096)
 
 	// Empty builder
 	if builder.FirstKey() != nil {
@@ -90,7 +90,7 @@ func TestBlockBuilderFirstKey(t *testing.T) {
 }
 
 func TestBlockBuilderSize(t *testing.T) {
-	builder := NewBlockBuilder(4096)
+	builder := newBlockBuilder(4096)
 
 	initial := builder.Size()
 	if initial != 0 {
@@ -105,7 +105,7 @@ func TestBlockBuilderSize(t *testing.T) {
 }
 
 func TestBlockBuilderEntries(t *testing.T) {
-	builder := NewBlockBuilder(4096)
+	builder := newBlockBuilder(4096)
 
 	builder.Add([]byte("key1"), []byte("value1"))
 	builder.Add([]byte("key2"), []byte("value2"))
@@ -121,13 +121,13 @@ func TestBlockBuilderEntries(t *testing.T) {
 }
 
 func TestDecodeBlock(t *testing.T) {
-	builder := NewBlockBuilder(4096)
+	builder := newBlockBuilder(4096)
 
 	builder.Add([]byte("alpha"), []byte("value-alpha"))
 	builder.Add([]byte("beta"), []byte("value-beta"))
 	builder.Add([]byte("gamma"), []byte("value-gamma"))
 
-	data, err := builder.Build(BlockTypeData, 1)
+	data, err := builder.Build(blockTypeData, 1)
 	if err != nil {
 		t.Fatalf("Build failed: %v", err)
 	}
@@ -137,8 +137,8 @@ func TestDecodeBlock(t *testing.T) {
 		t.Fatalf("DecodeBlock failed: %v", err)
 	}
 
-	if block.Type != BlockTypeData {
-		t.Errorf("type = %d, want %d", block.Type, BlockTypeData)
+	if block.Type != blockTypeData {
+		t.Errorf("type = %d, want %d", block.Type, blockTypeData)
 	}
 
 	if len(block.Entries) != 3 {
@@ -165,10 +165,10 @@ func TestDecodeBlock(t *testing.T) {
 }
 
 func TestDecodeBlockChecksumVerification(t *testing.T) {
-	builder := NewBlockBuilder(4096)
+	builder := newBlockBuilder(4096)
 	builder.Add([]byte("key"), []byte("value"))
 
-	data, err := builder.Build(BlockTypeData, 1)
+	data, err := builder.Build(blockTypeData, 1)
 	if err != nil {
 		t.Fatalf("Build failed: %v", err)
 	}
@@ -183,17 +183,17 @@ func TestDecodeBlockChecksumVerification(t *testing.T) {
 }
 
 func TestDecodeBlockNoVerification(t *testing.T) {
-	builder := NewBlockBuilder(4096)
+	builder := newBlockBuilder(4096)
 	builder.Add([]byte("key"), []byte("value"))
 
-	data, err := builder.Build(BlockTypeData, 1)
+	data, err := builder.Build(blockTypeData, 1)
 	if err != nil {
 		t.Fatalf("Build failed: %v", err)
 	}
 
 	// Corrupt the data (but not the compressed content structure)
 	// Just corrupt the checksum in footer
-	data[len(data)-BlockFooterSize] ^= 0xFF
+	data[len(data)-blockFooterSize] ^= 0xFF
 
 	// Should not error when not verifying checksum
 	// (may still fail if corruption affects decompression, but that's OK)
@@ -209,10 +209,10 @@ func TestDecodeBlockInvalidData(t *testing.T) {
 }
 
 func TestDecodeBlockCompressedSizeMismatch(t *testing.T) {
-	builder := NewBlockBuilder(4096)
+	builder := newBlockBuilder(4096)
 	builder.Add([]byte("key"), []byte("value"))
 
-	data, err := builder.Build(BlockTypeData, 1)
+	data, err := builder.Build(blockTypeData, 1)
 	if err != nil {
 		t.Fatalf("Build failed: %v", err)
 	}
@@ -229,16 +229,16 @@ func TestDecodeBlockCompressedSizeMismatch(t *testing.T) {
 }
 
 func TestDecodeBlockChecksumMismatch(t *testing.T) {
-	builder := NewBlockBuilder(4096)
+	builder := newBlockBuilder(4096)
 	builder.Add([]byte("key"), []byte("value"))
 
-	data, err := builder.Build(BlockTypeData, 1)
+	data, err := builder.Build(blockTypeData, 1)
 	if err != nil {
 		t.Fatalf("Build failed: %v", err)
 	}
 
 	// Corrupt the checksum (first 4 bytes of footer, at len(data)-12)
-	data[len(data)-BlockFooterSize] ^= 0xFF
+	data[len(data)-blockFooterSize] ^= 0xFF
 
 	_, err = DecodeBlock(data, true) // with verification
 	if err != ErrChecksumMismatch {
@@ -248,7 +248,7 @@ func TestDecodeBlockChecksumMismatch(t *testing.T) {
 
 func TestSearchBlock(t *testing.T) {
 	block := &Block{
-		Type: BlockTypeData,
+		Type: blockTypeData,
 		Entries: []BlockEntry{
 			{Key: []byte("apple")},
 			{Key: []byte("banana")},
@@ -274,38 +274,38 @@ func TestSearchBlock(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := SearchBlock(block, []byte(tt.key))
+		got := searchBlock(block, []byte(tt.key))
 		if got != tt.want {
-			t.Errorf("SearchBlock(%q) = %d, want %d", tt.key, got, tt.want)
+			t.Errorf("searchBlock(%q) = %d, want %d", tt.key, got, tt.want)
 		}
 	}
 }
 
 func TestSearchBlockEmpty(t *testing.T) {
-	block := &Block{Type: BlockTypeData, Entries: []BlockEntry{}}
+	block := &Block{Type: blockTypeData, Entries: []BlockEntry{}}
 
-	if SearchBlock(block, []byte("any")) != -1 {
+	if searchBlock(block, []byte("any")) != -1 {
 		t.Error("search in empty block should return -1")
 	}
 }
 
 func TestSearchBlockSingleEntry(t *testing.T) {
 	block := &Block{
-		Type:    BlockTypeData,
+		Type:    blockTypeData,
 		Entries: []BlockEntry{{Key: []byte("only")}},
 	}
 
-	if SearchBlock(block, []byte("only")) != 0 {
+	if searchBlock(block, []byte("only")) != 0 {
 		t.Error("should find single entry")
 	}
 
-	if SearchBlock(block, []byte("other")) != -1 {
+	if searchBlock(block, []byte("other")) != -1 {
 		t.Error("should not find non-existent key")
 	}
 }
 
 func TestBlockCompressionLevels(t *testing.T) {
-	builder := NewBlockBuilder(4096)
+	builder := newBlockBuilder(4096)
 
 	// Add compressible data
 	for i := 0; i < 100; i++ {
@@ -316,12 +316,12 @@ func TestBlockCompressionLevels(t *testing.T) {
 	var sizes []int
 
 	for _, level := range levels {
-		builder2 := NewBlockBuilder(4096)
+		builder2 := newBlockBuilder(4096)
 		for i := 0; i < 100; i++ {
 			builder2.Add([]byte("key"), bytes.Repeat([]byte("x"), 50))
 		}
 
-		data, err := builder2.Build(BlockTypeData, level)
+		data, err := builder2.Build(blockTypeData, level)
 		if err != nil {
 			t.Fatalf("Build at level %d failed: %v", level, err)
 		}
@@ -376,12 +376,12 @@ func TestBlockRoundtrip(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			builder := NewBlockBuilder(8192)
+			builder := newBlockBuilder(8192)
 			for _, e := range tc.entries {
 				builder.Add(e.Key, e.Value)
 			}
 
-			data, err := builder.Build(BlockTypeData, 1)
+			data, err := builder.Build(blockTypeData, 1)
 			if err != nil {
 				t.Fatalf("Build failed: %v", err)
 			}
@@ -418,20 +418,20 @@ func BenchmarkBlockBuild(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		builder := NewBlockBuilder(4096)
+		builder := newBlockBuilder(4096)
 		for _, e := range entries {
 			builder.Add(e.Key, e.Value)
 		}
-		builder.Build(BlockTypeData, 1)
+		builder.Build(blockTypeData, 1)
 	}
 }
 
 func BenchmarkBlockDecode(b *testing.B) {
-	builder := NewBlockBuilder(4096)
+	builder := newBlockBuilder(4096)
 	for i := 0; i < 100; i++ {
 		builder.Add([]byte("benchmark-key"), []byte("benchmark-value"))
 	}
-	data, _ := builder.Build(BlockTypeData, 1)
+	data, _ := builder.Build(blockTypeData, 1)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -440,7 +440,7 @@ func BenchmarkBlockDecode(b *testing.B) {
 }
 
 func BenchmarkSearchBlock(b *testing.B) {
-	block := &Block{Type: BlockTypeData}
+	block := &Block{Type: blockTypeData}
 	for i := 0; i < 100; i++ {
 		block.Entries = append(block.Entries, BlockEntry{
 			Key: []byte(string(rune('a' + i))),
@@ -451,16 +451,16 @@ func BenchmarkSearchBlock(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		SearchBlock(block, key)
+		searchBlock(block, key)
 	}
 }
 
 func TestBlockBuilderCompressionEdgeCases(t *testing.T) {
-	builder := NewBlockBuilder(4096)
+	builder := newBlockBuilder(4096)
 	builder.Add([]byte("key"), []byte("value"))
 
 	// Test with level below range
-	data, err := builder.Build(BlockTypeData, -1)
+	data, err := builder.Build(blockTypeData, -1)
 	if err != nil {
 		t.Fatalf("Build with level -1 failed: %v", err)
 	}
@@ -471,7 +471,7 @@ func TestBlockBuilderCompressionEdgeCases(t *testing.T) {
 	// Reset and test with level above range
 	builder.Reset()
 	builder.Add([]byte("key"), []byte("value"))
-	data, err = builder.Build(BlockTypeData, 10)
+	data, err = builder.Build(blockTypeData, 10)
 	if err != nil {
 		t.Fatalf("Build with level 10 failed: %v", err)
 	}
@@ -482,12 +482,12 @@ func TestBlockBuilderCompressionEdgeCases(t *testing.T) {
 
 func TestEncoderPoolOverflow(t *testing.T) {
 	// Fill up the encoder pool by creating many blocks concurrently
-	builder := NewBlockBuilder(1024)
+	builder := newBlockBuilder(1024)
 	builder.Add([]byte("key"), []byte("value"))
 
 	// Build many blocks to exercise pool overflow
 	for i := 0; i < 20; i++ {
-		_, err := builder.Build(BlockTypeData, 1)
+		_, err := builder.Build(blockTypeData, 1)
 		if err != nil {
 			t.Fatalf("Build failed: %v", err)
 		}
@@ -496,9 +496,9 @@ func TestEncoderPoolOverflow(t *testing.T) {
 
 func TestDecodeBlockCorruptedCompression(t *testing.T) {
 	// Create valid block data first
-	builder := NewBlockBuilder(4096)
+	builder := newBlockBuilder(4096)
 	builder.Add([]byte("key"), []byte("value"))
-	validData, err := builder.Build(BlockTypeData, 1)
+	validData, err := builder.Build(blockTypeData, 1)
 	if err != nil {
 		t.Fatalf("Build failed: %v", err)
 	}
@@ -524,12 +524,12 @@ func TestDecodeBlockCorruptedCompression(t *testing.T) {
 func TestDecodeBlockTooShort(t *testing.T) {
 	// Create a block that's too short after decompression would be needed
 	// by providing valid footer but garbage compressed data
-	shortData := make([]byte, BlockFooterSize+5)
+	shortData := make([]byte, blockFooterSize+5)
 	// Set footer values
 	// checksum at [0:4]
 	// uncompressed size at [4:8]
 	// compressed size at [8:12]
-	footerStart := len(shortData) - BlockFooterSize
+	footerStart := len(shortData) - blockFooterSize
 	binary.LittleEndian.PutUint32(shortData[footerStart:], 0)    // checksum (will be skipped)
 	binary.LittleEndian.PutUint32(shortData[footerStart+4:], 10) // uncompressed size
 	binary.LittleEndian.PutUint32(shortData[footerStart+8:], 5)  // compressed size matches data before footer
@@ -553,7 +553,7 @@ func TestCompressionTypes(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			builder := NewBlockBuilder(4096)
+			builder := newBlockBuilder(4096)
 
 			// Add some data
 			for i := 0; i < 10; i++ {
@@ -563,7 +563,7 @@ func TestCompressionTypes(t *testing.T) {
 			}
 
 			// Build with specified compression
-			data, err := builder.BuildWithCompression(BlockTypeData, tc.comp, 1)
+			data, err := builder.BuildWithCompression(blockTypeData, tc.comp, 1)
 			if err != nil {
 				t.Fatalf("Build failed: %v", err)
 			}

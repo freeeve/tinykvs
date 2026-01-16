@@ -168,9 +168,9 @@ func OpenSSTableFromManifest(meta *TableMeta, dir string) (*SSTable, error) {
 	}
 
 	return &SSTable{
-		ID:       meta.ID,
-		Path:     path,
-		Level:    meta.Level,
+		ID:    meta.ID,
+		Path:  path,
+		Level: meta.Level,
 		Footer: SSTableFooter{
 			IndexOffset: meta.IndexOffset,
 			IndexSize:   meta.IndexSize,
@@ -254,7 +254,7 @@ func (sst *SSTable) ensureBloom() error {
 
 // Get retrieves a value from the SSTable.
 // Returns the entry, whether it was found, and any error.
-func (sst *SSTable) Get(key []byte, cache *LRUCache, verifyChecksum bool) (Entry, bool, error) {
+func (sst *SSTable) Get(key []byte, cache *lruCache, verifyChecksum bool) (Entry, bool, error) {
 	// Check bloom filter first (if present) - lazy load if needed
 	if err := sst.ensureBloom(); err != nil {
 		return Entry{}, false, err
@@ -275,7 +275,7 @@ func (sst *SSTable) Get(key []byte, cache *LRUCache, verifyChecksum bool) (Entry
 	}
 
 	indexEntry := sst.Index.Entries[blockIdx]
-	cacheKey := CacheKey{FileID: sst.ID, BlockOffset: indexEntry.BlockOffset}
+	cacheKey := cacheKey{FileID: sst.ID, BlockOffset: indexEntry.BlockOffset}
 
 	// Try cache first
 	var block *Block
@@ -303,7 +303,7 @@ func (sst *SSTable) Get(key []byte, cache *LRUCache, verifyChecksum bool) (Entry
 	}
 
 	// Binary search within block
-	idx := SearchBlock(block, key)
+	idx := searchBlock(block, key)
 	if idx < 0 {
 		return Entry{}, false, nil
 	}
@@ -370,46 +370,58 @@ func (sst *SSTable) MemorySize() int64 {
 }
 
 // SSTableWriter builds an SSTable file.
-type SSTableWriter struct {
+type sstableWriter struct {
 	file *os.File
 	path string
 	opts Options
 	id   uint32
 
-	blockBuilder *BlockBuilder
-	indexBuilder *IndexBuilder
+	blockBuilder *blockBuilder
+	indexBuilder *indexBuilder
 	bloomFilter  *BloomFilter
 
-	dataOffset    uint64
-	numKeys       uint64
-	lastKey       []byte
-	minSeq        uint64
-	maxSeq        uint64
-	numTombstones uint64
+	dataOffset        uint64
+	numKeys           uint64
+	lastKey           []byte
+	minSeq            uint64
+	maxSeq            uint64
+	numTombstones     uint64
+	uncompressedBytes uint64 // Total uncompressed data bytes written
 
 	// Reusable buffer for encoding values
 	encodeBuf []byte
 }
 
-// NewSSTableWriter creates a new SSTable writer.
-func NewSSTableWriter(id uint32, path string, numKeys uint, opts Options) (*SSTableWriter, error) {
+// newSSTableWriter creates a new SSTable writer.
+// Set includeBloomFilter to false for L1+ tables (non-overlapping key ranges).
+func newSSTableWriter(id uint32, path string, numKeys uint, opts Options, includeBloomFilter bool) (*sstableWriter, error) {
+	return newSSTableWriterInternal(id, path, numKeys, opts, includeBloomFilter)
+}
+
+// NewSSTableWriter creates a new SSTable writer with bloom filter enabled.
+// For internal use, use newSSTableWriter which allows disabling bloom filters.
+func NewSSTableWriter(id uint32, path string, numKeys uint, opts Options) (*sstableWriter, error) {
+	return newSSTableWriterInternal(id, path, numKeys, opts, true)
+}
+
+func newSSTableWriterInternal(id uint32, path string, numKeys uint, opts Options, includeBloomFilter bool) (*sstableWriter, error) {
 	file, err := os.Create(path)
 	if err != nil {
 		return nil, err
 	}
 
-	w := &SSTableWriter{
+	w := &sstableWriter{
 		file:         file,
 		path:         path,
 		opts:         opts,
 		id:           id,
-		blockBuilder: NewBlockBuilder(opts.BlockSize),
-		indexBuilder: NewIndexBuilder(),
+		blockBuilder: newBlockBuilder(opts.BlockSize),
+		indexBuilder: newIndexBuilder(),
 		encodeBuf:    make([]byte, 0, 128),
 	}
 
-	// Only create bloom filter if not disabled
-	if !opts.DisableBloomFilter {
+	// Only create bloom filter for L0 tables (overlapping key ranges)
+	if includeBloomFilter && !opts.DisableBloomFilter {
 		w.bloomFilter = NewBloomFilter(numKeys, opts.BloomFPRate)
 	}
 
@@ -417,7 +429,7 @@ func NewSSTableWriter(id uint32, path string, numKeys uint, opts Options) (*SSTa
 }
 
 // Add adds an entry to the SSTable.
-func (w *SSTableWriter) Add(entry Entry) error {
+func (w *sstableWriter) Add(entry Entry) error {
 	// Update bloom filter if enabled
 	if w.bloomFilter != nil {
 		w.bloomFilter.Add(entry.Key)
@@ -436,7 +448,7 @@ func (w *SSTableWriter) Add(entry Entry) error {
 	}
 
 	// Encode value using reusable buffer
-	w.encodeBuf = AppendEncodedValue(w.encodeBuf[:0], entry.Value)
+	w.encodeBuf = appendEncodedValue(w.encodeBuf[:0], entry.Value)
 
 	// Try to add to current block
 	if !w.blockBuilder.Add(entry.Key, w.encodeBuf) {
@@ -451,7 +463,7 @@ func (w *SSTableWriter) Add(entry Entry) error {
 	return nil
 }
 
-func (w *SSTableWriter) flushDataBlock() error {
+func (w *sstableWriter) flushDataBlock() error {
 	if w.blockBuilder.Count() == 0 {
 		return nil
 	}
@@ -462,8 +474,11 @@ func (w *SSTableWriter) flushDataBlock() error {
 	lastKey := entries[len(entries)-1].Key
 	keysInBlock := w.blockBuilder.Count()
 
+	// Track uncompressed size before compression
+	w.uncompressedBytes += uint64(w.blockBuilder.Size()) + 3 // +3 for header (type + num_entries)
+
 	// Build and write block
-	blockData, err := w.blockBuilder.BuildWithCompression(BlockTypeData, w.opts.CompressionType, w.opts.CompressionLevel)
+	blockData, err := w.blockBuilder.BuildWithCompression(blockTypeData, w.opts.CompressionType, w.opts.CompressionLevel)
 	if err != nil {
 		return err
 	}
@@ -481,8 +496,13 @@ func (w *SSTableWriter) flushDataBlock() error {
 	return nil
 }
 
+// Size returns the current written size of the SSTable.
+func (w *sstableWriter) Size() int64 {
+	return int64(w.dataOffset)
+}
+
 // Finish completes the SSTable and writes the footer.
-func (w *SSTableWriter) Finish(level int) error {
+func (w *sstableWriter) Finish(level int) error {
 	// Flush any remaining data
 	if err := w.flushDataBlock(); err != nil {
 		return err
@@ -545,24 +565,29 @@ func (w *SSTableWriter) Finish(level int) error {
 }
 
 // Close closes the writer without finishing.
-func (w *SSTableWriter) Close() error {
+func (w *sstableWriter) Close() error {
 	return w.file.Close()
 }
 
 // Abort closes and removes the incomplete SSTable file.
-func (w *SSTableWriter) Abort() error {
+func (w *sstableWriter) Abort() error {
 	w.file.Close()
 	return os.Remove(w.path)
 }
 
 // ID returns the SSTable ID.
-func (w *SSTableWriter) ID() uint32 {
+func (w *sstableWriter) ID() uint32 {
 	return w.id
 }
 
 // Path returns the SSTable file path.
-func (w *SSTableWriter) Path() string {
+func (w *sstableWriter) Path() string {
 	return w.path
+}
+
+// UncompressedBytes returns the total uncompressed data bytes written.
+func (w *sstableWriter) UncompressedBytes() uint64 {
+	return w.uncompressedBytes
 }
 
 func parseFooter(data []byte) SSTableFooter {

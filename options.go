@@ -109,14 +109,13 @@ const (
 	CompressionNone
 )
 
-
 // DefaultOptions returns production-ready defaults for the given directory.
 func DefaultOptions(dir string) Options {
 	return Options{
 		Dir:                 dir,
 		MemtableSize:        4 * 1024 * 1024,  // 4MB
 		BlockCacheSize:      64 * 1024 * 1024, // 64MB
-		BlockSize:           16 * 1024,        // 16KB
+		BlockSize:           16 * 1024,        // 16KB - fast random access
 		CompressionLevel:    1,                // zstd fastest
 		BloomFPRate:         0.01,             // 1% false positive
 		CompactionStyle:     CompactionStyleLeveled,

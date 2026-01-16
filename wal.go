@@ -8,7 +8,7 @@ import (
 	"sync"
 )
 
-// WAL record types for fragmentation
+// wal record types for fragmentation
 const (
 	walRecordFull   uint8 = 1 // Complete record in one block
 	walRecordFirst  uint8 = 2 // First fragment
@@ -16,10 +16,10 @@ const (
 	walRecordLast   uint8 = 4 // Last fragment
 )
 
-// WAL operation types
+// wal operation types
 const (
-	OpPut    uint8 = 1
-	OpDelete uint8 = 2
+	opPut    uint8 = 1
+	opDelete uint8 = 2
 )
 
 const (
@@ -27,16 +27,16 @@ const (
 	walHeaderSize = 7         // CRC(4) + Length(2) + Type(1)
 )
 
-// WALEntry represents a logged operation.
-type WALEntry struct {
+// walEntry represents a logged operation.
+type walEntry struct {
 	Operation uint8
 	Key       []byte
 	Value     Value // Empty for delete
 	Sequence  uint64
 }
 
-// WAL implements write-ahead logging for durability.
-type WAL struct {
+// wal implements write-ahead logging for durability.
+type wal struct {
 	file     *os.File
 	path     string
 	syncMode WALSyncMode
@@ -51,14 +51,14 @@ type WAL struct {
 	mu sync.Mutex
 }
 
-// OpenWAL opens or creates a WAL file.
-func OpenWAL(path string, syncMode WALSyncMode) (*WAL, error) {
+// openWAL opens or creates a wal file.
+func openWAL(path string, syncMode WALSyncMode) (*wal, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, err
 	}
 
-	return &WAL{
+	return &wal{
 		file:      file,
 		path:      path,
 		syncMode:  syncMode,
@@ -68,15 +68,15 @@ func OpenWAL(path string, syncMode WALSyncMode) (*WAL, error) {
 	}, nil
 }
 
-// Append writes an entry to the WAL.
-func (w *WAL) Append(entry WALEntry) error {
+// Append writes an entry to the wal.
+func (w *wal) Append(entry walEntry) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.appendUnlocked(entry)
 }
 
 // appendUnlocked is the internal unlocked version of Append.
-func (w *WAL) appendUnlocked(entry WALEntry) error {
+func (w *wal) appendUnlocked(entry walEntry) error {
 	// Encode entry
 	data := w.encodeEntry(entry)
 
@@ -136,14 +136,14 @@ func (w *WAL) appendUnlocked(entry WALEntry) error {
 	return nil
 }
 
-// Sync forces WAL data to disk.
-func (w *WAL) Sync() error {
+// Sync forces wal data to disk.
+func (w *wal) Sync() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.sync()
 }
 
-func (w *WAL) sync() error {
+func (w *wal) sync() error {
 	if w.blockPos > 0 {
 		if _, err := w.file.Write(w.block[:w.blockPos]); err != nil {
 			return err
@@ -153,7 +153,7 @@ func (w *WAL) sync() error {
 	return w.file.Sync()
 }
 
-func (w *WAL) flushBlock() error {
+func (w *wal) flushBlock() error {
 	if w.blockPos > 0 {
 		// Pad with zeros
 		for i := w.blockPos; i < walBlockSize; i++ {
@@ -167,8 +167,8 @@ func (w *WAL) flushBlock() error {
 	return nil
 }
 
-// Recover reads all entries from the WAL for crash recovery.
-func (w *WAL) Recover() ([]WALEntry, error) {
+// Recover reads all entries from the wal for crash recovery.
+func (w *wal) Recover() ([]walEntry, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -192,8 +192,8 @@ func (w *WAL) Recover() ([]WALEntry, error) {
 
 // recoverUnlocked is the internal unlocked version of Recover.
 // Caller must hold w.mu and position the file at the start.
-func (w *WAL) recoverUnlocked() ([]WALEntry, error) {
-	var entries []WALEntry
+func (w *wal) recoverUnlocked() ([]walEntry, error) {
+	var entries []walEntry
 	var fragmentBuffer []byte
 
 	block := make([]byte, walBlockSize)
@@ -259,8 +259,8 @@ func (w *WAL) recoverUnlocked() ([]WALEntry, error) {
 	return entries, nil
 }
 
-// Close closes the WAL file.
-func (w *WAL) Close() error {
+// Close closes the wal file.
+func (w *wal) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -270,8 +270,8 @@ func (w *WAL) Close() error {
 	return w.file.Close()
 }
 
-// Truncate clears the WAL after a successful flush.
-func (w *WAL) Truncate() error {
+// Truncate clears the wal after a successful flush.
+func (w *wal) Truncate() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -283,9 +283,9 @@ func (w *WAL) Truncate() error {
 	return err
 }
 
-// TruncateBefore removes WAL entries with sequence < minSeq.
-// This is used for partial WAL cleanup when some memtables are still pending flush.
-func (w *WAL) TruncateBefore(minSeq uint64) error {
+// TruncateBefore removes wal entries with sequence < minSeq.
+// This is used for partial wal cleanup when some memtables are still pending flush.
+func (w *wal) TruncateBefore(minSeq uint64) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -300,7 +300,7 @@ func (w *WAL) TruncateBefore(minSeq uint64) error {
 	}
 
 	// Filter entries to keep
-	var kept []WALEntry
+	var kept []walEntry
 	for _, e := range entries {
 		if e.Sequence >= minSeq {
 			kept = append(kept, e)
@@ -327,8 +327,8 @@ func (w *WAL) TruncateBefore(minSeq uint64) error {
 	return w.file.Sync()
 }
 
-// encodeEntry serializes a WAL entry into the reusable buffer.
-func (w *WAL) encodeEntry(entry WALEntry) []byte {
+// encodeEntry serializes a wal entry into the reusable buffer.
+func (w *wal) encodeEntry(entry walEntry) []byte {
 	// Format: op(1) + seq(8) + key_len(4) + key + value
 	size := 1 + 8 + 4 + len(entry.Key) + entry.Value.EncodedSize()
 
@@ -342,35 +342,35 @@ func (w *WAL) encodeEntry(entry WALEntry) []byte {
 	buf = binary.LittleEndian.AppendUint64(buf, entry.Sequence)
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(entry.Key)))
 	buf = append(buf, entry.Key...)
-	buf = AppendEncodedValue(buf, entry.Value)
+	buf = appendEncodedValue(buf, entry.Value)
 
 	w.encodeBuf = buf
 	return buf
 }
 
-// decodeEntry deserializes a WAL entry.
-func (w *WAL) decodeEntry(data []byte) (WALEntry, error) {
+// decodeEntry deserializes a wal entry.
+func (w *wal) decodeEntry(data []byte) (walEntry, error) {
 	if len(data) < 13 { // op(1) + seq(8) + key_len(4)
-		return WALEntry{}, ErrCorruptedData
+		return walEntry{}, ErrCorruptedData
 	}
 
-	entry := WALEntry{
+	entry := walEntry{
 		Operation: data[0],
 		Sequence:  binary.LittleEndian.Uint64(data[1:]),
 	}
 
 	keyLen := binary.LittleEndian.Uint32(data[9:])
 	if len(data) < 13+int(keyLen) {
-		return WALEntry{}, ErrCorruptedData
+		return walEntry{}, ErrCorruptedData
 	}
 
 	entry.Key = make([]byte, keyLen)
 	copy(entry.Key, data[13:13+keyLen])
 
-	if entry.Operation == OpPut {
+	if entry.Operation == opPut {
 		value, _, err := DecodeValue(data[13+keyLen:])
 		if err != nil {
-			return WALEntry{}, err
+			return walEntry{}, err
 		}
 		entry.Value = value
 	}

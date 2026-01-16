@@ -280,7 +280,7 @@ func TestValueStringAndGetBytes(t *testing.T) {
 
 func TestDataPointerEncoding(t *testing.T) {
 	// Test encoding/decoding of values with pointers (external data references)
-	pointer := &DataPointer{
+	pointer := &dataPointer{
 		FileID:      12345,
 		BlockOffset: 67890,
 		DataOffset:  100,
@@ -319,7 +319,7 @@ func TestDataPointerEncoding(t *testing.T) {
 }
 
 func TestDataPointerZeroCopy(t *testing.T) {
-	pointer := &DataPointer{
+	pointer := &dataPointer{
 		FileID:      1,
 		BlockOffset: 2,
 		DataOffset:  3,
@@ -353,7 +353,7 @@ func TestEncodedSizeWithPointer(t *testing.T) {
 	// Pointer value
 	pointer := Value{
 		Type: ValueTypeString,
-		Pointer: &DataPointer{
+		Pointer: &dataPointer{
 			FileID:      1,
 			BlockOffset: 2,
 			DataOffset:  3,

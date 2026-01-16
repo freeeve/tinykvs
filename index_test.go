@@ -6,7 +6,7 @@ import (
 )
 
 func TestIndexBuilderBuild(t *testing.T) {
-	builder := NewIndexBuilder()
+	builder := newIndexBuilder()
 
 	builder.Add([]byte("aaa"), []byte("azz"), 0, 1000, 50)
 	builder.Add([]byte("baa"), []byte("bzz"), 1000, 1000, 50)
@@ -32,7 +32,7 @@ func TestIndexBuilderBuild(t *testing.T) {
 }
 
 func TestIndexSearch(t *testing.T) {
-	builder := NewIndexBuilder()
+	builder := newIndexBuilder()
 
 	// Each block covers a key range
 	builder.Add([]byte("aaa"), []byte("azz"), 0, 1000, 10)
@@ -65,7 +65,7 @@ func TestIndexSearch(t *testing.T) {
 }
 
 func TestIndexSearchOutOfRange(t *testing.T) {
-	builder := NewIndexBuilder()
+	builder := newIndexBuilder()
 	builder.Add([]byte("baa"), []byte("bzz"), 0, 1000, 10)
 	builder.Add([]byte("caa"), []byte("czz"), 1000, 1000, 10)
 
@@ -83,7 +83,7 @@ func TestIndexSearchOutOfRange(t *testing.T) {
 }
 
 func TestIndexSearchEmpty(t *testing.T) {
-	builder := NewIndexBuilder()
+	builder := newIndexBuilder()
 	index := builder.Build()
 
 	if index.Search([]byte("any")) != -1 {
@@ -92,7 +92,7 @@ func TestIndexSearchEmpty(t *testing.T) {
 }
 
 func TestIndexSerializeDeserialize(t *testing.T) {
-	builder := NewIndexBuilder()
+	builder := newIndexBuilder()
 	builder.Add([]byte("alpha"), []byte("azulu"), 0, 1000, 25)
 	builder.Add([]byte("bravo"), []byte("bzulu"), 1000, 2000, 50)
 	builder.Add([]byte("charlie"), []byte("czulu"), 3000, 1500, 30)
@@ -269,7 +269,7 @@ func TestBloomFilterDeserializeInvalid(t *testing.T) {
 }
 
 func BenchmarkIndexSearch(b *testing.B) {
-	builder := NewIndexBuilder()
+	builder := newIndexBuilder()
 	for i := 0; i < 1000; i++ {
 		key := []byte{byte(i / 256), byte(i % 256)}
 		builder.Add(key, key, uint64(i*1000), 1000, 10)

@@ -714,11 +714,11 @@ func TestAggressiveCompactionCycles(t *testing.T) {
 func TestCompactionBlockRelease(t *testing.T) {
 	dir := t.TempDir()
 	opts := DefaultOptions(dir)
-	opts.MemtableSize = 4 * 1024        // 4KB memtables for many flushes
-	opts.BlockSize = 512                // Small blocks = more blocks to iterate
-	opts.L0CompactionTrigger = 4        // Compact after 4 L0 files
-	opts.BlockCacheSize = 0             // No cache - all blocks must be read from disk
-	opts.DisableBloomFilter = true      // Simplify test
+	opts.MemtableSize = 4 * 1024   // 4KB memtables for many flushes
+	opts.BlockSize = 512           // Small blocks = more blocks to iterate
+	opts.L0CompactionTrigger = 4   // Compact after 4 L0 files
+	opts.BlockCacheSize = 0        // No cache - all blocks must be read from disk
+	opts.DisableBloomFilter = true // Simplify test
 
 	store, err := Open(dir, opts)
 	if err != nil {
@@ -765,10 +765,10 @@ func TestCompactionBlockRelease(t *testing.T) {
 func TestCompactionEntryDataIntegrity(t *testing.T) {
 	dir := t.TempDir()
 	opts := DefaultOptions(dir)
-	opts.MemtableSize = 2 * 1024        // Very small for many flushes
-	opts.BlockSize = 256                // Very small blocks
-	opts.L0CompactionTrigger = 2        // Compact frequently
-	opts.BlockCacheSize = 0             // No cache
+	opts.MemtableSize = 2 * 1024 // Very small for many flushes
+	opts.BlockSize = 256         // Very small blocks
+	opts.L0CompactionTrigger = 2 // Compact frequently
+	opts.BlockCacheSize = 0      // No cache
 	opts.DisableBloomFilter = true
 
 	store, err := Open(dir, opts)
@@ -831,7 +831,7 @@ func TestMergeIteratorBlockLifetime(t *testing.T) {
 	dir := t.TempDir()
 	opts := DefaultOptions(dir)
 	opts.MemtableSize = 1024
-	opts.BlockSize = 128 // Very small to create many blocks
+	opts.BlockSize = 128    // Very small to create many blocks
 	opts.BlockCacheSize = 0 // Force all blocks to be read/released
 
 	store, err := Open(dir, opts)
@@ -874,4 +874,157 @@ func TestMergeIteratorBlockLifetime(t *testing.T) {
 			t.Errorf("Get(%s) = %q, want %q", key, val.String(), expectedValue)
 		}
 	}
+}
+
+// TestCompactDataSize verifies that Compact doesn't cause unexpected data growth.
+func TestCompactDataSize(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 64 * 1024  // 64KB memtables
+	opts.L0CompactionTrigger = 100 // Don't auto-compact
+	opts.BlockCacheSize = 0
+	opts.DisableBloomFilter = true // Simpler size comparison
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Write data to create multiple L0 tables
+	numRecords := 50000
+	for i := 0; i < numRecords; i++ {
+		key := fmt.Sprintf("key%08d", i)
+		value := fmt.Sprintf("value%08d", i)
+		store.PutString([]byte(key), value)
+	}
+	store.Flush()
+
+	// Record size before ForceCompact
+	statsBefore := store.Stats()
+	var sizeBeforeL0 int64
+	for _, level := range statsBefore.Levels {
+		if level.Level == 0 {
+			sizeBeforeL0 = level.Size
+		}
+	}
+	t.Logf("Before Compact: L0 tables=%d, L0 size=%d bytes", statsBefore.Levels[0].NumTables, sizeBeforeL0)
+
+	// Force compact
+	err = store.Compact()
+	if err != nil {
+		t.Fatalf("Compact failed: %v", err)
+	}
+
+	// Record size after ForceCompact
+	statsAfter := store.Stats()
+	var sizeAfterL1 int64
+	for _, level := range statsAfter.Levels {
+		if level.Level == 1 {
+			sizeAfterL1 = level.Size
+		}
+	}
+	t.Logf("After Compact: L0 tables=%d, L1 tables=%d, L1 size=%d bytes",
+		statsAfter.Levels[0].NumTables, statsAfter.Levels[1].NumTables, sizeAfterL1)
+
+	// L1 size should be roughly similar to L0 size (allow 50% overhead for metadata, indices)
+	maxAllowedSize := sizeBeforeL0 * 3 / 2
+	if sizeAfterL1 > maxAllowedSize {
+		t.Errorf("Compact caused unexpected growth: L0 was %d bytes, L1 is %d bytes (max allowed %d)",
+			sizeBeforeL0, sizeAfterL1, maxAllowedSize)
+	}
+
+	// Verify data integrity
+	for i := 0; i < numRecords; i += 500 {
+		key := fmt.Sprintf("key%08d", i)
+		expected := fmt.Sprintf("value%08d", i)
+		val, err := store.Get([]byte(key))
+		if err != nil {
+			t.Errorf("Get(%s) failed: %v", key, err)
+			continue
+		}
+		if val.String() != expected {
+			t.Errorf("Get(%s) = %q, want %q", key, val.String(), expected)
+		}
+	}
+
+	store.Close()
+}
+
+// TestCompactWithOverlappingL0 verifies Compact works correctly when L0 tables
+// have overlapping key ranges (updates to same keys).
+func TestCompactWithOverlappingL0(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 32 * 1024  // 32KB memtables
+	opts.L0CompactionTrigger = 100 // Don't auto-compact
+	opts.BlockCacheSize = 0
+	opts.DisableBloomFilter = true
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Write the same keys multiple times to create many L0 tables with overlapping data
+	numRecords := 10000
+	numRounds := 10 // Write each key 10 times
+	for round := 0; round < numRounds; round++ {
+		for i := 0; i < numRecords; i++ {
+			key := fmt.Sprintf("key%08d", i)
+			value := fmt.Sprintf("value%08d-round%02d", i, round)
+			store.PutString([]byte(key), value)
+		}
+		store.Flush() // Create an L0 table after each round
+	}
+
+	// Record size before Compact
+	statsBefore := store.Stats()
+	var sizeBeforeL0 int64
+	for _, level := range statsBefore.Levels {
+		if level.Level == 0 {
+			sizeBeforeL0 = level.Size
+		}
+	}
+	t.Logf("Before Compact: L0 tables=%d, L0 size=%d bytes", statsBefore.Levels[0].NumTables, sizeBeforeL0)
+
+	// Compact
+	err = store.Compact()
+	if err != nil {
+		t.Fatalf("Compact failed: %v", err)
+	}
+
+	// Record size after Compact
+	statsAfter := store.Stats()
+	var sizeAfterL1 int64
+	for _, level := range statsAfter.Levels {
+		if level.Level == 1 {
+			sizeAfterL1 = level.Size
+		}
+	}
+	t.Logf("After Compact: L0 tables=%d, L1 tables=%d, L1 size=%d bytes",
+		statsAfter.Levels[0].NumTables, statsAfter.Levels[1].NumTables, sizeAfterL1)
+
+	// L1 size should be MUCH smaller than L0 since most entries are duplicates
+	// Expect L1 to be at most 50% of L0 (in practice it should be ~30% due to deduplication)
+	expectedMaxSize := sizeBeforeL0 / 2
+	if sizeAfterL1 > expectedMaxSize {
+		t.Errorf("Compact didn't deduplicate properly: L0 was %d bytes, L1 is %d bytes (expected max %d)",
+			sizeBeforeL0, sizeAfterL1, expectedMaxSize)
+	}
+
+	// Verify data integrity - should have values from the last round
+	for i := 0; i < numRecords; i += 500 {
+		key := fmt.Sprintf("key%08d", i)
+		expected := fmt.Sprintf("value%08d-round%02d", i, numRounds-1)
+		val, err := store.Get([]byte(key))
+		if err != nil {
+			t.Errorf("Get(%s) failed: %v", key, err)
+			continue
+		}
+		if val.String() != expected {
+			t.Errorf("Get(%s) = %q, want %q", key, val.String(), expected)
+		}
+	}
+
+	store.Close()
 }

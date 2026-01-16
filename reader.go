@@ -2,27 +2,27 @@ package tinykvs
 
 import "sync"
 
-// Reader coordinates lookups across memtable and SSTables.
-type Reader struct {
+// reader coordinates lookups across memtable and SSTables.
+type reader struct {
 	mu sync.RWMutex
 
-	memtable   *Memtable
-	immutables []*Memtable  // Recently flushed, waiting for SSTable write
+	memtable   *memtable
+	immutables []*memtable  // Recently flushed, waiting for SSTable write
 	levels     [][]*SSTable // levels[0] = L0, levels[1] = L1, etc.
-	cache      *LRUCache
+	cache      *lruCache
 	opts       Options
 }
 
-// NewReader creates a new reader.
-func NewReader(memtable *Memtable, levels [][]*SSTable, cache *LRUCache, opts Options) *Reader {
+// newReader creates a new reader.
+func newReader(memtable *memtable, levels [][]*SSTable, cache *lruCache, opts Options) *reader {
 	// Make a deep copy of levels to avoid sharing with Store
-	// Store and Reader use different mutexes, so sharing would cause races
+	// Store and reader use different mutexes, so sharing would cause races
 	levelsCopy := make([][]*SSTable, len(levels))
 	for i, level := range levels {
 		levelsCopy[i] = make([]*SSTable, len(level))
 		copy(levelsCopy[i], level)
 	}
-	return &Reader{
+	return &reader{
 		memtable: memtable,
 		levels:   levelsCopy,
 		cache:    cache,
@@ -31,7 +31,7 @@ func NewReader(memtable *Memtable, levels [][]*SSTable, cache *LRUCache, opts Op
 }
 
 // Get looks up a key, checking memtable first, then SSTables.
-func (r *Reader) Get(key []byte) (Value, error) {
+func (r *reader) Get(key []byte) (Value, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -94,7 +94,7 @@ func (r *Reader) Get(key []byte) (Value, error) {
 
 // findTableForKey finds the SSTable that may contain the key (for L1+).
 // Returns the index of the table, or -1 if not found.
-func (r *Reader) findTableForKey(tables []*SSTable, key []byte) int {
+func (r *reader) findTableForKey(tables []*SSTable, key []byte) int {
 	lo, hi := 0, len(tables)-1
 
 	for lo <= hi {
@@ -117,22 +117,22 @@ func (r *Reader) findTableForKey(tables []*SSTable, key []byte) int {
 	return -1
 }
 
-// SetMemtable updates the active memtable.
-func (r *Reader) SetMemtable(mt *Memtable) {
+// Setmemtable updates the active memtable.
+func (r *reader) Setmemtable(mt *memtable) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.memtable = mt
 }
 
 // AddImmutable adds an immutable memtable.
-func (r *Reader) AddImmutable(mt *Memtable) {
+func (r *reader) AddImmutable(mt *memtable) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.immutables = append(r.immutables, mt)
 }
 
 // RemoveImmutable removes an immutable memtable after it's been flushed.
-func (r *Reader) RemoveImmutable(mt *Memtable) {
+func (r *reader) RemoveImmutable(mt *memtable) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i, imm := range r.immutables {
@@ -144,14 +144,14 @@ func (r *Reader) RemoveImmutable(mt *Memtable) {
 }
 
 // SetLevels updates the SSTable levels.
-func (r *Reader) SetLevels(levels [][]*SSTable) {
+func (r *reader) SetLevels(levels [][]*SSTable) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.levels = levels
 }
 
 // AddSSTable adds an SSTable to a level.
-func (r *Reader) AddSSTable(level int, sst *SSTable) {
+func (r *reader) AddSSTable(level int, sst *SSTable) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -164,7 +164,7 @@ func (r *Reader) AddSSTable(level int, sst *SSTable) {
 }
 
 // GetLevels returns a copy of the current levels.
-func (r *Reader) GetLevels() [][]*SSTable {
+func (r *reader) GetLevels() [][]*SSTable {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -179,7 +179,7 @@ func (r *Reader) GetLevels() [][]*SSTable {
 // ScanPrefix iterates over all keys with the given prefix in sorted order.
 // Keys are deduplicated (newest version wins) and tombstones are skipped.
 // Return false from the callback to stop iteration early.
-func (r *Reader) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool) error {
+func (r *reader) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -187,11 +187,11 @@ func (r *Reader) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool
 	scanner := newPrefixScanner(prefix, r.cache, r.opts.VerifyChecksums)
 
 	// Add memtable (highest priority - index 0)
-	scanner.addMemtable(r.memtable, 0)
+	scanner.addmemtable(r.memtable, 0)
 
 	// Add immutable memtables (newest first)
 	for i := len(r.immutables) - 1; i >= 0; i-- {
-		scanner.addMemtable(r.immutables[i], len(r.immutables)-i)
+		scanner.addmemtable(r.immutables[i], len(r.immutables)-i)
 	}
 
 	// Add SSTable levels
@@ -308,7 +308,7 @@ func hasKeyInRange(prefix, minKey, maxKey []byte) bool {
 // prefixScanner merges entries from memtables and SSTables for prefix scanning.
 type prefixScanner struct {
 	prefix  []byte
-	cache   *LRUCache
+	cache   *lruCache
 	verify  bool
 	heap    prefixHeap
 	current Entry
@@ -387,7 +387,7 @@ func (h *prefixHeap) init() {
 	}
 }
 
-func newPrefixScanner(prefix []byte, cache *LRUCache, verify bool) *prefixScanner {
+func newPrefixScanner(prefix []byte, cache *lruCache, verify bool) *prefixScanner {
 	return &prefixScanner{
 		prefix: prefix,
 		cache:  cache,
@@ -396,7 +396,7 @@ func newPrefixScanner(prefix []byte, cache *LRUCache, verify bool) *prefixScanne
 	}
 }
 
-func (s *prefixScanner) addMemtable(mt *Memtable, priority int) {
+func (s *prefixScanner) addmemtable(mt *memtable, priority int) {
 	src := &memtablePrefixSource{mt: mt, prefix: s.prefix}
 	src.seekToPrefix()
 	if src.valid {
@@ -469,9 +469,9 @@ func (s *prefixScanner) close() {
 
 // memtablePrefixSource wraps a memtable iterator for prefix scanning.
 type memtablePrefixSource struct {
-	mt     *Memtable
+	mt     *memtable
 	prefix []byte
-	iter   *MemtableIterator
+	iter   *memtableIterator
 	valid  bool
 }
 
@@ -505,7 +505,7 @@ func (s *memtablePrefixSource) close() {
 type sstablePrefixSource struct {
 	sst       *SSTable
 	prefix    []byte
-	cache     *LRUCache
+	cache     *lruCache
 	verify    bool
 	blockIdx  int
 	entryIdx  int
@@ -571,7 +571,7 @@ func (s *sstablePrefixSource) loadBlock() error {
 	}
 
 	ie := s.sst.Index.Entries[s.blockIdx]
-	cacheKey := CacheKey{FileID: s.sst.ID, BlockOffset: ie.BlockOffset}
+	cacheKey := cacheKey{FileID: s.sst.ID, BlockOffset: ie.BlockOffset}
 
 	// Try cache first
 	if s.cache != nil {

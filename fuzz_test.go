@@ -40,15 +40,15 @@ func FuzzDecodeValueZeroCopy(f *testing.F) {
 // FuzzDecodeBlock tests that DecodeBlock doesn't panic on arbitrary input
 func FuzzDecodeBlock(f *testing.F) {
 	// Valid block with minimal data (zstd compressed)
-	builder := NewBlockBuilder(4096)
+	builder := newBlockBuilder(4096)
 	builder.Add([]byte("key"), []byte{byte(ValueTypeInt64), 1, 0, 0, 0, 0, 0, 0, 0})
-	validBlock, _ := builder.Build(BlockTypeData, 1)
+	validBlock, _ := builder.Build(blockTypeData, 1)
 	f.Add(validBlock)
 
 	// Valid snappy block
 	builder.Reset()
 	builder.Add([]byte("key"), []byte{byte(ValueTypeInt64), 1, 0, 0, 0, 0, 0, 0, 0})
-	snappyBlock, _ := builder.BuildWithCompression(BlockTypeData, CompressionSnappy, 0)
+	snappyBlock, _ := builder.BuildWithCompression(blockTypeData, CompressionSnappy, 0)
 	f.Add(snappyBlock)
 
 	// Invalid/edge cases
@@ -129,7 +129,7 @@ func FuzzDecodeEntry(f *testing.F) {
 	}
 	f.Add(validEntry)
 	f.Add([]byte{})
-	f.Add([]byte{0, 0, 0, 0}) // zero-length key
+	f.Add([]byte{0, 0, 0, 0})         // zero-length key
 	f.Add([]byte{255, 255, 255, 255}) // huge key length
 
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -181,10 +181,10 @@ func FuzzBlockRoundTrip(f *testing.F) {
 		}
 
 		compression := CompressionType(compType % 3)
-		builder := NewBlockBuilder(4096)
+		builder := newBlockBuilder(4096)
 		builder.Add(key, value)
 
-		data, err := builder.BuildWithCompression(BlockTypeData, compression, 1)
+		data, err := builder.BuildWithCompression(blockTypeData, compression, 1)
 		if err != nil {
 			t.Fatalf("failed to build block: %v", err)
 		}

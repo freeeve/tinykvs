@@ -929,15 +929,15 @@ func TestReaderAddSSTableLevelExpansion(t *testing.T) {
 	opts := DefaultOptions(dir)
 
 	// Create a reader with no levels
-	mt := NewMemtable()
-	cache := NewLRUCache(1024 * 1024)
-	reader := NewReader(mt, nil, cache, opts)
+	mt := newMemtable()
+	cache := newLRUCache(1024 * 1024)
+	reader := newReader(mt, nil, cache, opts)
 
 	// Create a test SSTable
 	path := dir + "/test.sst"
-	writer, err := NewSSTableWriter(1, path, 10, opts)
+	writer, err := newSSTableWriter(1, path, 10, opts, true)
 	if err != nil {
-		t.Fatalf("NewSSTableWriter failed: %v", err)
+		t.Fatalf("newSSTableWriter failed: %v", err)
 	}
 	writer.Add(Entry{Key: []byte("key"), Value: Int64Value(42), Sequence: 1})
 	writer.Finish(0)
@@ -965,12 +965,12 @@ func TestReaderImmutableMemtable(t *testing.T) {
 	dir := t.TempDir()
 	opts := DefaultOptions(dir)
 
-	mt := NewMemtable()
-	cache := NewLRUCache(1024 * 1024)
-	reader := NewReader(mt, nil, cache, opts)
+	mt := newMemtable()
+	cache := newLRUCache(1024 * 1024)
+	reader := newReader(mt, nil, cache, opts)
 
 	// Create an immutable memtable with a key
-	imm := NewMemtable()
+	imm := newMemtable()
 	imm.Put([]byte("immkey"), StringValue("immvalue"), 1)
 	reader.AddImmutable(imm)
 
@@ -984,7 +984,7 @@ func TestReaderImmutableMemtable(t *testing.T) {
 	}
 
 	// Test tombstone in immutable
-	imm2 := NewMemtable()
+	imm2 := newMemtable()
 	imm2.Put([]byte("tombkey"), TombstoneValue(), 2)
 	reader.AddImmutable(imm2)
 
@@ -995,7 +995,7 @@ func TestReaderImmutableMemtable(t *testing.T) {
 }
 
 func TestMemtableIteratorExhaustion(t *testing.T) {
-	mt := NewMemtable()
+	mt := newMemtable()
 	mt.Put([]byte("a"), Int64Value(1), 1)
 
 	iter := mt.Iterator()

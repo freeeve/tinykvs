@@ -209,9 +209,9 @@ func HighPerformanceOptions(dir string) Options  // Max throughput
 └────────────────────────────────────┘
 ```
 
-### Upgrading from v0.3.x
+### Version Compatibility
 
-v0.4.0 changed the block format to support configurable compression. Data files from v0.3.x are automatically readable and will be upgraded to the new format during compaction. No manual migration is required.
+Store files are not compatible between minor versions (e.g., v0.3.x stores cannot be read by v0.4.x). If upgrading, export your data first or recreate the store.
 
 ## Memory Usage
 

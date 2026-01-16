@@ -23,22 +23,22 @@ type Index struct {
 }
 
 // IndexBuilder builds the sparse index during SSTable creation.
-type IndexBuilder struct {
+type indexBuilder struct {
 	entries []IndexEntry
 	minKey  []byte
 	maxKey  []byte
 	numKeys uint64
 }
 
-// NewIndexBuilder creates an index builder.
-func NewIndexBuilder() *IndexBuilder {
-	return &IndexBuilder{
+// newIndexBuilder creates an index builder.
+func newIndexBuilder() *indexBuilder {
+	return &indexBuilder{
 		entries: make([]IndexEntry, 0, 256),
 	}
 }
 
 // Add adds a block reference to the index.
-func (ib *IndexBuilder) Add(firstKey []byte, lastKey []byte, offset uint64, size uint32, keysInBlock int) {
+func (ib *indexBuilder) Add(firstKey []byte, lastKey []byte, offset uint64, size uint32, keysInBlock int) {
 	if ib.minKey == nil {
 		ib.minKey = make([]byte, len(firstKey))
 		copy(ib.minKey, firstKey)
@@ -58,7 +58,7 @@ func (ib *IndexBuilder) Add(firstKey []byte, lastKey []byte, offset uint64, size
 }
 
 // Build creates the final index.
-func (ib *IndexBuilder) Build() *Index {
+func (ib *indexBuilder) Build() *Index {
 	return &Index{
 		Entries: ib.entries,
 		MinKey:  ib.minKey,

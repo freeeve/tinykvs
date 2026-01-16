@@ -3,6 +3,7 @@ package tinykvs
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,18 +14,18 @@ import (
 	"time"
 )
 
-// Writer handles all write operations including flushes and compaction.
-type Writer struct {
+// writer handles all write operations including flushes and compaction.
+type writer struct {
 	store    *Store
-	memtable *Memtable
-	wal      *WAL
-	reader   *Reader
+	memtable *memtable
+	wal      *wal
+	reader   *reader
 	sequence uint64 // Atomic counter for sequence numbers
 
 	// Flush management
 	flushMu    sync.Mutex
 	flushCond  *sync.Cond // For backpressure when too many immutables
-	immutables []*Memtable
+	immutables []*memtable
 	flushCh    chan struct{}
 
 	// Compaction management
@@ -40,15 +41,15 @@ type compactionTask struct {
 	level int
 }
 
-// MaxImmutableMemtables is the max number of memtables waiting to be flushed.
+// maxImmutableMemtables is the max number of memtables waiting to be flushed.
 // When this limit is reached, writes will block until a flush completes.
-const MaxImmutableMemtables = 2
+const maxImmutableMemtables = 2
 
-// NewWriter creates a new writer.
-func NewWriter(store *Store, memtable *Memtable, wal *WAL, reader *Reader) *Writer {
+// newWriter creates a new writer.
+func newWriter(store *Store, memtable *memtable, wal *wal, reader *reader) *writer {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	w := &Writer{
+	w := &writer{
 		store:     store,
 		memtable:  memtable,
 		wal:       wal,
@@ -64,25 +65,25 @@ func NewWriter(store *Store, memtable *Memtable, wal *WAL, reader *Reader) *Writ
 }
 
 // Start starts background goroutines for flush and compaction.
-func (w *Writer) Start() {
+func (w *writer) Start() {
 	w.wg.Add(2)
 	go w.flushLoop()
 	go w.compactionLoop()
 }
 
 // Stop stops background goroutines.
-func (w *Writer) Stop() {
+func (w *writer) Stop() {
 	w.cancel()
 	w.wg.Wait()
 }
 
 // Put writes a key-value pair.
-func (w *Writer) Put(key []byte, value Value) error {
+func (w *writer) Put(key []byte, value Value) error {
 	seq := atomic.AddUint64(&w.sequence, 1)
 
-	// Write to WAL first
-	entry := WALEntry{
-		Operation: OpPut,
+	// Write to wal first
+	entry := walEntry{
+		Operation: opPut,
 		Key:       key,
 		Value:     value,
 		Sequence:  seq,
@@ -103,12 +104,12 @@ func (w *Writer) Put(key []byte, value Value) error {
 }
 
 // Delete marks a key as deleted.
-func (w *Writer) Delete(key []byte) error {
+func (w *writer) Delete(key []byte) error {
 	return w.Put(key, TombstoneValue())
 }
 
 // WriteBatch atomically writes all operations in the batch.
-func (w *Writer) WriteBatch(ops []batchOp) error {
+func (w *writer) WriteBatch(ops []batchOp) error {
 	if len(ops) == 0 {
 		return nil
 	}
@@ -116,20 +117,20 @@ func (w *Writer) WriteBatch(ops []batchOp) error {
 	// Allocate sequence numbers for all ops
 	startSeq := atomic.AddUint64(&w.sequence, uint64(len(ops))) - uint64(len(ops)) + 1
 
-	// Write all entries to WAL
+	// Write all entries to wal
 	for i, op := range ops {
 		seq := startSeq + uint64(i)
-		var entry WALEntry
+		var entry walEntry
 		if op.delete {
-			entry = WALEntry{
-				Operation: OpDelete,
+			entry = walEntry{
+				Operation: opDelete,
 				Key:       op.key,
 				Value:     TombstoneValue(),
 				Sequence:  seq,
 			}
 		} else {
-			entry = WALEntry{
-				Operation: OpPut,
+			entry = walEntry{
+				Operation: opPut,
 				Key:       op.key,
 				Value:     op.value,
 				Sequence:  seq,
@@ -160,12 +161,12 @@ func (w *Writer) WriteBatch(ops []batchOp) error {
 
 // triggerFlush initiates an async flush.
 // Blocks if too many immutable memtables are pending (backpressure).
-func (w *Writer) triggerFlush() {
+func (w *writer) triggerFlush() {
 	w.flushMu.Lock()
 	defer w.flushMu.Unlock()
 
 	// Backpressure: wait if too many immutables pending
-	for len(w.immutables) >= MaxImmutableMemtables {
+	for len(w.immutables) >= maxImmutableMemtables {
 		w.flushCond.Wait()
 	}
 
@@ -174,8 +175,8 @@ func (w *Writer) triggerFlush() {
 	w.reader.AddImmutable(w.memtable)
 
 	// Create new memtable
-	w.memtable = NewMemtable()
-	w.reader.SetMemtable(w.memtable)
+	w.memtable = newMemtable()
+	w.reader.Setmemtable(w.memtable)
 
 	// Signal flush goroutine
 	select {
@@ -185,31 +186,31 @@ func (w *Writer) triggerFlush() {
 }
 
 // Flush forces a synchronous flush of all data to disk.
-func (w *Writer) Flush() error {
+func (w *writer) Flush() error {
 	w.flushMu.Lock()
 	if w.memtable.Count() > 0 {
 		w.immutables = append(w.immutables, w.memtable)
 		w.reader.AddImmutable(w.memtable)
-		w.memtable = NewMemtable()
-		w.reader.SetMemtable(w.memtable)
+		w.memtable = newMemtable()
+		w.reader.Setmemtable(w.memtable)
 	}
-	imm := make([]*Memtable, len(w.immutables))
+	imm := make([]*memtable, len(w.immutables))
 	copy(imm, w.immutables)
 	w.flushMu.Unlock()
 
 	// Flush all immutables
 	for _, mt := range imm {
-		if err := w.flushMemtable(mt); err != nil {
+		if err := w.flushmemtable(mt); err != nil {
 			return err
 		}
 	}
 
-	// Sync WAL
+	// Sync wal
 	return w.wal.Sync()
 }
 
-// flushMemtable writes a memtable to an SSTable.
-func (w *Writer) flushMemtable(mt *Memtable) error {
+// flushmemtable writes a memtable to an SSTable.
+func (w *writer) flushmemtable(mt *memtable) error {
 	if mt.Count() == 0 {
 		return nil
 	}
@@ -218,8 +219,8 @@ func (w *Writer) flushMemtable(mt *Memtable) error {
 	id := w.store.nextSSTableID()
 	path := filepath.Join(w.store.opts.Dir, fmt.Sprintf("%06d.sst", id))
 
-	// Create writer
-	writer, err := NewSSTableWriter(id, path, uint(mt.Count()), w.store.opts)
+	// Create writer (L0 tables get bloom filters for overlapping key range lookups)
+	writer, err := newSSTableWriter(id, path, uint(mt.Count()), w.store.opts, true)
 	if err != nil {
 		return err
 	}
@@ -282,7 +283,7 @@ func (w *Writer) flushMemtable(mt *Memtable) error {
 	w.flushMu.Unlock()
 	w.reader.RemoveImmutable(mt)
 
-	// Truncate WAL entries that have been flushed
+	// Truncate wal entries that have been flushed
 	w.flushMu.Lock()
 	if len(w.immutables) == 0 {
 		// All flushed, fully truncate
@@ -311,7 +312,7 @@ func (w *Writer) flushMemtable(mt *Memtable) error {
 }
 
 // Background flush goroutine
-func (w *Writer) flushLoop() {
+func (w *writer) flushLoop() {
 	defer w.wg.Done()
 
 	ticker := time.NewTicker(w.store.opts.FlushInterval)
@@ -329,14 +330,14 @@ func (w *Writer) flushLoop() {
 	}
 }
 
-func (w *Writer) flushImmutables() {
+func (w *writer) flushImmutables() {
 	w.flushMu.Lock()
-	imm := make([]*Memtable, len(w.immutables))
+	imm := make([]*memtable, len(w.immutables))
 	copy(imm, w.immutables)
 	w.flushMu.Unlock()
 
 	for _, mt := range imm {
-		if err := w.flushMemtable(mt); err != nil {
+		if err := w.flushmemtable(mt); err != nil {
 			// Log error, will retry on next tick
 			continue
 		}
@@ -345,7 +346,7 @@ func (w *Writer) flushImmutables() {
 
 // Compaction
 
-func (w *Writer) maybeScheduleCompaction() {
+func (w *writer) maybeScheduleCompaction() {
 	levels := w.reader.GetLevels()
 
 	// Check L0 trigger
@@ -370,7 +371,7 @@ func (w *Writer) maybeScheduleCompaction() {
 }
 
 // compactionLoop runs background compaction.
-func (w *Writer) compactionLoop() {
+func (w *writer) compactionLoop() {
 	defer w.wg.Done()
 
 	ticker := time.NewTicker(w.store.opts.CompactionInterval)
@@ -389,15 +390,18 @@ func (w *Writer) compactionLoop() {
 }
 
 // runCompaction performs leveled compaction.
-func (w *Writer) runCompaction(task compactionTask) {
+func (w *writer) runCompaction(task compactionTask) {
 	if task.level == 0 {
 		w.compactL0ToL1()
 	} else {
 		w.compactLevelToNext(task.level)
 	}
+
+	// Re-check if more compaction is needed (e.g., remaining L0 tables after batch)
+	w.maybeScheduleCompaction()
 }
 
-func (w *Writer) compactL0ToL1() {
+func (w *writer) compactL0ToL1() {
 	w.compactMu.Lock()
 	defer w.compactMu.Unlock()
 
@@ -407,6 +411,20 @@ func (w *Writer) compactL0ToL1() {
 	}
 
 	l0Tables := levels[0]
+
+	// Debug logging for compaction
+	var l0Size, l1Size int64
+	for _, t := range l0Tables {
+		l0Size += int64(t.Footer.FileSize)
+	}
+	if len(levels) > 1 {
+		for _, t := range levels[1] {
+			l1Size += int64(t.Footer.FileSize)
+		}
+	}
+	log.Printf("[compaction] Starting L0->L1: L0 tables=%d (%.2f MB), L1 tables=%d (%.2f MB)",
+		len(l0Tables), float64(l0Size)/(1024*1024),
+		len(levels[1]), float64(l1Size)/(1024*1024))
 
 	// Limit batch size if configured
 	if w.store.opts.L0CompactionBatchSize > 0 && len(l0Tables) > w.store.opts.L0CompactionBatchSize {
@@ -444,9 +462,45 @@ func (w *Writer) compactL0ToL1() {
 
 	// Merge all tables (reversed L0 first, then L1)
 	allTables := append(reversedL0, l1Tables...)
-	newTables, err := w.mergeTables(allTables, 1)
+	mergeRes, err := w.mergeTables(allTables, 1)
 	if err != nil {
 		return
+	}
+	newTables := mergeRes.tables
+
+	// Debug: log actual disk sizes (stat) vs footer sizes
+	var newFooterSize, newStatSize int64
+	for _, t := range newTables {
+		newFooterSize += int64(t.Footer.FileSize)
+		newStatSize += t.Size() // Uses os.Stat result
+	}
+	var inputFooterSize, inputStatSize int64
+	var inputKeys uint64
+	for _, t := range l0Tables {
+		inputFooterSize += int64(t.Footer.FileSize)
+		inputStatSize += t.Size()
+		inputKeys += t.Footer.NumKeys
+	}
+	for _, t := range l1Tables {
+		inputFooterSize += int64(t.Footer.FileSize)
+		inputStatSize += t.Size()
+		inputKeys += t.Footer.NumKeys
+	}
+	var outputKeys uint64
+	for _, t := range newTables {
+		outputKeys += t.Footer.NumKeys
+	}
+	log.Printf("[compaction] Finished L0->L1: %d L0 + %d L1 -> %d new tables",
+		len(l0Tables), len(l1Tables), len(newTables))
+	log.Printf("[compaction]   Input:  footer=%.2f MB, stat=%.2f MB, keys=%d",
+		float64(inputFooterSize)/(1024*1024), float64(inputStatSize)/(1024*1024), inputKeys)
+	log.Printf("[compaction]   Output: footer=%.2f MB, stat=%.2f MB, keys=%d, uncompressed=%.2f MB",
+		float64(newFooterSize)/(1024*1024), float64(newStatSize)/(1024*1024), outputKeys,
+		float64(mergeRes.uncompressedBytes)/(1024*1024))
+	if inputStatSize > 0 {
+		log.Printf("[compaction]   Ratio: %.2f%% (output/input stat bytes), compression=%.1f%%",
+			float64(newStatSize)*100/float64(inputStatSize),
+			float64(newStatSize)*100/float64(mergeRes.uncompressedBytes))
 	}
 
 	// Update store with new tables
@@ -459,16 +513,20 @@ func (w *Writer) compactL0ToL1() {
 	for _, t := range l0Tables {
 		w.store.cache.RemoveByFileID(t.ID)
 		t.Close()
-		os.Remove(t.Path)
+		if err := os.Remove(t.Path); err != nil {
+			log.Printf("[compaction] Warning: failed to remove L0 file %s: %v", t.Path, err)
+		}
 	}
 	for _, t := range l1Tables {
 		w.store.cache.RemoveByFileID(t.ID)
 		t.Close()
-		os.Remove(t.Path)
+		if err := os.Remove(t.Path); err != nil {
+			log.Printf("[compaction] Warning: failed to remove L1 file %s: %v", t.Path, err)
+		}
 	}
 }
 
-func (w *Writer) compactLevelToNext(level int) {
+func (w *writer) compactLevelToNext(level int) {
 	w.compactMu.Lock()
 	defer w.compactMu.Unlock()
 
@@ -493,10 +551,11 @@ func (w *Writer) compactLevelToNext(level int) {
 
 	// Merge
 	allTables := append([]*SSTable{table}, nextLevelTables...)
-	newTables, err := w.mergeTables(allTables, level+1)
+	mergeRes, err := w.mergeTables(allTables, level+1)
 	if err != nil {
 		return
 	}
+	newTables := mergeRes.tables
 
 	// Update store
 	w.store.replaceTablesAfterCompaction(level, []*SSTable{table}, nextLevelTables, newTables)
@@ -515,28 +574,46 @@ func (w *Writer) compactLevelToNext(level int) {
 	}
 }
 
+// mergeResult contains the output of a merge operation.
+type mergeResult struct {
+	tables            []*SSTable
+	uncompressedBytes uint64
+}
+
 // mergeTables merges multiple SSTables into new ones at target level.
-func (w *Writer) mergeTables(tables []*SSTable, targetLevel int) ([]*SSTable, error) {
+func (w *writer) mergeTables(tables []*SSTable, targetLevel int) (*mergeResult, error) {
 	if len(tables) == 0 {
-		return nil, nil
+		return &mergeResult{}, nil
 	}
 
 	// Create merge iterator
 	mergeIter := newMergeIterator(tables, w.store.cache, w.store.opts.VerifyChecksums)
 	defer mergeIter.Close()
 
-	// Count total keys for bloom filter sizing
+	// Estimate keys per output table for bloom filter sizing
+	// This is approximate since we don't know deduplication ratio upfront
 	var totalKeys uint
+	var totalBytes int64
 	for _, t := range tables {
 		totalKeys += uint(t.Footer.NumKeys)
+		totalBytes += t.Size() // Use actual file size, not Footer.FileSize
+	}
+	// Estimate output tables based on total bytes, not key count
+	maxTableSize := w.maxTableSize()
+	estimatedOutputTables := (totalBytes + maxTableSize - 1) / maxTableSize
+	if estimatedOutputTables < 1 {
+		estimatedOutputTables = 1
+	}
+	keysPerTable := totalKeys / uint(estimatedOutputTables)
+	if keysPerTable < 1000 {
+		keysPerTable = totalKeys // small dataset, use total
 	}
 
 	// Create output SSTable
 	var newTables []*SSTable
-	var writer *SSTableWriter
+	var writer *sstableWriter
 	var currentKeys uint
-
-	maxTableSize := w.maxTableSize()
+	var totalUncompressed uint64
 	isLastLevel := targetLevel >= w.store.opts.MaxLevels-1
 
 	for mergeIter.Next() {
@@ -552,7 +629,8 @@ func (w *Writer) mergeTables(tables []*SSTable, targetLevel int) ([]*SSTable, er
 			id := w.store.nextSSTableID()
 			path := filepath.Join(w.store.opts.Dir, fmt.Sprintf("%06d.sst", id))
 			var err error
-			writer, err = NewSSTableWriter(id, path, totalKeys, w.store.opts)
+			// L1+ tables don't need bloom filters (non-overlapping key ranges)
+			writer, err = newSSTableWriter(id, path, keysPerTable, w.store.opts, false)
 			if err != nil {
 				return nil, err
 			}
@@ -566,23 +644,21 @@ func (w *Writer) mergeTables(tables []*SSTable, targetLevel int) ([]*SSTable, er
 		currentKeys++
 
 		// Check if we should finish this SSTable
-		// Rough estimate: check every 1000 keys
-		if currentKeys%1000 == 0 {
-			stat, _ := writer.file.Stat()
-			if stat != nil && stat.Size() >= maxTableSize {
-				if err := writer.Finish(targetLevel); err != nil {
-					writer.Abort()
-					return nil, err
-				}
-				writer.Close()
-
-				sst, err := OpenSSTable(writer.ID(), writer.Path())
-				if err != nil {
-					return nil, err
-				}
-				newTables = append(newTables, sst)
-				writer = nil
+		// Check every 100 keys using internal size tracker (no syscall)
+		if currentKeys%100 == 0 && writer.Size() >= maxTableSize {
+			if err := writer.Finish(targetLevel); err != nil {
+				writer.Abort()
+				return nil, err
 			}
+			totalUncompressed += writer.UncompressedBytes()
+			writer.Close()
+
+			sst, err := OpenSSTable(writer.ID(), writer.Path())
+			if err != nil {
+				return nil, err
+			}
+			newTables = append(newTables, sst)
+			writer = nil
 		}
 	}
 
@@ -592,6 +668,7 @@ func (w *Writer) mergeTables(tables []*SSTable, targetLevel int) ([]*SSTable, er
 			writer.Abort()
 			return nil, err
 		}
+		totalUncompressed += writer.UncompressedBytes()
 		writer.Close()
 
 		sst, err := OpenSSTable(writer.ID(), writer.Path())
@@ -603,10 +680,13 @@ func (w *Writer) mergeTables(tables []*SSTable, targetLevel int) ([]*SSTable, er
 		writer.Abort()
 	}
 
-	return newTables, nil
+	return &mergeResult{
+		tables:            newTables,
+		uncompressedBytes: totalUncompressed,
+	}, nil
 }
 
-func (w *Writer) levelSize(tables []*SSTable) int64 {
+func (w *writer) levelSize(tables []*SSTable) int64 {
 	var size int64
 	for _, t := range tables {
 		size += t.Size()
@@ -614,7 +694,7 @@ func (w *Writer) levelSize(tables []*SSTable) int64 {
 	return size
 }
 
-func (w *Writer) maxLevelSize(level int) int64 {
+func (w *writer) maxLevelSize(level int) int64 {
 	// L1: 10MB, each subsequent level 10x larger
 	base := int64(10 * 1024 * 1024) // 10MB
 	for i := 1; i < level; i++ {
@@ -623,27 +703,31 @@ func (w *Writer) maxLevelSize(level int) int64 {
 	return base
 }
 
-func (w *Writer) maxTableSize() int64 {
+func (w *writer) maxTableSize() int64 {
 	return 64 * 1024 * 1024 // 64MB per SSTable
 }
 
-// Memtable accessor
-func (w *Writer) Memtable() *Memtable {
+// memtable accessor
+func (w *writer) getMemtable() *memtable {
 	return w.memtable
 }
 
 // SetSequence sets the sequence number (for recovery).
-func (w *Writer) SetSequence(seq uint64) {
+func (w *writer) SetSequence(seq uint64) {
 	atomic.StoreUint64(&w.sequence, seq)
 }
 
 // ForceCompact forces compaction of all L0 tables to L1.
-func (w *Writer) ForceCompact() error {
+func (w *writer) ForceCompact() error {
+	iteration := 0
 	for {
 		levels := w.reader.GetLevels()
 		if len(levels) == 0 || len(levels[0]) == 0 {
+			log.Printf("[ForceCompact] Complete after %d iterations", iteration)
 			return nil // No more L0 tables
 		}
+		iteration++
+		log.Printf("[ForceCompact] Iteration %d: L0 has %d tables", iteration, len(levels[0]))
 		w.compactL0ToL1()
 	}
 }
@@ -653,7 +737,7 @@ type mergeIterator struct {
 	tables    []*SSTable
 	iterators []*sstableIterator
 	heap      *entryHeap
-	cache     *LRUCache
+	cache     *lruCache
 	verify    bool
 	current   Entry
 	lastKey   []byte
@@ -738,7 +822,7 @@ func (h *entryHeap) init() {
 	}
 }
 
-func newMergeIterator(tables []*SSTable, cache *LRUCache, verify bool) *mergeIterator {
+func newMergeIterator(tables []*SSTable, cache *lruCache, verify bool) *mergeIterator {
 	m := &mergeIterator{
 		tables: tables,
 		cache:  cache,

@@ -122,19 +122,16 @@ func putEncoder(level int, enc *zstd.Encoder) {
 	}
 }
 
-// Block types
+// block types
 const (
-	BlockTypeData  uint8 = 1
-	BlockTypeIndex uint8 = 2
-	BlockTypeBloom uint8 = 3
-	BlockTypeMeta  uint8 = 4
+	blockTypeData  uint8 = 1
+	blockTypeIndex uint8 = 2
+	blockTypeBloom uint8 = 3
+	blockTypeMeta  uint8 = 4
 )
 
-// BlockFooterSize is the size of the block footer in bytes.
-const BlockFooterSize = 13 // checksum(4) + uncompressed_size(4) + compressed_size(4) + compression_type(1)
-
-// LegacyBlockFooterSize is the v0.3.x footer size (no compression type byte).
-const LegacyBlockFooterSize = 12 // checksum(4) + uncompressed_size(4) + compressed_size(4)
+// blockFooterSize is the size of the block footer in bytes.
+const blockFooterSize = 13 // checksum(4) + uncompressed_size(4) + compressed_size(4) + compression_type(1)
 
 // Compression type markers in block footer
 const (
@@ -169,8 +166,8 @@ func (b *Block) Release() {
 	}
 }
 
-// BlockBuilder builds blocks from entries.
-type BlockBuilder struct {
+// blockBuilder builds blocks from entries.
+type blockBuilder struct {
 	entries   []BlockEntry
 	size      int
 	blockSize int
@@ -186,9 +183,9 @@ type BlockBuilder struct {
 	compressBuf []byte
 }
 
-// NewBlockBuilder creates a new block builder.
-func NewBlockBuilder(blockSize int) *BlockBuilder {
-	return &BlockBuilder{
+// newBlockBuilder creates a new block builder.
+func newBlockBuilder(blockSize int) *blockBuilder {
+	return &blockBuilder{
 		entries:     make([]BlockEntry, 0, 64),
 		blockSize:   blockSize,
 		arena:       make([]byte, blockSize*2), // Pre-allocate arena
@@ -199,7 +196,7 @@ func NewBlockBuilder(blockSize int) *BlockBuilder {
 
 // Add adds an entry to the block.
 // Returns true if the entry was added, false if the block is full.
-func (b *BlockBuilder) Add(key, value []byte) bool {
+func (b *blockBuilder) Add(key, value []byte) bool {
 	entrySize := 4 + len(key) + 4 + len(value) // key_len + key + val_len + val
 	if b.size > 0 && b.size+entrySize > b.blockSize {
 		return false // Block is full
@@ -218,7 +215,7 @@ func (b *BlockBuilder) Add(key, value []byte) bool {
 }
 
 // arenaAlloc allocates from the arena, growing if needed.
-func (b *BlockBuilder) arenaAlloc(size int) []byte {
+func (b *blockBuilder) arenaAlloc(size int) []byte {
 	if b.arenaOffset+size > len(b.arena) {
 		// Grow arena
 		newSize := len(b.arena) * 2
@@ -235,12 +232,12 @@ func (b *BlockBuilder) arenaAlloc(size int) []byte {
 }
 
 // Build serializes and compresses the block.
-func (b *BlockBuilder) Build(blockType uint8, compressionLevel int) ([]byte, error) {
+func (b *blockBuilder) Build(blockType uint8, compressionLevel int) ([]byte, error) {
 	return b.BuildWithCompression(blockType, CompressionZstd, compressionLevel)
 }
 
 // BuildWithCompression serializes and compresses the block with the specified compression type.
-func (b *BlockBuilder) BuildWithCompression(blockType uint8, compressionType CompressionType, compressionLevel int) ([]byte, error) {
+func (b *blockBuilder) BuildWithCompression(blockType uint8, compressionType CompressionType, compressionLevel int) ([]byte, error) {
 	// Reuse build buffer
 	buf := b.buildBuf[:0]
 
@@ -296,7 +293,7 @@ func (b *BlockBuilder) BuildWithCompression(blockType uint8, compressionType Com
 
 	// Append footer: checksum(4) + uncompressed_size(4) + compressed_size(4) + compression_type(1)
 	checksum := crc32.ChecksumIEEE(compressed)
-	footer := make([]byte, BlockFooterSize)
+	footer := make([]byte, blockFooterSize)
 	binary.LittleEndian.PutUint32(footer[0:], checksum)
 	binary.LittleEndian.PutUint32(footer[4:], uint32(uncompressedSize))
 	binary.LittleEndian.PutUint32(footer[8:], uint32(len(compressed)))
@@ -306,24 +303,24 @@ func (b *BlockBuilder) BuildWithCompression(blockType uint8, compressionType Com
 }
 
 // Reset clears the builder for reuse.
-func (b *BlockBuilder) Reset() {
+func (b *blockBuilder) Reset() {
 	b.entries = b.entries[:0]
 	b.size = 0
 	b.arenaOffset = 0 // Reset arena for next block
 }
 
 // Count returns the number of entries in the block.
-func (b *BlockBuilder) Count() int {
+func (b *blockBuilder) Count() int {
 	return len(b.entries)
 }
 
 // Size returns the current uncompressed block size.
-func (b *BlockBuilder) Size() int {
+func (b *blockBuilder) Size() int {
 	return b.size
 }
 
 // FirstKey returns the first key in the block, or nil if empty.
-func (b *BlockBuilder) FirstKey() []byte {
+func (b *blockBuilder) FirstKey() []byte {
 	if len(b.entries) == 0 {
 		return nil
 	}
@@ -331,7 +328,7 @@ func (b *BlockBuilder) FirstKey() []byte {
 }
 
 // Entries returns the entries in the block.
-func (b *BlockBuilder) Entries() []BlockEntry {
+func (b *blockBuilder) Entries() []BlockEntry {
 	return b.entries
 }
 
@@ -340,49 +337,23 @@ func (b *BlockBuilder) Entries() []BlockEntry {
 // so the Block should not be modified and is only valid while cached.
 // Call Block.Release() when done to return the buffer to the pool.
 func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
-	if len(data) < LegacyBlockFooterSize {
+	if len(data) < blockFooterSize {
 		return nil, ErrCorruptedData
 	}
 
-	// Try new format (13-byte footer) first, fall back to legacy (12-byte) if needed
-	var checksum, uncompressedSize, compressedSize uint32
-	var compType uint8
-	var compressed []byte
-	isLegacy := false
-
-	if len(data) >= BlockFooterSize {
-		// Try new format first
-		footer := data[len(data)-BlockFooterSize:]
-		checksum = binary.LittleEndian.Uint32(footer[0:])
-		uncompressedSize = binary.LittleEndian.Uint32(footer[4:])
-		compressedSize = binary.LittleEndian.Uint32(footer[8:])
-		compType = footer[12]
-		compressed = data[:len(data)-BlockFooterSize]
-
-		// Check if this looks like new format:
-		// - compressedSize must match
-		// - compType must be valid (0, 1, or 2)
-		if uint32(len(compressed)) != compressedSize || compType > compressionTypeNone {
-			// Try legacy format
-			isLegacy = true
-		}
-	} else {
-		isLegacy = true
-	}
-
-	if isLegacy {
-		if len(data) < LegacyBlockFooterSize {
-			return nil, ErrCorruptedData
-		}
-		footer := data[len(data)-LegacyBlockFooterSize:]
-		checksum = binary.LittleEndian.Uint32(footer[0:])
-		uncompressedSize = binary.LittleEndian.Uint32(footer[4:])
-		compressedSize = binary.LittleEndian.Uint32(footer[8:])
-		compType = compressionTypeZstd // Legacy files used zstd
-		compressed = data[:len(data)-LegacyBlockFooterSize]
-	}
+	// Parse footer: checksum(4) + uncompressed_size(4) + compressed_size(4) + compression_type(1)
+	footer := data[len(data)-blockFooterSize:]
+	checksum := binary.LittleEndian.Uint32(footer[0:])
+	uncompressedSize := binary.LittleEndian.Uint32(footer[4:])
+	compressedSize := binary.LittleEndian.Uint32(footer[8:])
+	compType := footer[12]
+	compressed := data[:len(data)-blockFooterSize]
 
 	if uint32(len(compressed)) != compressedSize {
+		return nil, ErrCorruptedData
+	}
+
+	if compType > compressionTypeNone {
 		return nil, ErrCorruptedData
 	}
 
@@ -502,9 +473,9 @@ func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
 	}, nil
 }
 
-// SearchBlock performs binary search within a block for a key.
+// searchBlock performs binary search within a block for a key.
 // Returns the index of the matching entry, or -1 if not found.
-func SearchBlock(block *Block, key []byte) int {
+func searchBlock(block *Block, key []byte) int {
 	lo, hi := 0, len(block.Entries)-1
 
 	for lo <= hi {

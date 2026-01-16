@@ -5,24 +5,24 @@ import (
 	"sync"
 )
 
-// CacheKey uniquely identifies a cached block.
-type CacheKey struct {
+// cacheKey uniquely identifies a cached block.
+type cacheKey struct {
 	FileID      uint32
 	BlockOffset uint64
 }
 
 // cacheEntry holds a cached block.
 type cacheEntry struct {
-	key   CacheKey
+	key   cacheKey
 	block *Block
 	size  int64
 }
 
 // LRUCache is a thread-safe LRU block cache.
-type LRUCache struct {
+type lruCache struct {
 	capacity  int64
 	size      int64
-	items     map[CacheKey]*list.Element
+	items     map[cacheKey]*list.Element
 	evictList *list.List
 	mu        sync.RWMutex
 
@@ -31,19 +31,24 @@ type LRUCache struct {
 	misses uint64
 }
 
-// NewLRUCache creates a new LRU cache with the given capacity in bytes.
+// newLRUCache creates a new LRU cache with the given capacity in bytes.
 // If capacity is 0, the cache is disabled.
-func NewLRUCache(capacity int64) *LRUCache {
-	return &LRUCache{
+func newLRUCache(capacity int64) *lruCache {
+	return &lruCache{
 		capacity:  capacity,
-		items:     make(map[CacheKey]*list.Element),
+		items:     make(map[cacheKey]*list.Element),
 		evictList: list.New(),
 	}
 }
 
+// NewLRUCache creates a new LRU cache with the given capacity in bytes.
+func NewLRUCache(capacity int64) *lruCache {
+	return newLRUCache(capacity)
+}
+
 // Get retrieves a block from the cache.
 // Returns the block and true if found, nil and false otherwise.
-func (c *LRUCache) Get(key CacheKey) (*Block, bool) {
+func (c *lruCache) Get(key cacheKey) (*Block, bool) {
 	if c.capacity == 0 {
 		return nil, false
 	}
@@ -62,7 +67,7 @@ func (c *LRUCache) Get(key CacheKey) (*Block, bool) {
 }
 
 // Put adds a block to the cache.
-func (c *LRUCache) Put(key CacheKey, block *Block) {
+func (c *lruCache) Put(key cacheKey, block *Block) {
 	if c.capacity == 0 {
 		return
 	}
@@ -104,7 +109,7 @@ func (c *LRUCache) Put(key CacheKey, block *Block) {
 }
 
 // evict removes the least recently used entry.
-func (c *LRUCache) evict() {
+func (c *lruCache) evict() {
 	elem := c.evictList.Back()
 	if elem == nil {
 		return
@@ -122,7 +127,7 @@ func (c *LRUCache) evict() {
 }
 
 // Remove removes a specific key from the cache.
-func (c *LRUCache) Remove(key CacheKey) {
+func (c *lruCache) Remove(key cacheKey) {
 	if c.capacity == 0 {
 		return
 	}
@@ -143,7 +148,7 @@ func (c *LRUCache) Remove(key CacheKey) {
 
 // RemoveByFileID removes all entries for a given file ID.
 // Useful when an SSTable is deleted during compaction.
-func (c *LRUCache) RemoveByFileID(fileID uint32) {
+func (c *lruCache) RemoveByFileID(fileID uint32) {
 	if c.capacity == 0 {
 		return
 	}
@@ -165,7 +170,7 @@ func (c *LRUCache) RemoveByFileID(fileID uint32) {
 }
 
 // Clear removes all entries from the cache.
-func (c *LRUCache) Clear() {
+func (c *lruCache) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -177,13 +182,13 @@ func (c *LRUCache) Clear() {
 		}
 	}
 
-	c.items = make(map[CacheKey]*list.Element)
+	c.items = make(map[cacheKey]*list.Element)
 	c.evictList.Init()
 	c.size = 0
 }
 
 // Stats returns cache statistics.
-func (c *LRUCache) Stats() CacheStats {
+func (c *lruCache) Stats() CacheStats {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 

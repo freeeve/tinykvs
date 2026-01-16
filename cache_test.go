@@ -5,11 +5,11 @@ import (
 )
 
 func TestCachePutGet(t *testing.T) {
-	cache := NewLRUCache(1024 * 1024) // 1MB
+	cache := newLRUCache(1024 * 1024) // 1MB
 
-	key := CacheKey{FileID: 1, BlockOffset: 0}
+	key := cacheKey{FileID: 1, BlockOffset: 0}
 	block := &Block{
-		Type: BlockTypeData,
+		Type: blockTypeData,
 		Entries: []BlockEntry{
 			{Key: []byte("key1"), Value: []byte("value1")},
 			{Key: []byte("key2"), Value: []byte("value2")},
@@ -29,9 +29,9 @@ func TestCachePutGet(t *testing.T) {
 }
 
 func TestCacheMiss(t *testing.T) {
-	cache := NewLRUCache(1024 * 1024)
+	cache := newLRUCache(1024 * 1024)
 
-	key := CacheKey{FileID: 1, BlockOffset: 0}
+	key := cacheKey{FileID: 1, BlockOffset: 0}
 	_, found := cache.Get(key)
 	if found {
 		t.Error("expected cache miss")
@@ -40,13 +40,13 @@ func TestCacheMiss(t *testing.T) {
 
 func TestCacheEviction(t *testing.T) {
 	// Small cache that can only hold a few blocks
-	cache := NewLRUCache(100) // 100 bytes
+	cache := newLRUCache(100) // 100 bytes
 
 	// Add blocks until eviction happens
 	for i := 0; i < 10; i++ {
-		key := CacheKey{FileID: 1, BlockOffset: uint64(i * 1000)}
+		key := cacheKey{FileID: 1, BlockOffset: uint64(i * 1000)}
 		block := &Block{
-			Type: BlockTypeData,
+			Type: blockTypeData,
 			Entries: []BlockEntry{
 				{Key: []byte("key"), Value: make([]byte, 20)}, // ~24 bytes per block
 			},
@@ -62,11 +62,11 @@ func TestCacheEviction(t *testing.T) {
 }
 
 func TestCacheRemove(t *testing.T) {
-	cache := NewLRUCache(1024 * 1024)
+	cache := newLRUCache(1024 * 1024)
 
-	key := CacheKey{FileID: 1, BlockOffset: 0}
+	key := cacheKey{FileID: 1, BlockOffset: 0}
 	block := &Block{
-		Type:    BlockTypeData,
+		Type:    blockTypeData,
 		Entries: []BlockEntry{{Key: []byte("key"), Value: []byte("value")}},
 	}
 
@@ -89,14 +89,14 @@ func TestCacheRemove(t *testing.T) {
 }
 
 func TestCacheRemoveByFileID(t *testing.T) {
-	cache := NewLRUCache(1024 * 1024)
+	cache := newLRUCache(1024 * 1024)
 
 	// Add blocks from multiple files
 	for fileID := uint32(1); fileID <= 3; fileID++ {
 		for offset := uint64(0); offset < 3; offset++ {
-			key := CacheKey{FileID: fileID, BlockOffset: offset * 1000}
+			key := cacheKey{FileID: fileID, BlockOffset: offset * 1000}
 			block := &Block{
-				Type:    BlockTypeData,
+				Type:    blockTypeData,
 				Entries: []BlockEntry{{Key: []byte("key"), Value: []byte("value")}},
 			}
 			cache.Put(key, block)
@@ -108,7 +108,7 @@ func TestCacheRemoveByFileID(t *testing.T) {
 
 	// Verify file 2 blocks are gone
 	for offset := uint64(0); offset < 3; offset++ {
-		key := CacheKey{FileID: 2, BlockOffset: offset * 1000}
+		key := cacheKey{FileID: 2, BlockOffset: offset * 1000}
 		_, found := cache.Get(key)
 		if found {
 			t.Errorf("block from file 2 should be removed")
@@ -117,7 +117,7 @@ func TestCacheRemoveByFileID(t *testing.T) {
 
 	// Verify file 1 and 3 blocks are still there
 	for _, fileID := range []uint32{1, 3} {
-		key := CacheKey{FileID: fileID, BlockOffset: 0}
+		key := cacheKey{FileID: fileID, BlockOffset: 0}
 		_, found := cache.Get(key)
 		if !found {
 			t.Errorf("block from file %d should still be in cache", fileID)
@@ -126,13 +126,13 @@ func TestCacheRemoveByFileID(t *testing.T) {
 }
 
 func TestCacheClear(t *testing.T) {
-	cache := NewLRUCache(1024 * 1024)
+	cache := newLRUCache(1024 * 1024)
 
 	// Add some blocks
 	for i := 0; i < 5; i++ {
-		key := CacheKey{FileID: 1, BlockOffset: uint64(i * 1000)}
+		key := cacheKey{FileID: 1, BlockOffset: uint64(i * 1000)}
 		block := &Block{
-			Type:    BlockTypeData,
+			Type:    blockTypeData,
 			Entries: []BlockEntry{{Key: []byte("key"), Value: []byte("value")}},
 		}
 		cache.Put(key, block)
@@ -152,11 +152,11 @@ func TestCacheClear(t *testing.T) {
 }
 
 func TestCacheStats(t *testing.T) {
-	cache := NewLRUCache(1024 * 1024)
+	cache := newLRUCache(1024 * 1024)
 
-	key := CacheKey{FileID: 1, BlockOffset: 0}
+	key := cacheKey{FileID: 1, BlockOffset: 0}
 	block := &Block{
-		Type:    BlockTypeData,
+		Type:    blockTypeData,
 		Entries: []BlockEntry{{Key: []byte("key"), Value: []byte("value")}},
 	}
 
@@ -183,11 +183,11 @@ func TestCacheStats(t *testing.T) {
 }
 
 func TestCacheHitRate(t *testing.T) {
-	cache := NewLRUCache(1024 * 1024)
+	cache := newLRUCache(1024 * 1024)
 
-	key := CacheKey{FileID: 1, BlockOffset: 0}
+	key := cacheKey{FileID: 1, BlockOffset: 0}
 	block := &Block{
-		Type:    BlockTypeData,
+		Type:    blockTypeData,
 		Entries: []BlockEntry{{Key: []byte("key"), Value: []byte("value")}},
 	}
 
@@ -211,7 +211,7 @@ func TestCacheHitRate(t *testing.T) {
 }
 
 func TestCacheHitRateEmpty(t *testing.T) {
-	cache := NewLRUCache(1024 * 1024)
+	cache := newLRUCache(1024 * 1024)
 	stats := cache.Stats()
 	if stats.HitRate() != 0 {
 		t.Errorf("hit rate should be 0 for empty stats")
@@ -219,11 +219,11 @@ func TestCacheHitRateEmpty(t *testing.T) {
 }
 
 func TestCacheZeroCapacity(t *testing.T) {
-	cache := NewLRUCache(0)
+	cache := newLRUCache(0)
 
-	key := CacheKey{FileID: 1, BlockOffset: 0}
+	key := cacheKey{FileID: 1, BlockOffset: 0}
 	block := &Block{
-		Type:    BlockTypeData,
+		Type:    blockTypeData,
 		Entries: []BlockEntry{{Key: []byte("key"), Value: []byte("value")}},
 	}
 
@@ -242,16 +242,16 @@ func TestCacheZeroCapacity(t *testing.T) {
 }
 
 func TestCacheUpdate(t *testing.T) {
-	cache := NewLRUCache(1024 * 1024)
+	cache := newLRUCache(1024 * 1024)
 
-	key := CacheKey{FileID: 1, BlockOffset: 0}
+	key := cacheKey{FileID: 1, BlockOffset: 0}
 
 	block1 := &Block{
-		Type:    BlockTypeData,
+		Type:    blockTypeData,
 		Entries: []BlockEntry{{Key: []byte("key1"), Value: []byte("value1")}},
 	}
 	block2 := &Block{
-		Type:    BlockTypeData,
+		Type:    blockTypeData,
 		Entries: []BlockEntry{{Key: []byte("key2"), Value: []byte("value2")}},
 	}
 
@@ -276,14 +276,14 @@ func TestCacheUpdate(t *testing.T) {
 
 func TestCacheLRUOrder(t *testing.T) {
 	// Cache that can hold ~2 blocks
-	cache := NewLRUCache(50)
+	cache := newLRUCache(50)
 
-	key1 := CacheKey{FileID: 1, BlockOffset: 0}
-	key2 := CacheKey{FileID: 1, BlockOffset: 1000}
-	key3 := CacheKey{FileID: 1, BlockOffset: 2000}
+	key1 := cacheKey{FileID: 1, BlockOffset: 0}
+	key2 := cacheKey{FileID: 1, BlockOffset: 1000}
+	key3 := cacheKey{FileID: 1, BlockOffset: 2000}
 
 	block := &Block{
-		Type:    BlockTypeData,
+		Type:    blockTypeData,
 		Entries: []BlockEntry{{Key: []byte("k"), Value: make([]byte, 15)}},
 	}
 
@@ -311,19 +311,19 @@ func TestCacheLRUOrder(t *testing.T) {
 }
 
 func BenchmarkCacheGet(b *testing.B) {
-	cache := NewLRUCache(64 * 1024 * 1024)
+	cache := newLRUCache(64 * 1024 * 1024)
 
 	// Pre-populate
 	for i := 0; i < 1000; i++ {
-		key := CacheKey{FileID: 1, BlockOffset: uint64(i * 4096)}
+		key := cacheKey{FileID: 1, BlockOffset: uint64(i * 4096)}
 		block := &Block{
-			Type:    BlockTypeData,
+			Type:    blockTypeData,
 			Entries: []BlockEntry{{Key: []byte("key"), Value: make([]byte, 100)}},
 		}
 		cache.Put(key, block)
 	}
 
-	key := CacheKey{FileID: 1, BlockOffset: 500 * 4096}
+	key := cacheKey{FileID: 1, BlockOffset: 500 * 4096}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -332,16 +332,16 @@ func BenchmarkCacheGet(b *testing.B) {
 }
 
 func BenchmarkCachePut(b *testing.B) {
-	cache := NewLRUCache(64 * 1024 * 1024)
+	cache := newLRUCache(64 * 1024 * 1024)
 
 	block := &Block{
-		Type:    BlockTypeData,
+		Type:    blockTypeData,
 		Entries: []BlockEntry{{Key: []byte("key"), Value: make([]byte, 100)}},
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		key := CacheKey{FileID: 1, BlockOffset: uint64(i * 4096)}
+		key := cacheKey{FileID: 1, BlockOffset: uint64(i * 4096)}
 		cache.Put(key, block)
 	}
 }

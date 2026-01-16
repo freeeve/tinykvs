@@ -13,16 +13,16 @@ func TestWALAppendRecover(t *testing.T) {
 	path := filepath.Join(dir, "test.wal")
 
 	// Create and write
-	wal, err := OpenWAL(path, WALSyncPerWrite)
+	wal, err := openWAL(path, WALSyncPerWrite)
 	if err != nil {
-		t.Fatalf("OpenWAL failed: %v", err)
+		t.Fatalf("openWAL failed: %v", err)
 	}
 
-	entries := []WALEntry{
-		{Operation: OpPut, Key: []byte("key1"), Value: StringValue("value1"), Sequence: 1},
-		{Operation: OpPut, Key: []byte("key2"), Value: Int64Value(42), Sequence: 2},
-		{Operation: OpDelete, Key: []byte("key3"), Sequence: 3},
-		{Operation: OpPut, Key: []byte("key4"), Value: BoolValue(true), Sequence: 4},
+	entries := []walEntry{
+		{Operation: opPut, Key: []byte("key1"), Value: StringValue("value1"), Sequence: 1},
+		{Operation: opPut, Key: []byte("key2"), Value: Int64Value(42), Sequence: 2},
+		{Operation: opDelete, Key: []byte("key3"), Sequence: 3},
+		{Operation: opPut, Key: []byte("key4"), Value: BoolValue(true), Sequence: 4},
 	}
 
 	for _, e := range entries {
@@ -34,9 +34,9 @@ func TestWALAppendRecover(t *testing.T) {
 	wal.Close()
 
 	// Reopen and recover
-	wal, err = OpenWAL(path, WALSyncPerWrite)
+	wal, err = openWAL(path, WALSyncPerWrite)
 	if err != nil {
-		t.Fatalf("OpenWAL (reopen) failed: %v", err)
+		t.Fatalf("openWAL (reopen) failed: %v", err)
 	}
 	defer wal.Close()
 
@@ -66,16 +66,16 @@ func TestWALLargeRecord(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.wal")
 
-	wal, err := OpenWAL(path, WALSyncPerBatch)
+	wal, err := openWAL(path, WALSyncPerBatch)
 	if err != nil {
-		t.Fatalf("OpenWAL failed: %v", err)
+		t.Fatalf("openWAL failed: %v", err)
 	}
 
 	// Large value that requires fragmentation (> 32KB block)
 	largeValue := bytes.Repeat([]byte("x"), 100*1024) // 100KB
 
-	entry := WALEntry{
-		Operation: OpPut,
+	entry := walEntry{
+		Operation: opPut,
 		Key:       []byte("large-key"),
 		Value:     BytesValue(largeValue),
 		Sequence:  1,
@@ -92,9 +92,9 @@ func TestWALLargeRecord(t *testing.T) {
 	wal.Close()
 
 	// Recover
-	wal, err = OpenWAL(path, WALSyncPerBatch)
+	wal, err = openWAL(path, WALSyncPerBatch)
 	if err != nil {
-		t.Fatalf("OpenWAL (reopen) failed: %v", err)
+		t.Fatalf("openWAL (reopen) failed: %v", err)
 	}
 	defer wal.Close()
 
@@ -116,14 +116,14 @@ func TestWALTruncate(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.wal")
 
-	wal, err := OpenWAL(path, WALSyncPerWrite)
+	wal, err := openWAL(path, WALSyncPerWrite)
 	if err != nil {
-		t.Fatalf("OpenWAL failed: %v", err)
+		t.Fatalf("openWAL failed: %v", err)
 	}
 
 	// Write some entries
-	wal.Append(WALEntry{Operation: OpPut, Key: []byte("key1"), Value: StringValue("v1"), Sequence: 1})
-	wal.Append(WALEntry{Operation: OpPut, Key: []byte("key2"), Value: StringValue("v2"), Sequence: 2})
+	wal.Append(walEntry{Operation: opPut, Key: []byte("key1"), Value: StringValue("v1"), Sequence: 1})
+	wal.Append(walEntry{Operation: opPut, Key: []byte("key2"), Value: StringValue("v2"), Sequence: 2})
 
 	// Truncate
 	if err := wal.Truncate(); err != nil {
@@ -133,9 +133,9 @@ func TestWALTruncate(t *testing.T) {
 	wal.Close()
 
 	// Recover should find nothing
-	wal, err = OpenWAL(path, WALSyncPerWrite)
+	wal, err = openWAL(path, WALSyncPerWrite)
 	if err != nil {
-		t.Fatalf("OpenWAL (reopen) failed: %v", err)
+		t.Fatalf("openWAL (reopen) failed: %v", err)
 	}
 	defer wal.Close()
 
@@ -164,12 +164,12 @@ func TestWALSyncModes(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "test.wal")
 
-			wal, err := OpenWAL(path, tt.mode)
+			wal, err := openWAL(path, tt.mode)
 			if err != nil {
-				t.Fatalf("OpenWAL failed: %v", err)
+				t.Fatalf("openWAL failed: %v", err)
 			}
 
-			wal.Append(WALEntry{Operation: OpPut, Key: []byte("key"), Value: StringValue("value"), Sequence: 1})
+			wal.Append(walEntry{Operation: opPut, Key: []byte("key"), Value: StringValue("value"), Sequence: 1})
 			wal.Sync()
 			wal.Close()
 
@@ -185,9 +185,9 @@ func TestWALEmptyRecover(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.wal")
 
-	wal, err := OpenWAL(path, WALSyncPerWrite)
+	wal, err := openWAL(path, WALSyncPerWrite)
 	if err != nil {
-		t.Fatalf("OpenWAL failed: %v", err)
+		t.Fatalf("openWAL failed: %v", err)
 	}
 
 	// Recover empty WAL
@@ -207,16 +207,16 @@ func TestWALMultipleBlocks(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.wal")
 
-	wal, err := OpenWAL(path, WALSyncPerBatch)
+	wal, err := openWAL(path, WALSyncPerBatch)
 	if err != nil {
-		t.Fatalf("OpenWAL failed: %v", err)
+		t.Fatalf("openWAL failed: %v", err)
 	}
 
 	// Write many small entries to span multiple blocks
 	numEntries := 1000
 	for i := 0; i < numEntries; i++ {
-		entry := WALEntry{
-			Operation: OpPut,
+		entry := walEntry{
+			Operation: opPut,
 			Key:       []byte(string(rune('a' + (i % 26)))),
 			Value:     Int64Value(int64(i)),
 			Sequence:  uint64(i),
@@ -230,9 +230,9 @@ func TestWALMultipleBlocks(t *testing.T) {
 	wal.Close()
 
 	// Recover
-	wal, err = OpenWAL(path, WALSyncPerBatch)
+	wal, err = openWAL(path, WALSyncPerBatch)
 	if err != nil {
-		t.Fatalf("OpenWAL (reopen) failed: %v", err)
+		t.Fatalf("openWAL (reopen) failed: %v", err)
 	}
 	defer wal.Close()
 
@@ -248,9 +248,9 @@ func TestWALMultipleBlocks(t *testing.T) {
 
 func TestWALOpenError(t *testing.T) {
 	// Try to open WAL in non-existent directory
-	_, err := OpenWAL("/nonexistent/path/test.wal", WALSyncPerWrite)
+	_, err := openWAL("/nonexistent/path/test.wal", WALSyncPerWrite)
 	if err == nil {
-		t.Error("OpenWAL should fail for non-existent directory")
+		t.Error("openWAL should fail for non-existent directory")
 	}
 }
 
@@ -258,15 +258,15 @@ func TestWALTruncateBefore(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.wal")
 
-	wal, err := OpenWAL(path, WALSyncPerWrite)
+	wal, err := openWAL(path, WALSyncPerWrite)
 	if err != nil {
-		t.Fatalf("OpenWAL failed: %v", err)
+		t.Fatalf("openWAL failed: %v", err)
 	}
 
 	// Write entries with sequences 1-10
 	for i := uint64(1); i <= 10; i++ {
-		entry := WALEntry{
-			Operation: OpPut,
+		entry := walEntry{
+			Operation: opPut,
 			Key:       []byte(string(rune('a' + i - 1))),
 			Value:     Int64Value(int64(i)),
 			Sequence:  i,
@@ -285,9 +285,9 @@ func TestWALTruncateBefore(t *testing.T) {
 	wal.Close()
 
 	// Reopen and recover
-	wal, err = OpenWAL(path, WALSyncPerWrite)
+	wal, err = openWAL(path, WALSyncPerWrite)
 	if err != nil {
-		t.Fatalf("OpenWAL (reopen) failed: %v", err)
+		t.Fatalf("openWAL (reopen) failed: %v", err)
 	}
 	defer wal.Close()
 
@@ -314,14 +314,14 @@ func BenchmarkWALAppend(b *testing.B) {
 	dir := b.TempDir()
 	path := filepath.Join(dir, "test.wal")
 
-	wal, err := OpenWAL(path, WALSyncNone)
+	wal, err := openWAL(path, WALSyncNone)
 	if err != nil {
-		b.Fatalf("OpenWAL failed: %v", err)
+		b.Fatalf("openWAL failed: %v", err)
 	}
 	defer wal.Close()
 
-	entry := WALEntry{
-		Operation: OpPut,
+	entry := walEntry{
+		Operation: opPut,
 		Key:       []byte("benchmark-key"),
 		Value:     StringValue("benchmark-value"),
 		Sequence:  0,
@@ -338,15 +338,15 @@ func TestWALRecoverCorruptedChecksum(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.wal")
 
-	wal, err := OpenWAL(path, WALSyncPerWrite)
+	wal, err := openWAL(path, WALSyncPerWrite)
 	if err != nil {
-		t.Fatalf("OpenWAL failed: %v", err)
+		t.Fatalf("openWAL failed: %v", err)
 	}
 
 	// Write some valid entries
 	for i := 0; i < 10; i++ {
-		entry := WALEntry{
-			Operation: OpPut,
+		entry := walEntry{
+			Operation: opPut,
 			Key:       []byte(string(rune('a' + i))),
 			Value:     Int64Value(int64(i)),
 			Sequence:  uint64(i),
@@ -364,9 +364,9 @@ func TestWALRecoverCorruptedChecksum(t *testing.T) {
 	os.WriteFile(path, data, 0644)
 
 	// Reopen and recover - should recover entries before corruption
-	wal, err = OpenWAL(path, WALSyncPerWrite)
+	wal, err = openWAL(path, WALSyncPerWrite)
 	if err != nil {
-		t.Fatalf("OpenWAL (reopen) failed: %v", err)
+		t.Fatalf("openWAL (reopen) failed: %v", err)
 	}
 	defer wal.Close()
 
@@ -384,18 +384,18 @@ func TestWALAllValueTypes(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.wal")
 
-	wal, err := OpenWAL(path, WALSyncPerWrite)
+	wal, err := openWAL(path, WALSyncPerWrite)
 	if err != nil {
-		t.Fatalf("OpenWAL failed: %v", err)
+		t.Fatalf("openWAL failed: %v", err)
 	}
 
-	entries := []WALEntry{
-		{Operation: OpPut, Key: []byte("int"), Value: Int64Value(42), Sequence: 1},
-		{Operation: OpPut, Key: []byte("float"), Value: Float64Value(3.14), Sequence: 2},
-		{Operation: OpPut, Key: []byte("bool"), Value: BoolValue(true), Sequence: 3},
-		{Operation: OpPut, Key: []byte("string"), Value: StringValue("hello"), Sequence: 4},
-		{Operation: OpPut, Key: []byte("bytes"), Value: BytesValue([]byte{1, 2, 3}), Sequence: 5},
-		{Operation: OpDelete, Key: []byte("deleted"), Sequence: 6},
+	entries := []walEntry{
+		{Operation: opPut, Key: []byte("int"), Value: Int64Value(42), Sequence: 1},
+		{Operation: opPut, Key: []byte("float"), Value: Float64Value(3.14), Sequence: 2},
+		{Operation: opPut, Key: []byte("bool"), Value: BoolValue(true), Sequence: 3},
+		{Operation: opPut, Key: []byte("string"), Value: StringValue("hello"), Sequence: 4},
+		{Operation: opPut, Key: []byte("bytes"), Value: BytesValue([]byte{1, 2, 3}), Sequence: 5},
+		{Operation: opDelete, Key: []byte("deleted"), Sequence: 6},
 	}
 
 	for _, e := range entries {
@@ -406,9 +406,9 @@ func TestWALAllValueTypes(t *testing.T) {
 	wal.Close()
 
 	// Recover
-	wal, err = OpenWAL(path, WALSyncPerWrite)
+	wal, err = openWAL(path, WALSyncPerWrite)
 	if err != nil {
-		t.Fatalf("OpenWAL (reopen) failed: %v", err)
+		t.Fatalf("openWAL (reopen) failed: %v", err)
 	}
 	defer wal.Close()
 
@@ -433,15 +433,15 @@ func TestWALRecoverPartialBlock(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.wal")
 
-	wal, err := OpenWAL(path, WALSyncPerWrite)
+	wal, err := openWAL(path, WALSyncPerWrite)
 	if err != nil {
-		t.Fatalf("OpenWAL failed: %v", err)
+		t.Fatalf("openWAL failed: %v", err)
 	}
 
 	// Write entries
 	for i := 0; i < 5; i++ {
-		entry := WALEntry{
-			Operation: OpPut,
+		entry := walEntry{
+			Operation: opPut,
 			Key:       []byte(string(rune('a' + i))),
 			Value:     Int64Value(int64(i)),
 			Sequence:  uint64(i),
@@ -457,9 +457,9 @@ func TestWALRecoverPartialBlock(t *testing.T) {
 	}
 
 	// Should still recover what we can
-	wal, err = OpenWAL(path, WALSyncPerWrite)
+	wal, err = openWAL(path, WALSyncPerWrite)
 	if err != nil {
-		t.Fatalf("OpenWAL (reopen) failed: %v", err)
+		t.Fatalf("openWAL (reopen) failed: %v", err)
 	}
 	defer wal.Close()
 
@@ -475,16 +475,16 @@ func TestWALManySmallEntries(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.wal")
 
-	wal, err := OpenWAL(path, WALSyncPerBatch)
+	wal, err := openWAL(path, WALSyncPerBatch)
 	if err != nil {
-		t.Fatalf("OpenWAL failed: %v", err)
+		t.Fatalf("openWAL failed: %v", err)
 	}
 
 	// Write many small entries to exercise block boundaries
 	numEntries := 5000
 	for i := 0; i < numEntries; i++ {
-		entry := WALEntry{
-			Operation: OpPut,
+		entry := walEntry{
+			Operation: opPut,
 			Key:       []byte(fmt.Sprintf("key%05d", i)),
 			Value:     Int64Value(int64(i)),
 			Sequence:  uint64(i),
@@ -497,9 +497,9 @@ func TestWALManySmallEntries(t *testing.T) {
 	wal.Close()
 
 	// Recover
-	wal, err = OpenWAL(path, WALSyncPerBatch)
+	wal, err = openWAL(path, WALSyncPerBatch)
 	if err != nil {
-		t.Fatalf("OpenWAL (reopen) failed: %v", err)
+		t.Fatalf("openWAL (reopen) failed: %v", err)
 	}
 	defer wal.Close()
 
@@ -517,19 +517,19 @@ func TestWALDecodeEntryVariousTypes(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.wal")
 
-	wal, err := OpenWAL(path, WALSyncPerWrite)
+	wal, err := openWAL(path, WALSyncPerWrite)
 	if err != nil {
-		t.Fatalf("OpenWAL failed: %v", err)
+		t.Fatalf("openWAL failed: %v", err)
 	}
 
 	// Test all value types including edge cases
-	entries := []WALEntry{
-		{Operation: OpPut, Key: []byte("maxint"), Value: Int64Value(9223372036854775807), Sequence: 1},
-		{Operation: OpPut, Key: []byte("minint"), Value: Int64Value(-9223372036854775808), Sequence: 2},
-		{Operation: OpPut, Key: []byte("zero"), Value: Int64Value(0), Sequence: 3},
-		{Operation: OpPut, Key: []byte("pi"), Value: Float64Value(3.14159265358979323846), Sequence: 4},
-		{Operation: OpPut, Key: []byte("empty"), Value: StringValue(""), Sequence: 5},
-		{Operation: OpPut, Key: []byte("nullbytes"), Value: BytesValue([]byte{0, 0, 0}), Sequence: 6},
+	entries := []walEntry{
+		{Operation: opPut, Key: []byte("maxint"), Value: Int64Value(9223372036854775807), Sequence: 1},
+		{Operation: opPut, Key: []byte("minint"), Value: Int64Value(-9223372036854775808), Sequence: 2},
+		{Operation: opPut, Key: []byte("zero"), Value: Int64Value(0), Sequence: 3},
+		{Operation: opPut, Key: []byte("pi"), Value: Float64Value(3.14159265358979323846), Sequence: 4},
+		{Operation: opPut, Key: []byte("empty"), Value: StringValue(""), Sequence: 5},
+		{Operation: opPut, Key: []byte("nullbytes"), Value: BytesValue([]byte{0, 0, 0}), Sequence: 6},
 	}
 
 	for _, e := range entries {
@@ -540,9 +540,9 @@ func TestWALDecodeEntryVariousTypes(t *testing.T) {
 	wal.Close()
 
 	// Recover and verify
-	wal, err = OpenWAL(path, WALSyncPerWrite)
+	wal, err = openWAL(path, WALSyncPerWrite)
 	if err != nil {
-		t.Fatalf("OpenWAL (reopen) failed: %v", err)
+		t.Fatalf("openWAL (reopen) failed: %v", err)
 	}
 	defer wal.Close()
 
@@ -569,11 +569,11 @@ func TestWALCorruptedShortEntry(t *testing.T) {
 	path := filepath.Join(dir, "test.wal")
 
 	// Write a valid entry first
-	wal, err := OpenWAL(path, WALSyncPerWrite)
+	wal, err := openWAL(path, WALSyncPerWrite)
 	if err != nil {
-		t.Fatalf("OpenWAL failed: %v", err)
+		t.Fatalf("openWAL failed: %v", err)
 	}
-	wal.Append(WALEntry{Operation: OpPut, Key: []byte("key1"), Value: StringValue("value1"), Sequence: 1})
+	wal.Append(walEntry{Operation: opPut, Key: []byte("key1"), Value: StringValue("value1"), Sequence: 1})
 	wal.Close()
 
 	// Corrupt by truncating the file to make entry too short
@@ -582,9 +582,9 @@ func TestWALCorruptedShortEntry(t *testing.T) {
 	f.Close()
 
 	// Try to recover - should handle gracefully
-	wal, err = OpenWAL(path, WALSyncPerWrite)
+	wal, err = openWAL(path, WALSyncPerWrite)
 	if err != nil {
-		t.Logf("OpenWAL on corrupted file: %v (expected)", err)
+		t.Logf("openWAL on corrupted file: %v (expected)", err)
 		return
 	}
 	defer wal.Close()
@@ -612,7 +612,7 @@ func TestWALCorruptedKeyLength(t *testing.T) {
 	f.Write(data)
 	f.Close()
 
-	wal, _ := OpenWAL(path, WALSyncPerWrite)
+	wal, _ := openWAL(path, WALSyncPerWrite)
 	if wal != nil {
 		wal.Recover() // May fail or succeed with empty
 		wal.Close()

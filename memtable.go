@@ -17,9 +17,9 @@ type skiplistNode struct {
 	forward []*skiplistNode
 }
 
-// Memtable is an in-memory sorted buffer using a skiplist.
+// memtable is an in-memory sorted buffer using a skiplist.
 // It is safe for concurrent reads but requires external synchronization for writes.
-type Memtable struct {
+type memtable struct {
 	head   *skiplistNode
 	height int
 	size   int64  // Approximate size in bytes (atomic)
@@ -30,9 +30,9 @@ type Memtable struct {
 	rng *rand.Rand
 }
 
-// NewMemtable creates a new empty memtable.
-func NewMemtable() *Memtable {
-	return &Memtable{
+// newMemtable creates a new empty memtable.
+func newMemtable() *memtable {
+	return &memtable{
 		head:   &skiplistNode{forward: make([]*skiplistNode, maxHeight)},
 		height: 1,
 		rng:    rand.New(rand.NewSource(rand.Int63())),
@@ -40,7 +40,7 @@ func NewMemtable() *Memtable {
 }
 
 // Put inserts or updates a key-value pair.
-func (m *Memtable) Put(key []byte, value Value, seq uint64) {
+func (m *memtable) Put(key []byte, value Value, seq uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -102,7 +102,7 @@ func (m *Memtable) Put(key []byte, value Value, seq uint64) {
 
 // Get retrieves an entry by key.
 // Returns the entry and true if found, or an empty entry and false if not found.
-func (m *Memtable) Get(key []byte) (Entry, bool) {
+func (m *memtable) Get(key []byte) (Entry, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -122,31 +122,31 @@ func (m *Memtable) Get(key []byte) (Entry, bool) {
 
 // Iterator returns an iterator over all entries in sorted order.
 // The caller must call Close() when done.
-func (m *Memtable) Iterator() *MemtableIterator {
+func (m *memtable) Iterator() *memtableIterator {
 	m.mu.RLock()
-	return &MemtableIterator{
+	return &memtableIterator{
 		mt:      m,
 		current: m.head,
 	}
 }
 
 // Size returns approximate memory usage in bytes.
-func (m *Memtable) Size() int64 {
+func (m *memtable) Size() int64 {
 	return atomic.LoadInt64(&m.size)
 }
 
 // Count returns the number of entries.
-func (m *Memtable) Count() int64 {
+func (m *memtable) Count() int64 {
 	return atomic.LoadInt64(&m.count)
 }
 
 // MinSequence returns the minimum sequence number in this memtable.
-func (m *Memtable) MinSequence() uint64 {
+func (m *memtable) MinSequence() uint64 {
 	return atomic.LoadUint64(&m.minSeq)
 }
 
 // randomHeight generates a random height for a new node.
-func (m *Memtable) randomHeight() int {
+func (m *memtable) randomHeight() int {
 	h := 1
 	for h < maxHeight && m.rng.Float64() < probability {
 		h++
@@ -154,15 +154,15 @@ func (m *Memtable) randomHeight() int {
 	return h
 }
 
-// MemtableIterator iterates over memtable entries in sorted order.
-type MemtableIterator struct {
-	mt      *Memtable
+// memtableIterator iterates over memtable entries in sorted order.
+type memtableIterator struct {
+	mt      *memtable
 	current *skiplistNode
 }
 
 // Next advances to the next entry.
 // Returns true if there is a next entry, false if iteration is complete.
-func (it *MemtableIterator) Next() bool {
+func (it *memtableIterator) Next() bool {
 	if it.current == nil {
 		return false
 	}
@@ -172,7 +172,7 @@ func (it *MemtableIterator) Next() bool {
 
 // Entry returns the current entry.
 // Only valid after a successful call to Next().
-func (it *MemtableIterator) Entry() Entry {
+func (it *memtableIterator) Entry() Entry {
 	if it.current == nil {
 		return Entry{}
 	}
@@ -180,7 +180,7 @@ func (it *MemtableIterator) Entry() Entry {
 }
 
 // Key returns the current key.
-func (it *MemtableIterator) Key() []byte {
+func (it *memtableIterator) Key() []byte {
 	if it.current == nil {
 		return nil
 	}
@@ -188,7 +188,7 @@ func (it *MemtableIterator) Key() []byte {
 }
 
 // Value returns the current value.
-func (it *MemtableIterator) Value() Value {
+func (it *memtableIterator) Value() Value {
 	if it.current == nil {
 		return Value{}
 	}
@@ -196,12 +196,12 @@ func (it *MemtableIterator) Value() Value {
 }
 
 // Valid returns true if the iterator is positioned at a valid entry.
-func (it *MemtableIterator) Valid() bool {
+func (it *memtableIterator) Valid() bool {
 	return it.current != nil && it.current != it.mt.head
 }
 
 // Seek positions the iterator at the first entry with key >= target.
-func (it *MemtableIterator) Seek(target []byte) bool {
+func (it *memtableIterator) Seek(target []byte) bool {
 	it.mt.mu.RLock()
 	defer it.mt.mu.RUnlock()
 
@@ -217,6 +217,6 @@ func (it *MemtableIterator) Seek(target []byte) bool {
 }
 
 // Close releases resources held by the iterator.
-func (it *MemtableIterator) Close() {
+func (it *memtableIterator) Close() {
 	it.mt.mu.RUnlock()
 }
