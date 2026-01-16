@@ -62,20 +62,41 @@ Commands:
   count    Count keys by prefix
   compact  Compact the store
 
+Environment:
+  TINYKVS_STORE  Default store directory (used if -dir not specified)
+
 Examples:
-  tinykvs get -dir /path/to/store -key mykey
+  export TINYKVS_STORE=/path/to/store
+  tinykvs get -key mykey
+  tinykvs put -key mykey -value "hello world"
+  tinykvs scan -prefix-hex 05 -limit 10
+
+  # Or specify -dir explicitly:
   tinykvs get -dir /path/to/store -key-hex 0506abcd
-  tinykvs put -dir /path/to/store -key mykey -value "hello world"
-  tinykvs put -dir /path/to/store -key-hex 05 -value-int 42
-  tinykvs delete -dir /path/to/store -key mykey
-  tinykvs scan -dir /path/to/store -prefix user:
-  tinykvs scan -dir /path/to/store -prefix-hex 05 -limit 10
   tinykvs stats -dir /path/to/store
-  tinykvs count -dir /path/to/store -prefix-len 1
-  tinykvs count -dir /path/to/store -prefix-len 2 -workers 8
-  tinykvs compact -dir /path/to/store
 
 Use "tinykvs <command> -h" for more information about a command.`)
+}
+
+// getDir returns the store directory from flag or TINYKVS_STORE env var.
+func getDir(flagDir string) string {
+	if flagDir != "" {
+		return flagDir
+	}
+	if envDir := os.Getenv("TINYKVS_STORE"); envDir != "" {
+		return envDir
+	}
+	return ""
+}
+
+// requireDir returns the directory or exits with an error.
+func requireDir(flagDir string) string {
+	dir := getDir(flagDir)
+	if dir == "" {
+		fmt.Fprintln(os.Stderr, "Error: -dir is required (or set TINYKVS_STORE)")
+		os.Exit(1)
+	}
+	return dir
 }
 
 func cmdGet(args []string) {
@@ -85,11 +106,7 @@ func cmdGet(args []string) {
 	keyHex := fs.String("key-hex", "", "Key to get (hex encoded)")
 	fs.Parse(args)
 
-	if *dir == "" {
-		fmt.Fprintln(os.Stderr, "Error: -dir is required")
-		fs.Usage()
-		os.Exit(1)
-	}
+	storeDir := requireDir(*dir)
 
 	var keyBytes []byte
 	if *keyHex != "" {
@@ -107,8 +124,8 @@ func cmdGet(args []string) {
 		os.Exit(1)
 	}
 
-	opts := tinykvs.DefaultOptions(*dir)
-	store, err := tinykvs.Open(*dir, opts)
+	opts := tinykvs.DefaultOptions(storeDir)
+	store, err := tinykvs.Open(storeDir, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
 		os.Exit(1)
@@ -141,11 +158,7 @@ func cmdPut(args []string) {
 	flush := fs.Bool("flush", false, "Flush after put")
 	fs.Parse(args)
 
-	if *dir == "" {
-		fmt.Fprintln(os.Stderr, "Error: -dir is required")
-		fs.Usage()
-		os.Exit(1)
-	}
+	storeDir := requireDir(*dir)
 
 	var keyBytes []byte
 	if *keyHex != "" {
@@ -223,8 +236,8 @@ func cmdPut(args []string) {
 		os.Exit(1)
 	}
 
-	opts := tinykvs.DefaultOptions(*dir)
-	store, err := tinykvs.Open(*dir, opts)
+	opts := tinykvs.DefaultOptions(storeDir)
+	store, err := tinykvs.Open(storeDir, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
 		os.Exit(1)
@@ -263,11 +276,7 @@ func cmdDelete(args []string) {
 	flush := fs.Bool("flush", false, "Flush after delete")
 	fs.Parse(args)
 
-	if *dir == "" {
-		fmt.Fprintln(os.Stderr, "Error: -dir is required")
-		fs.Usage()
-		os.Exit(1)
-	}
+	storeDir := requireDir(*dir)
 
 	var keyBytes []byte
 	if *keyHex != "" {
@@ -285,8 +294,8 @@ func cmdDelete(args []string) {
 		os.Exit(1)
 	}
 
-	opts := tinykvs.DefaultOptions(*dir)
-	store, err := tinykvs.Open(*dir, opts)
+	opts := tinykvs.DefaultOptions(storeDir)
+	store, err := tinykvs.Open(storeDir, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
 		os.Exit(1)
@@ -317,11 +326,7 @@ func cmdScan(args []string) {
 	keysOnly := fs.Bool("keys-only", false, "Only print keys, not values")
 	fs.Parse(args)
 
-	if *dir == "" {
-		fmt.Fprintln(os.Stderr, "Error: -dir is required")
-		fs.Usage()
-		os.Exit(1)
-	}
+	storeDir := requireDir(*dir)
 
 	var prefixBytes []byte
 	if *prefixHex != "" {
@@ -335,8 +340,8 @@ func cmdScan(args []string) {
 		prefixBytes = []byte(*prefix)
 	}
 
-	opts := tinykvs.DefaultOptions(*dir)
-	store, err := tinykvs.Open(*dir, opts)
+	opts := tinykvs.DefaultOptions(storeDir)
+	store, err := tinykvs.Open(storeDir, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
 		os.Exit(1)
@@ -370,14 +375,10 @@ func cmdStats(args []string) {
 	dir := fs.String("dir", "", "Path to store directory (required)")
 	fs.Parse(args)
 
-	if *dir == "" {
-		fmt.Fprintln(os.Stderr, "Error: -dir is required")
-		fs.Usage()
-		os.Exit(1)
-	}
+	storeDir := requireDir(*dir)
 
-	opts := tinykvs.DefaultOptions(*dir)
-	store, err := tinykvs.Open(*dir, opts)
+	opts := tinykvs.DefaultOptions(storeDir)
+	store, err := tinykvs.Open(storeDir, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
 		os.Exit(1)
@@ -386,7 +387,7 @@ func cmdStats(args []string) {
 
 	stats := store.Stats()
 
-	fmt.Printf("Store: %s\n\n", *dir)
+	fmt.Printf("Store: %s\n\n", storeDir)
 	fmt.Printf("Memtable:\n")
 	fmt.Printf("  Size:  %s\n", formatBytes(stats.MemtableSize))
 	fmt.Printf("  Keys:  %d\n", stats.MemtableCount)
@@ -426,11 +427,7 @@ func cmdCount(args []string) {
 	workers := fs.Int("workers", 8, "Number of parallel workers")
 	fs.Parse(args)
 
-	if *dir == "" {
-		fmt.Fprintln(os.Stderr, "Error: -dir is required")
-		fs.Usage()
-		os.Exit(1)
-	}
+	storeDir := requireDir(*dir)
 
 	if *prefixLen < 1 || *prefixLen > 8 {
 		fmt.Fprintln(os.Stderr, "Error: -prefix-len must be between 1 and 8")
@@ -438,7 +435,7 @@ func cmdCount(args []string) {
 	}
 
 	// Read manifest
-	manifestPath := filepath.Join(*dir, "MANIFEST")
+	manifestPath := filepath.Join(storeDir, "MANIFEST")
 	manifest, err := tinykvs.OpenManifest(manifestPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening manifest: %v\n", err)
@@ -472,7 +469,7 @@ func cmdCount(args []string) {
 			localCounts := counts[workerID]
 
 			for meta := range tableChan {
-				path := filepath.Join(*dir, fmt.Sprintf("%06d.sst", meta.ID))
+				path := filepath.Join(storeDir, fmt.Sprintf("%06d.sst", meta.ID))
 
 				sst, err := tinykvs.OpenSSTable(meta.ID, path)
 				if err != nil {
@@ -556,14 +553,10 @@ func cmdCompact(args []string) {
 	dir := fs.String("dir", "", "Path to store directory (required)")
 	fs.Parse(args)
 
-	if *dir == "" {
-		fmt.Fprintln(os.Stderr, "Error: -dir is required")
-		fs.Usage()
-		os.Exit(1)
-	}
+	storeDir := requireDir(*dir)
 
-	opts := tinykvs.DefaultOptions(*dir)
-	store, err := tinykvs.Open(*dir, opts)
+	opts := tinykvs.DefaultOptions(storeDir)
+	store, err := tinykvs.Open(storeDir, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
 		os.Exit(1)
