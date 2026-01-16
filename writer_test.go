@@ -707,3 +707,171 @@ func TestAggressiveCompactionCycles(t *testing.T) {
 
 	store.Close()
 }
+
+// TestCompactionBlockRelease is a regression test for a bug where blocks were
+// not released during compaction iteration, causing unbounded memory growth.
+// See: https://github.com/freeeve/tinykvs/issues/XXX
+func TestCompactionBlockRelease(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 4 * 1024        // 4KB memtables for many flushes
+	opts.BlockSize = 512                // Small blocks = more blocks to iterate
+	opts.L0CompactionTrigger = 4        // Compact after 4 L0 files
+	opts.BlockCacheSize = 0             // No cache - all blocks must be read from disk
+	opts.DisableBloomFilter = true      // Simplify test
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Write enough data to create many blocks across multiple SSTables
+	// Small memtables + small blocks = many blocks to iterate during compaction
+	numRecords := 10000
+	for i := 0; i < numRecords; i++ {
+		key := fmt.Sprintf("key%08d", i)
+		value := fmt.Sprintf("value%08d", i)
+		store.PutString([]byte(key), value)
+	}
+	store.Flush()
+
+	// Force compaction - this iterates through all blocks
+	// Before the fix, this would leak every block's decompression buffer
+	err = store.Compact()
+	if err != nil {
+		t.Fatalf("Compact failed: %v", err)
+	}
+
+	// Verify data integrity after compaction
+	for i := 0; i < numRecords; i += 100 {
+		key := fmt.Sprintf("key%08d", i)
+		expectedValue := fmt.Sprintf("value%08d", i)
+		val, err := store.Get([]byte(key))
+		if err != nil {
+			t.Errorf("Get(%s) failed after compaction: %v", key, err)
+			continue
+		}
+		if val.String() != expectedValue {
+			t.Errorf("Get(%s) = %q, want %q", key, val.String(), expectedValue)
+		}
+	}
+}
+
+// TestCompactionEntryDataIntegrity is a regression test for a bug where
+// merge iterator entries referenced block buffers that were released,
+// causing data corruption (use-after-free).
+// See: https://github.com/freeeve/tinykvs/issues/XXX
+func TestCompactionEntryDataIntegrity(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 2 * 1024        // Very small for many flushes
+	opts.BlockSize = 256                // Very small blocks
+	opts.L0CompactionTrigger = 2        // Compact frequently
+	opts.BlockCacheSize = 0             // No cache
+	opts.DisableBloomFilter = true
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Create overlapping data across multiple SSTables
+	// This ensures merge iterator must interleave entries from different tables/blocks
+	batches := 5
+	recordsPerBatch := 500
+	for batch := 0; batch < batches; batch++ {
+		for i := 0; i < recordsPerBatch; i++ {
+			// Keys interleave: batch0-key0, batch1-key0, batch2-key0, ...
+			key := fmt.Sprintf("key%06d-batch%d", i, batch)
+			value := fmt.Sprintf("v%06d-b%d", i, batch)
+			store.PutString([]byte(key), value)
+		}
+		store.Flush()
+	}
+
+	// Compact all L0 to L1 - merge iterator will interleave entries
+	// Before the fix, entry data would be corrupted as blocks were released
+	err = store.Compact()
+	if err != nil {
+		t.Fatalf("Compact failed: %v", err)
+	}
+
+	// Verify ALL data is correct (catches data corruption from use-after-free)
+	errors := 0
+	for batch := 0; batch < batches; batch++ {
+		for i := 0; i < recordsPerBatch; i++ {
+			key := fmt.Sprintf("key%06d-batch%d", i, batch)
+			expectedValue := fmt.Sprintf("v%06d-b%d", i, batch)
+			val, err := store.Get([]byte(key))
+			if err != nil {
+				if errors < 10 {
+					t.Errorf("Get(%s) failed: %v", key, err)
+				}
+				errors++
+				continue
+			}
+			if val.String() != expectedValue {
+				if errors < 10 {
+					t.Errorf("Get(%s) = %q, want %q (data corruption)", key, val.String(), expectedValue)
+				}
+				errors++
+			}
+		}
+	}
+	if errors > 0 {
+		t.Errorf("Total errors: %d (data corruption during compaction)", errors)
+	}
+}
+
+// TestMergeIteratorBlockLifetime tests that blocks are properly managed
+// during k-way merge iteration across multiple SSTables.
+func TestMergeIteratorBlockLifetime(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 1024
+	opts.BlockSize = 128 // Very small to create many blocks
+	opts.BlockCacheSize = 0 // Force all blocks to be read/released
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Create 3 SSTables with interleaved key ranges
+	// SSTable 1: a000, a003, a006, ...
+	// SSTable 2: a001, a004, a007, ...
+	// SSTable 3: a002, a005, a008, ...
+	for sstNum := 0; sstNum < 3; sstNum++ {
+		for i := sstNum; i < 300; i += 3 {
+			key := fmt.Sprintf("a%03d", i)
+			value := fmt.Sprintf("val%03d-sst%d", i, sstNum)
+			store.PutString([]byte(key), value)
+		}
+		store.Flush()
+	}
+
+	// Compact - merge iterator must alternate between blocks from all 3 tables
+	err = store.Compact()
+	if err != nil {
+		t.Fatalf("Compact failed: %v", err)
+	}
+
+	// Verify sequential order is correct
+	for i := 0; i < 300; i++ {
+		key := fmt.Sprintf("a%03d", i)
+		sstNum := i % 3
+		expectedValue := fmt.Sprintf("val%03d-sst%d", i, sstNum)
+
+		val, err := store.Get([]byte(key))
+		if err != nil {
+			t.Errorf("Get(%s) failed: %v", key, err)
+			continue
+		}
+		if val.String() != expectedValue {
+			t.Errorf("Get(%s) = %q, want %q", key, val.String(), expectedValue)
+		}
+	}
+}

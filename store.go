@@ -22,6 +22,7 @@ type Store struct {
 	wal      *WAL
 	levels   [][]*SSTable // levels[0] = L0, levels[1] = L1, etc.
 	cache    *LRUCache
+	manifest *Manifest // Tracks all SSTables
 
 	// Components
 	reader *Reader
@@ -62,10 +63,38 @@ func Open(path string, opts Options) (*Store, error) {
 	}
 	s.wal = wal
 
-	// Load existing SSTables
-	if err := s.loadSSTables(); err != nil {
+	// Try to open manifest for fast loading
+	manifestPath := filepath.Join(path, "MANIFEST")
+	manifest, err := OpenManifest(manifestPath)
+	if err != nil && !os.IsNotExist(err) {
 		wal.Close()
 		return nil, err
+	}
+
+	if manifest != nil && len(manifest.Tables()) > 0 {
+		// Load SSTables from manifest (fast path - lazy loading)
+		s.manifest = manifest
+		if err := s.loadSSTablesFromManifest(); err != nil {
+			manifest.Close()
+			wal.Close()
+			return nil, err
+		}
+	} else {
+		// No manifest or empty - scan directory (migration/fallback path)
+		if manifest != nil {
+			manifest.Close()
+		}
+		if err := s.loadSSTables(); err != nil {
+			wal.Close()
+			return nil, err
+		}
+		// Create manifest from loaded SSTables
+		manifest, err = s.createManifestFromSSTables(manifestPath)
+		if err != nil {
+			wal.Close()
+			return nil, err
+		}
+		s.manifest = manifest
 	}
 
 	// Initialize reader
@@ -76,6 +105,7 @@ func Open(path string, opts Options) (*Store, error) {
 
 	// Recover from WAL
 	if err := s.recover(); err != nil {
+		s.manifest.Close()
 		wal.Close()
 		return nil, err
 	}
@@ -190,6 +220,11 @@ func (s *Store) Close() error {
 	// Close WAL
 	s.wal.Close()
 
+	// Close manifest
+	if s.manifest != nil {
+		s.manifest.Close()
+	}
+
 	// Close all SSTables
 	s.mu.Lock()
 	for _, level := range s.levels {
@@ -285,7 +320,14 @@ func (s *Store) loadSSTables() error {
 		return err
 	}
 
+	// Collect SSTable file info
+	type sstFile struct {
+		id   uint32
+		path string
+	}
+	var files []sstFile
 	var maxID uint32
+
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sst") {
 			continue
@@ -303,19 +345,68 @@ func (s *Store) loadSSTables() error {
 			maxID = id
 		}
 
-		path := filepath.Join(s.dir, entry.Name())
-		sst, err := OpenSSTable(id, path)
-		if err != nil {
+		files = append(files, sstFile{
+			id:   id,
+			path: filepath.Join(s.dir, entry.Name()),
+		})
+	}
+
+	// Load SSTables in parallel
+	numWorkers := 8
+	if len(files) < numWorkers {
+		numWorkers = len(files)
+	}
+	if numWorkers == 0 {
+		atomic.StoreUint32(&s.nextID, maxID)
+		return nil
+	}
+
+	type result struct {
+		sst *SSTable
+		err error
+	}
+
+	jobs := make(chan sstFile, len(files))
+	results := make(chan result, len(files))
+
+	// Start workers
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for f := range jobs {
+				sst, err := OpenSSTable(f.id, f.path)
+				results <- result{sst: sst, err: err}
+			}
+		}()
+	}
+
+	// Send jobs
+	for _, f := range files {
+		jobs <- f
+	}
+	close(jobs)
+
+	// Wait for workers and close results
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results
+	for r := range results {
+		if r.err != nil {
 			// Log error but continue loading other files
 			continue
 		}
 
 		// Add to appropriate level
-		level := sst.Level
+		level := r.sst.Level
 		for len(s.levels) <= level {
 			s.levels = append(s.levels, nil)
 		}
-		s.levels[level] = append(s.levels[level], sst)
+		s.levels[level] = append(s.levels[level], r.sst)
 	}
 
 	// Sort L1+ tables by min key
@@ -327,6 +418,113 @@ func (s *Store) loadSSTables() error {
 	atomic.StoreUint32(&s.nextID, maxID)
 
 	return nil
+}
+
+// loadSSTablesFromManifest loads SSTables using metadata from the manifest.
+// This is much faster than loadSSTables() because it uses lazy loading.
+func (s *Store) loadSSTablesFromManifest() error {
+	tables := s.manifest.Tables()
+
+	// Open SSTables in parallel with lazy loading
+	numWorkers := 8
+	if len(tables) < numWorkers {
+		numWorkers = len(tables)
+	}
+	if numWorkers == 0 {
+		atomic.StoreUint32(&s.nextID, s.manifest.MaxID())
+		return nil
+	}
+
+	type result struct {
+		sst *SSTable
+		err error
+	}
+
+	jobs := make(chan *TableMeta, len(tables))
+	results := make(chan result, len(tables))
+
+	// Start workers
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for meta := range jobs {
+				sst, err := OpenSSTableFromManifest(meta, s.dir)
+				results <- result{sst: sst, err: err}
+			}
+		}()
+	}
+
+	// Send jobs
+	for _, meta := range tables {
+		jobs <- meta
+	}
+	close(jobs)
+
+	// Wait for workers and close results
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results
+	for r := range results {
+		if r.err != nil {
+			// Log error but continue loading other files
+			continue
+		}
+
+		// Add to appropriate level
+		level := r.sst.Level
+		for len(s.levels) <= level {
+			s.levels = append(s.levels, nil)
+		}
+		s.levels[level] = append(s.levels[level], r.sst)
+	}
+
+	// Sort L1+ tables by min key
+	for level := 1; level < len(s.levels); level++ {
+		sortTablesByMinKey(s.levels[level])
+	}
+
+	// Set next ID
+	atomic.StoreUint32(&s.nextID, s.manifest.MaxID())
+
+	return nil
+}
+
+// createManifestFromSSTables creates a manifest from already-loaded SSTables.
+// This is used when migrating from a store without a manifest.
+func (s *Store) createManifestFromSSTables(manifestPath string) (*Manifest, error) {
+	manifest, err := OpenManifest(manifestPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Add all loaded SSTables to manifest
+	for _, level := range s.levels {
+		for _, sst := range level {
+			meta := &TableMeta{
+				ID:          sst.ID,
+				Level:       sst.Level,
+				MinKey:      sst.MinKey(),
+				MaxKey:      sst.MaxKey(),
+				NumKeys:     sst.Footer.NumKeys,
+				FileSize:    sst.fileSize,
+				IndexOffset: sst.Footer.IndexOffset,
+				IndexSize:   sst.Footer.IndexSize,
+				BloomOffset: sst.Footer.BloomOffset,
+				BloomSize:   sst.Footer.BloomSize,
+			}
+			if err := manifest.AddTable(meta); err != nil {
+				manifest.Close()
+				return nil, err
+			}
+		}
+	}
+
+	return manifest, nil
 }
 
 func (s *Store) nextSSTableID() uint32 {
@@ -433,6 +631,38 @@ func (s *Store) replaceTablesAfterCompaction(
 	})
 
 	s.levels[targetLevel] = newTargetLevel
+
+	// Update manifest
+	if s.manifest != nil {
+		// Add new tables
+		for _, sst := range newTables {
+			meta := &TableMeta{
+				ID:          sst.ID,
+				Level:       targetLevel,
+				MinKey:      sst.MinKey(),
+				MaxKey:      sst.MaxKey(),
+				NumKeys:     sst.Footer.NumKeys,
+				FileSize:    int64(sst.Footer.FileSize),
+				IndexOffset: sst.Footer.IndexOffset,
+				IndexSize:   sst.Footer.IndexSize,
+				BloomOffset: sst.Footer.BloomOffset,
+				BloomSize:   sst.Footer.BloomSize,
+			}
+			s.manifest.AddTable(meta)
+		}
+
+		// Delete old tables
+		var deleteIDs []uint32
+		for _, t := range oldL0Tables {
+			deleteIDs = append(deleteIDs, t.ID)
+		}
+		for _, t := range oldL1Tables {
+			deleteIDs = append(deleteIDs, t.ID)
+		}
+		if len(deleteIDs) > 0 {
+			s.manifest.DeleteTables(deleteIDs)
+		}
+	}
 }
 
 // Errors

@@ -118,6 +118,57 @@ func FuzzValueRoundTrip(f *testing.F) {
 	})
 }
 
+// FuzzDecodeEntry tests that DecodeEntry doesn't panic on arbitrary input
+func FuzzDecodeEntry(f *testing.F) {
+	// Valid entry: key_len(4) + key + seq(8) + value
+	validEntry := []byte{
+		5, 0, 0, 0, // key_len = 5
+		'h', 'e', 'l', 'l', 'o', // key
+		1, 0, 0, 0, 0, 0, 0, 0, // sequence = 1
+		byte(ValueTypeInt64), 42, 0, 0, 0, 0, 0, 0, 0, // value
+	}
+	f.Add(validEntry)
+	f.Add([]byte{})
+	f.Add([]byte{0, 0, 0, 0}) // zero-length key
+	f.Add([]byte{255, 255, 255, 255}) // huge key length
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _, _ = DecodeEntry(data)
+	})
+}
+
+// FuzzEntryRoundTrip tests entry encode/decode consistency
+func FuzzEntryRoundTrip(f *testing.F) {
+	f.Add([]byte("key"), int64(1), int64(42))
+	f.Add([]byte{}, int64(0), int64(0))
+	f.Add([]byte{0, 255}, int64(9223372036854775807), int64(-1))
+
+	f.Fuzz(func(t *testing.T, key []byte, seq int64, val int64) {
+		if len(key) == 0 {
+			return
+		}
+		entry := Entry{
+			Key:      key,
+			Sequence: uint64(seq),
+			Value:    Int64Value(val),
+		}
+		encoded := EncodeEntry(entry)
+		decoded, _, err := DecodeEntry(encoded)
+		if err != nil {
+			t.Fatalf("failed to decode entry: %v", err)
+		}
+		if string(decoded.Key) != string(key) {
+			t.Fatalf("key mismatch")
+		}
+		if decoded.Sequence != uint64(seq) {
+			t.Fatalf("sequence mismatch")
+		}
+		if decoded.Value.Int64 != val {
+			t.Fatalf("value mismatch")
+		}
+	})
+}
+
 // FuzzBlockRoundTrip tests block encode/decode round-trip
 func FuzzBlockRoundTrip(f *testing.F) {
 	f.Add([]byte("key1"), []byte("value1"), uint8(0))

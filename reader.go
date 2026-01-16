@@ -503,17 +503,24 @@ func (s *memtablePrefixSource) close() {
 
 // sstablePrefixSource wraps an SSTable for prefix scanning.
 type sstablePrefixSource struct {
-	sst      *SSTable
-	prefix   []byte
-	cache    *LRUCache
-	verify   bool
-	blockIdx int
-	entryIdx int
-	block    *Block
-	valid    bool
+	sst       *SSTable
+	prefix    []byte
+	cache     *LRUCache
+	verify    bool
+	blockIdx  int
+	entryIdx  int
+	block     *Block
+	valid     bool
+	fromCache bool // True if current block came from cache (don't release it)
 }
 
 func (s *sstablePrefixSource) seekToPrefix() {
+	// Ensure index is loaded for lazy-loaded SSTables
+	if err := s.sst.ensureIndex(); err != nil {
+		s.valid = false
+		return
+	}
+
 	// Check if SSTable might contain keys with this prefix
 	if !hasKeyInRange(s.prefix, s.sst.Index.MinKey, s.sst.Index.MaxKey) {
 		s.valid = false
@@ -557,6 +564,12 @@ func (s *sstablePrefixSource) loadBlock() error {
 		return ErrKeyNotFound
 	}
 
+	// Release previous block if we owned it
+	if s.block != nil && !s.fromCache {
+		s.block.Release()
+		s.block = nil
+	}
+
 	ie := s.sst.Index.Entries[s.blockIdx]
 	cacheKey := CacheKey{FileID: s.sst.ID, BlockOffset: ie.BlockOffset}
 
@@ -564,6 +577,7 @@ func (s *sstablePrefixSource) loadBlock() error {
 	if s.cache != nil {
 		if cached, found := s.cache.Get(cacheKey); found {
 			s.block = cached
+			s.fromCache = true
 			return nil
 		}
 	}
@@ -581,6 +595,9 @@ func (s *sstablePrefixSource) loadBlock() error {
 
 	if s.cache != nil {
 		s.cache.Put(cacheKey, block)
+		s.fromCache = true // Now in cache, don't release
+	} else {
+		s.fromCache = false // Not cached, we own it
 	}
 	s.block = block
 	return nil
@@ -632,5 +649,9 @@ func (s *sstablePrefixSource) entry() Entry {
 }
 
 func (s *sstablePrefixSource) close() {
-	// Nothing to close
+	// Release block if we own it (not from cache)
+	if s.block != nil && !s.fromCache {
+		s.block.Release()
+		s.block = nil
+	}
 }

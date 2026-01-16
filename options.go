@@ -41,6 +41,11 @@ type Options struct {
 	// Default: 4
 	L0CompactionTrigger int
 
+	// L0CompactionBatchSize limits how many L0 files to compact at once.
+	// Lower values mean faster individual compactions but more total compactions.
+	// Default: 0 (no limit - compact all L0 files)
+	L0CompactionBatchSize int
+
 	// MaxLevels is the maximum number of LSM levels.
 	// Default: 7
 	MaxLevels int
@@ -103,6 +108,7 @@ const (
 	// CompressionNone disables compression.
 	CompressionNone
 )
+
 
 // DefaultOptions returns production-ready defaults for the given directory.
 func DefaultOptions(dir string) Options {

@@ -3,7 +3,9 @@ package tinykvs
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
+	"sync"
 )
 
 // SSTable magic number and version
@@ -50,9 +52,17 @@ type SSTable struct {
 
 	file     *os.File
 	fileSize int64
+
+	// Lazy loading support
+	indexOnce sync.Once
+	bloomOnce sync.Once
+	indexErr  error
+	bloomErr  error
+	minKey    []byte // Cached from manifest for lazy loading
+	maxKey    []byte
 }
 
-// OpenSSTable opens an existing SSTable file.
+// OpenSSTable opens an existing SSTable file (eagerly loads index and bloom filter).
 func OpenSSTable(id uint32, path string) (*SSTable, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -136,15 +146,126 @@ func OpenSSTable(id uint32, path string) (*SSTable, error) {
 		BloomFilter: bloomFilter,
 		file:        file,
 		fileSize:    fileSize,
+		minKey:      index.MinKey,
+		maxKey:      index.MaxKey,
 	}, nil
+}
+
+// OpenSSTableFromManifest opens an SSTable using metadata from the manifest.
+// Index and bloom filter are loaded lazily on first access.
+func OpenSSTableFromManifest(meta *TableMeta, dir string) (*SSTable, error) {
+	path := SSTablePath(dir, meta.ID)
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Verify file exists and get size
+	stat, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+
+	return &SSTable{
+		ID:       meta.ID,
+		Path:     path,
+		Level:    meta.Level,
+		Footer: SSTableFooter{
+			IndexOffset: meta.IndexOffset,
+			IndexSize:   meta.IndexSize,
+			BloomOffset: meta.BloomOffset,
+			BloomSize:   meta.BloomSize,
+			NumKeys:     meta.NumKeys,
+			FileSize:    uint64(meta.FileSize),
+		},
+		file:     file,
+		fileSize: stat.Size(),
+		minKey:   meta.MinKey,
+		maxKey:   meta.MaxKey,
+		// Index and BloomFilter are nil - will be loaded lazily
+	}, nil
+}
+
+// SSTablePath returns the path for an SSTable with the given ID.
+func SSTablePath(dir string, id uint32) string {
+	return dir + "/" + SSTableFilename(id)
+}
+
+// SSTableFilename returns the filename for an SSTable with the given ID.
+func SSTableFilename(id uint32) string {
+	return fmt.Sprintf("%06d.sst", id)
+}
+
+// ensureIndex loads the index if not already loaded.
+func (sst *SSTable) ensureIndex() error {
+	sst.indexOnce.Do(func() {
+		if sst.Index != nil {
+			return // Already loaded
+		}
+
+		indexBuf := make([]byte, sst.Footer.IndexSize)
+		if _, err := sst.file.ReadAt(indexBuf, int64(sst.Footer.IndexOffset)); err != nil {
+			sst.indexErr = err
+			return
+		}
+
+		index, err := DeserializeIndex(indexBuf)
+		if err != nil {
+			sst.indexErr = err
+			return
+		}
+
+		sst.Index = index
+		// Update cached min/max keys if we loaded from file
+		if sst.minKey == nil {
+			sst.minKey = index.MinKey
+		}
+		if sst.maxKey == nil {
+			sst.maxKey = index.MaxKey
+		}
+	})
+	return sst.indexErr
+}
+
+// ensureBloom loads the bloom filter if not already loaded.
+func (sst *SSTable) ensureBloom() error {
+	sst.bloomOnce.Do(func() {
+		if sst.BloomFilter != nil || sst.Footer.BloomSize == 0 {
+			return // Already loaded or no bloom filter
+		}
+
+		bloomBuf := make([]byte, sst.Footer.BloomSize)
+		if _, err := sst.file.ReadAt(bloomBuf, int64(sst.Footer.BloomOffset)); err != nil {
+			sst.bloomErr = err
+			return
+		}
+
+		bloom, err := DeserializeBloomFilter(bloomBuf)
+		if err != nil {
+			sst.bloomErr = err
+			return
+		}
+
+		sst.BloomFilter = bloom
+	})
+	return sst.bloomErr
 }
 
 // Get retrieves a value from the SSTable.
 // Returns the entry, whether it was found, and any error.
 func (sst *SSTable) Get(key []byte, cache *LRUCache, verifyChecksum bool) (Entry, bool, error) {
-	// Check bloom filter first (if present)
+	// Check bloom filter first (if present) - lazy load if needed
+	if err := sst.ensureBloom(); err != nil {
+		return Entry{}, false, err
+	}
 	if sst.BloomFilter != nil && !sst.BloomFilter.MayContain(key) {
 		return Entry{}, false, nil
+	}
+
+	// Ensure index is loaded
+	if err := sst.ensureIndex(); err != nil {
+		return Entry{}, false, err
 	}
 
 	// Find the block that may contain the key
@@ -201,12 +322,28 @@ func (sst *SSTable) Get(key []byte, cache *LRUCache, verifyChecksum bool) (Entry
 
 // MinKey returns the minimum key in this SSTable.
 func (sst *SSTable) MinKey() []byte {
-	return sst.Index.MinKey
+	// Use cached value if available (from manifest)
+	if sst.minKey != nil {
+		return sst.minKey
+	}
+	// Fall back to index (will lazy load if needed)
+	if sst.Index != nil {
+		return sst.Index.MinKey
+	}
+	return nil
 }
 
 // MaxKey returns the maximum key in this SSTable.
 func (sst *SSTable) MaxKey() []byte {
-	return sst.Index.MaxKey
+	// Use cached value if available (from manifest)
+	if sst.maxKey != nil {
+		return sst.maxKey
+	}
+	// Fall back to index (will lazy load if needed)
+	if sst.Index != nil {
+		return sst.Index.MaxKey
+	}
+	return nil
 }
 
 // Close closes the SSTable file.

@@ -200,6 +200,25 @@ func (w *Writer) flushMemtable(mt *Memtable) error {
 	w.store.addSSTable(0, sst)
 	w.reader.AddSSTable(0, sst)
 
+	// Add to manifest
+	if w.store.manifest != nil {
+		meta := &TableMeta{
+			ID:          sst.ID,
+			Level:       0,
+			MinKey:      sst.MinKey(),
+			MaxKey:      sst.MaxKey(),
+			NumKeys:     sst.Footer.NumKeys,
+			FileSize:    int64(sst.Footer.FileSize),
+			IndexOffset: sst.Footer.IndexOffset,
+			IndexSize:   sst.Footer.IndexSize,
+			BloomOffset: sst.Footer.BloomOffset,
+			BloomSize:   sst.Footer.BloomSize,
+		}
+		if err := w.store.manifest.AddTable(meta); err != nil {
+			return fmt.Errorf("failed to add table to manifest: %w", err)
+		}
+	}
+
 	// Remove from immutables and signal waiting writers
 	w.flushMu.Lock()
 	for i, imm := range w.immutables {
@@ -337,6 +356,12 @@ func (w *Writer) compactL0ToL1() {
 	}
 
 	l0Tables := levels[0]
+
+	// Limit batch size if configured
+	if w.store.opts.L0CompactionBatchSize > 0 && len(l0Tables) > w.store.opts.L0CompactionBatchSize {
+		// Take oldest tables (at the beginning of the slice)
+		l0Tables = l0Tables[:w.store.opts.L0CompactionBatchSize]
+	}
 
 	// Find key range of L0
 	var minKey, maxKey []byte
@@ -588,7 +613,6 @@ type sstableIterator struct {
 	blockIdx   int
 	entryIdx   int
 	block      *Block
-	cache      *LRUCache
 	verify     bool
 	tableIndex int // For stable sorting (lower = newer)
 }
@@ -672,12 +696,12 @@ func newMergeIterator(tables []*SSTable, cache *LRUCache, verify bool) *mergeIte
 	}
 
 	// Initialize iterators and push first entry from each
+	// Note: Iterators don't use the cache to avoid use-after-free issues
 	for i, t := range tables {
 		iter := &sstableIterator{
 			sst:        t,
 			blockIdx:   0,
 			entryIdx:   -1,
-			cache:      cache,
 			verify:     verify,
 			tableIndex: i,
 		}
@@ -727,7 +751,10 @@ func (m *mergeIterator) Entry() Entry {
 }
 
 func (m *mergeIterator) Close() {
-	// Nothing to close for SSTables
+	// Close all underlying iterators to release their blocks
+	for _, iter := range m.iterators {
+		iter.Close()
+	}
 }
 
 func (it *sstableIterator) Next() bool {
@@ -737,6 +764,9 @@ func (it *sstableIterator) Next() bool {
 		if it.entryIdx < len(it.block.Entries) {
 			return true
 		}
+		// Done with current block - always release since we own all blocks
+		it.block.Release()
+		it.block = nil
 	}
 
 	// Move to next block
@@ -748,15 +778,9 @@ func (it *sstableIterator) Next() bool {
 		indexEntry := it.sst.Index.Entries[it.blockIdx]
 		it.blockIdx++
 
-		// Try cache
-		cacheKey := CacheKey{FileID: it.sst.ID, BlockOffset: indexEntry.BlockOffset}
-		if it.cache != nil {
-			if block, ok := it.cache.Get(cacheKey); ok {
-				it.block = block
-				it.entryIdx = 0
-				return true
-			}
-		}
+		// Note: We intentionally don't use the cache during iteration.
+		// This avoids use-after-free issues if cached blocks get evicted
+		// while we're still iterating over them. We own all blocks we create.
 
 		// Read from disk
 		blockData := make([]byte, indexEntry.BlockSize)
@@ -769,12 +793,9 @@ func (it *sstableIterator) Next() bool {
 			return false
 		}
 
-		if it.cache != nil {
-			it.cache.Put(cacheKey, block)
-		}
-
 		// Skip empty blocks
 		if len(block.Entries) == 0 {
+			block.Release()
 			continue
 		}
 
@@ -784,16 +805,30 @@ func (it *sstableIterator) Next() bool {
 	}
 }
 
+// Close releases resources held by the iterator.
+func (it *sstableIterator) Close() {
+	if it.block != nil {
+		it.block.Release()
+		it.block = nil
+	}
+}
+
 func (it *sstableIterator) Entry() Entry {
 	if it.block == nil || it.entryIdx >= len(it.block.Entries) {
 		return Entry{}
 	}
 
 	be := it.block.Entries[it.entryIdx]
-	// Use zero-copy decode - block data is valid while iterator is on this block
-	value, _, _ := DecodeValueZeroCopy(be.Value)
+	// Make copies of key and value since the block may be released
+	// while this entry is still on the merge heap
+	keyCopy := make([]byte, len(be.Key))
+	copy(keyCopy, be.Key)
+
+	// Decode value (this already makes a copy for non-bytes values)
+	value, _, _ := DecodeValue(be.Value)
+
 	return Entry{
-		Key:   be.Key,
+		Key:   keyCopy,
 		Value: value,
 	}
 }

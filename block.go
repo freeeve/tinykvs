@@ -153,14 +153,17 @@ type BlockEntry struct {
 type Block struct {
 	Type    uint8
 	Entries []BlockEntry
-	buffer  []byte // pooled buffer for decompressed data
+	buffer  []byte // buffer for decompressed data
+	pooled  bool   // true if buffer came from pool and should be returned
 }
 
 // Release returns the block's buffer to the pool.
 // Call this when the block is no longer needed.
 func (b *Block) Release() {
 	if b.buffer != nil {
-		putDecompressBuffer(b.buffer)
+		if b.pooled {
+			putDecompressBuffer(b.buffer)
+		}
 		b.buffer = nil
 		b.Entries = nil
 	}
@@ -394,18 +397,35 @@ func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
 	var decompressed []byte
 	var err error
 
+	// Track whether decompressed buffer came from pool
+	pooled := true
+
 	switch compType {
 	case compressionTypeSnappy:
-		// snappy.Decode checks len(dst), not cap(dst), so pre-size it
-		if cap(buf) >= int(uncompressedSize) {
-			buf = buf[:uncompressedSize]
-		} else {
-			buf = make([]byte, uncompressedSize)
+		// Validate decompressed length before allocating/decoding
+		// This catches corrupted footers and invalid snappy data early
+		decodedLen, err := snappy.DecodedLen(compressed)
+		if err != nil {
+			putDecompressBuffer(buf)
+			return nil, err
 		}
+		if decodedLen != int(uncompressedSize) {
+			putDecompressBuffer(buf)
+			return nil, ErrCorruptedData
+		}
+		// snappy.Decode checks len(dst), not cap(dst), so pre-size it
+		buf = buf[:uncompressedSize]
 		decompressed, err = snappy.Decode(buf, compressed)
 		if err != nil {
 			putDecompressBuffer(buf)
 			return nil, err
+		}
+		// Verify snappy used our buffer (defensive check)
+		if len(decompressed) > 0 && len(buf) > 0 && &decompressed[0] != &buf[0] {
+			// snappy allocated a new buffer - this shouldn't happen
+			// after DecodedLen validation, but handle it safely
+			putDecompressBuffer(buf)
+			pooled = false // decompressed is not from pool
 		}
 	case compressionTypeNone:
 		decompressed = buf[:len(compressed)]
@@ -418,11 +438,18 @@ func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
 			putDecompressBuffer(buf)
 			return nil, err
 		}
+		// Check if zstd allocated a new buffer (can happen if buf was too small)
+		if len(decompressed) > 0 && len(buf) > 0 && &decompressed[0] != &buf[0] {
+			putDecompressBuffer(buf)
+			pooled = false
+		}
 	}
 
 	// Parse header
 	if len(decompressed) < 3 {
-		putDecompressBuffer(decompressed)
+		if pooled {
+			putDecompressBuffer(decompressed)
+		}
 		return nil, ErrCorruptedData
 	}
 
@@ -435,14 +462,18 @@ func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
 
 	for i := uint16(0); i < numEntries; i++ {
 		if pos+4 > len(decompressed) {
-			putDecompressBuffer(decompressed)
+			if pooled {
+				putDecompressBuffer(decompressed)
+			}
 			return nil, ErrCorruptedData
 		}
 		keyLen := int(binary.LittleEndian.Uint32(decompressed[pos:]))
 		pos += 4
 
 		if pos+keyLen+4 > len(decompressed) {
-			putDecompressBuffer(decompressed)
+			if pooled {
+				putDecompressBuffer(decompressed)
+			}
 			return nil, ErrCorruptedData
 		}
 		// Zero-copy: slice into decompressed buffer
@@ -453,7 +484,9 @@ func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
 		pos += 4
 
 		if pos+valLen > len(decompressed) {
-			putDecompressBuffer(decompressed)
+			if pooled {
+				putDecompressBuffer(decompressed)
+			}
 			return nil, ErrCorruptedData
 		}
 		// Zero-copy: slice into decompressed buffer
@@ -465,6 +498,7 @@ func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
 		Type:    blockType,
 		Entries: entries,
 		buffer:  decompressed,
+		pooled:  pooled,
 	}, nil
 }
 
