@@ -351,6 +351,89 @@ func (s *Store) Increment(key []byte, delta int64) (int64, error) {
 	return newVal, nil
 }
 
+// DeleteRange deletes all keys in the range [start, end).
+// This is more efficient than deleting keys one by one.
+// Returns the number of keys deleted.
+func (s *Store) DeleteRange(start, end []byte) (int64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	if s.closed {
+		return 0, ErrStoreClosed
+	}
+
+	// Collect keys in range
+	var keys [][]byte
+	err := s.reader.ScanPrefix(nil, func(key []byte, _ Value) bool {
+		if CompareKeys(key, start) >= 0 && CompareKeys(key, end) < 0 {
+			keyCopy := make([]byte, len(key))
+			copy(keyCopy, key)
+			keys = append(keys, keyCopy)
+		}
+		// Stop if we've passed the end
+		return CompareKeys(key, end) < 0
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	// Delete all keys in batch
+	if len(keys) == 0 {
+		return 0, nil
+	}
+
+	batch := &Batch{}
+	for _, key := range keys {
+		batch.Delete(key)
+	}
+
+	if err := s.writer.WriteBatch(batch.ops); err != nil {
+		return 0, err
+	}
+
+	return int64(len(keys)), nil
+}
+
+// DeletePrefix deletes all keys with the given prefix.
+// Returns the number of keys deleted.
+func (s *Store) DeletePrefix(prefix []byte) (int64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	if s.closed {
+		return 0, ErrStoreClosed
+	}
+
+	// Collect keys with prefix
+	var keys [][]byte
+	// Use reader directly since we already hold the lock
+	err := s.reader.ScanPrefix(prefix, func(key []byte, _ Value) bool {
+		keyCopy := make([]byte, len(key))
+		copy(keyCopy, key)
+		keys = append(keys, keyCopy)
+		return true
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	if len(keys) == 0 {
+		return 0, nil
+	}
+
+	// Delete all keys in batch
+	batch := &Batch{}
+	for _, key := range keys {
+		batch.Delete(key)
+	}
+
+	if err := s.writer.WriteBatch(batch.ops); err != nil {
+		return 0, err
+	}
+
+	return int64(len(keys)), nil
+}
+
 // valuesEqual compares two values for equality.
 func valuesEqual(a, b Value) bool {
 	if a.Type != b.Type {

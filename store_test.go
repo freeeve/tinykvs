@@ -1832,3 +1832,81 @@ func TestIncrement(t *testing.T) {
 		t.Errorf("Increment on string: got %v, want ErrTypeMismatch", err)
 	}
 }
+
+func TestDeleteRange(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Create some keys
+	for i := 0; i < 10; i++ {
+		key := fmt.Sprintf("key%02d", i)
+		store.PutInt64([]byte(key), int64(i))
+	}
+
+	// Delete range [key03, key07)
+	deleted, err := store.DeleteRange([]byte("key03"), []byte("key07"))
+	if err != nil {
+		t.Fatalf("DeleteRange failed: %v", err)
+	}
+	if deleted != 4 {
+		t.Errorf("deleted = %d, want 4", deleted)
+	}
+
+	// Verify remaining keys
+	remaining := 0
+	store.ScanPrefix([]byte("key"), func(key []byte, _ Value) bool {
+		remaining++
+		return true
+	})
+	if remaining != 6 {
+		t.Errorf("remaining = %d, want 6", remaining)
+	}
+}
+
+func TestDeletePrefix(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Create keys with different prefixes
+	for i := 0; i < 5; i++ {
+		store.PutInt64([]byte(fmt.Sprintf("user:%d", i)), int64(i))
+		store.PutInt64([]byte(fmt.Sprintf("item:%d", i)), int64(i))
+	}
+
+	// Delete all user: keys
+	deleted, err := store.DeletePrefix([]byte("user:"))
+	if err != nil {
+		t.Fatalf("DeletePrefix failed: %v", err)
+	}
+	if deleted != 5 {
+		t.Errorf("deleted = %d, want 5", deleted)
+	}
+
+	// Verify user: keys are gone
+	userCount := 0
+	store.ScanPrefix([]byte("user:"), func(key []byte, _ Value) bool {
+		userCount++
+		return true
+	})
+	if userCount != 0 {
+		t.Errorf("user count = %d, want 0", userCount)
+	}
+
+	// Verify item: keys still exist
+	itemCount := 0
+	store.ScanPrefix([]byte("item:"), func(key []byte, _ Value) bool {
+		itemCount++
+		return true
+	})
+	if itemCount != 5 {
+		t.Errorf("item count = %d, want 5", itemCount)
+	}
+}
