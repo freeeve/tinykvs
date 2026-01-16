@@ -6,8 +6,9 @@
 # - AWS CLI configured with credentials
 # - SSH key pair created in AWS
 #
-# Usage: ./ec2_benchmark.sh [num_records] [key_name]
-# Example: ./ec2_benchmark.sh 1000000000 my-key-pair
+# Usage: ./ec2_benchmark.sh [num_records] [key_name] [compression]
+# Example: ./ec2_benchmark.sh 1000000000 my-key-pair zstd
+# Example: ./ec2_benchmark.sh 1000000000 "" snappy  # No SSH key, use SSM
 #
 # For 1B records on t4g.micro:
 # - Uses 4GB swap for safety
@@ -18,6 +19,7 @@ set -e
 
 NUM_RECORDS=${1:-100000000}  # Default 100M records
 KEY_NAME=${2:-""}
+COMPRESSION=${3:-"zstd"}     # Compression type: zstd, snappy, none
 INSTANCE_TYPE="t4g.micro"
 AMI_ID=""  # Will be set based on region
 REGION=$(aws configure get region || echo "us-east-1")
@@ -93,22 +95,19 @@ create_security_group() {
 
 # Build benchmark binary for ARM64
 build_benchmark() {
-    log "Building benchmark binary for ARM64..."
-    
     BUILD_DIR=$(mktemp -d)
     BENCH_BINARY="$BUILD_DIR/tinykvs-bench"
-    
+
     # Cross-compile for ARM64 Linux
     GOOS=linux GOARCH=arm64 go build -o "$BENCH_BINARY" ./cmd/tinykvs-bench
-    
+
     if [ ! -f "$BENCH_BINARY" ]; then
         error "Failed to build benchmark binary"
     fi
-    
+
     # Make it executable
     chmod +x "$BENCH_BINARY"
-    
-    log "Benchmark binary built: $BENCH_BINARY"
+
     echo "$BENCH_BINARY"
 }
 
@@ -144,6 +143,7 @@ export GOGC=50
 cd /home/ec2-user
 
 NUM_RECORDS=${1:-1000000000}
+COMPRESSION=${2:-"zstd"}
 LOG_FILE="/home/ec2-user/bench.log"
 ERR_FILE="/home/ec2-user/bench.err"
 STATUS_FILE="/home/ec2-user/bench.status"
@@ -172,6 +172,7 @@ trap 'cleanup $? EXIT' EXIT
 
 echo "=== TinyKVS Benchmark on $(uname -m) ===" | tee -a "$LOG_FILE"
 echo "Records: $NUM_RECORDS" | tee -a "$LOG_FILE"
+echo "Compression: $COMPRESSION" | tee -a "$LOG_FILE"
 echo "Memory limit: $GOMEMLIMIT" | tee -a "$LOG_FILE"
 echo "Swap:" | tee -a "$LOG_FILE"
 swapon --show | tee -a "$LOG_FILE"
@@ -182,7 +183,7 @@ echo "Starting benchmark at $(date)" | tee -a "$LOG_FILE"
 
 # Run benchmark with nohup to survive SSM session disconnects
 # This ensures the process continues even if the SSM session times out
-nohup /home/ec2-user/tinykvs-bench -records=$NUM_RECORDS >> "$LOG_FILE" 2>> "$ERR_FILE" &
+nohup /home/ec2-user/tinykvs-bench -records=$NUM_RECORDS -compression=$COMPRESSION -dir=/home/ec2-user/data >> "$LOG_FILE" 2>> "$ERR_FILE" &
 BENCH_PID=$!
 
 # Save PID for later checking
@@ -299,13 +300,14 @@ USERDATA
 main() {
     log "TinyKVS EC2 Benchmark"
     log "Records: $NUM_RECORDS"
+    log "Compression: $COMPRESSION"
     log "Instance type: $INSTANCE_TYPE"
     log "Region: $REGION"
     echo ""
 
     if [ -z "$KEY_NAME" ]; then
         warn "No SSH key specified. You'll need to connect via Session Manager or specify a key."
-        warn "Usage: $0 <num_records> <key_name>"
+        warn "Usage: $0 <num_records> <key_name> [compression]"
     fi
 
     # Build and upload before launching
@@ -453,7 +455,7 @@ run_benchmark() {
         # Run benchmark
         ssh -o StrictHostKeyChecking=no \
             -i ~/.ssh/${KEY_NAME}.pem ec2-user@$PUBLIC_IP \
-            "NUM_RECORDS=$NUM_RECORDS /home/ec2-user/run_benchmark.sh"
+            "/home/ec2-user/run_benchmark.sh $NUM_RECORDS $COMPRESSION"
 
         # Download results
         log "Downloading results..."
@@ -492,7 +494,7 @@ run_benchmark() {
         BENCH_CMD_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
-            --parameters "commands=[\"NUM_RECORDS=$NUM_RECORDS /home/ec2-user/run_benchmark.sh\"]" \
+            --parameters "commands=[\"/home/ec2-user/run_benchmark.sh $NUM_RECORDS $COMPRESSION\"]" \
             --query "Command.CommandId" \
             --output text)
         
@@ -515,26 +517,6 @@ cleanup() {
             log "Instance terminated"
         fi
     fi
-}
-
-# Main
-main() {
-    log "TinyKVS EC2 Benchmark"
-    log "Records: $NUM_RECORDS"
-    log "Instance type: $INSTANCE_TYPE"
-    log "Region: $REGION"
-    echo ""
-
-    if [ -z "$KEY_NAME" ]; then
-        warn "No SSH key specified. You'll need to connect via Session Manager or specify a key."
-        warn "Usage: $0 <num_records> <key_name>"
-    fi
-
-    get_ami_id
-    create_security_group
-    launch_instance
-    run_benchmark
-    cleanup
 }
 
 # Handle termination

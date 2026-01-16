@@ -248,28 +248,45 @@ Block cache impact (random reads, 100K keys):
 
 ### AWS t4g.micro (1GB RAM, ARM64)
 
-Ultra-low memory configuration with `GOMEMLIMIT=600MiB`:
+1 billion record benchmark with `GOMEMLIMIT=700MiB`:
 
-| Metric | Value |
-|--------|-------|
-| Write throughput | ~150K ops/sec |
-| Memory (heap) | 30-90 MB |
-| Memory (sys) | ~130 MB |
-| WAL size | ~3-4 MB (bounded) |
+**zstd compression (default)**
 
-This configuration can sustain 1 billion sequential writes while staying within memory limits. The benchmark uses:
+| Operation | Throughput |
+|-----------|------------|
+| Sequential write | 190K ops/sec |
+| Random read (no cache) | 1,400 ops/sec |
+| Full scan | 1.1M keys/sec |
+| Random prefix scan | 1,200 scans/sec |
+
+Write time: 1h 28m for 1B records
+
+**snappy compression**
+
+| Operation | Throughput |
+|-----------|------------|
+| Sequential write | TBD |
+| Random read (no cache) | TBD |
+| Full scan | TBD |
+| Random prefix scan | TBD |
+
+Memory usage during benchmark:
+- Heap: 50-200 MB
+- Sys: 450-700 MB
+- Index: ~35 MB (for 1B records)
+
+Configuration:
 - 4MB memtable
+- 16KB block size
 - No block cache
 - No bloom filters
 - WAL sync disabled (for throughput)
 
-See [BENCHMARKS.md](BENCHMARKS.md) for detailed results.
-
 ## Complexity
 
 - **Writes**: O(log n) memtable insert, sequential I/O for WAL
-- **Reads**: O(log n) per level, bloom filter avoids unnecessary reads
-- **Space**: ~1.1x raw data size (compression + overhead)
+- **Reads**: O(L × log n) where L is number of levels (max 7), bloom filters skip levels without matches
+- **Space**: Varies by data - sequential keys compress to ~0.1x with zstd, random data ~0.5-0.8x
 
 ## Examples
 
