@@ -405,6 +405,9 @@ func (s *prefixScanner) addMemtable(mt *Memtable, priority int) {
 			priority: priority,
 			source:   src,
 		})
+	} else {
+		// No matching entries, close the iterator to release lock
+		src.close()
 	}
 }
 
@@ -422,6 +425,9 @@ func (s *prefixScanner) addSSTable(sst *SSTable, priority int) {
 			priority: priority,
 			source:   src,
 		})
+	} else {
+		// No matching entries, close any resources
+		src.close()
 	}
 }
 
@@ -443,6 +449,9 @@ func (s *prefixScanner) next() bool {
 			priority: he.priority,
 			source:   he.source,
 		})
+	} else {
+		// Source exhausted, close it to release any held locks
+		he.source.close()
 	}
 
 	return true
