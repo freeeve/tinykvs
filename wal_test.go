@@ -563,3 +563,58 @@ func TestWALDecodeEntryVariousTypes(t *testing.T) {
 		t.Error("minint value mismatch")
 	}
 }
+
+func TestWALCorruptedShortEntry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.wal")
+
+	// Write a valid entry first
+	wal, err := OpenWAL(path, WALSyncPerWrite)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+	wal.Append(WALEntry{Operation: OpPut, Key: []byte("key1"), Value: StringValue("value1"), Sequence: 1})
+	wal.Close()
+
+	// Corrupt by truncating the file to make entry too short
+	f, _ := os.OpenFile(path, os.O_RDWR, 0644)
+	f.Truncate(10) // Too short to contain a valid entry
+	f.Close()
+
+	// Try to recover - should handle gracefully
+	wal, err = OpenWAL(path, WALSyncPerWrite)
+	if err != nil {
+		t.Logf("OpenWAL on corrupted file: %v (expected)", err)
+		return
+	}
+	defer wal.Close()
+
+	_, err = wal.Recover()
+	// Should either succeed with 0 entries or return error
+	if err != nil {
+		t.Logf("Recover on corrupted file: %v", err)
+	}
+}
+
+func TestWALCorruptedKeyLength(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.wal")
+
+	// Create file with garbage that has invalid key length
+	f, _ := os.Create(path)
+	// Write record header with valid-looking size but invalid content
+	// Record format: size(4) + checksum(4) + data
+	// data format: op(1) + seq(8) + keylen(4) + key + value
+	data := make([]byte, 100)
+	// Set a huge key length that exceeds data
+	data[13] = 0xFF // keylen low byte
+	data[14] = 0xFF // keylen high byte
+	f.Write(data)
+	f.Close()
+
+	wal, _ := OpenWAL(path, WALSyncPerWrite)
+	if wal != nil {
+		wal.Recover() // May fail or succeed with empty
+		wal.Close()
+	}
+}

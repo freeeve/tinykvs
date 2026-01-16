@@ -798,3 +798,102 @@ func TestSSTableSingleEntry(t *testing.T) {
 		t.Errorf("MinKey=%s MaxKey=%s should be equal for single entry", sst.MinKey(), sst.MaxKey())
 	}
 }
+
+func TestSSTableInvalidFile(t *testing.T) {
+	dir := t.TempDir()
+
+	// Test 1: File too short
+	shortPath := filepath.Join(dir, "short.sst")
+	if err := os.WriteFile(shortPath, []byte("too short"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := OpenSSTable(1, shortPath)
+	if err != ErrInvalidSSTable {
+		t.Errorf("expected ErrInvalidSSTable for short file, got %v", err)
+	}
+
+	// Test 2: Invalid magic number
+	badMagicPath := filepath.Join(dir, "badmagic.sst")
+	// Create a file that's long enough but has wrong magic
+	badData := make([]byte, SSTableFooterSize+100)
+	// Write wrong magic at the end
+	if err := os.WriteFile(badMagicPath, badData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = OpenSSTable(1, badMagicPath)
+	if err != ErrInvalidSSTable {
+		t.Errorf("expected ErrInvalidSSTable for bad magic, got %v", err)
+	}
+
+	// Test 3: Non-existent file
+	_, err = OpenSSTable(1, filepath.Join(dir, "nonexistent.sst"))
+	if err == nil {
+		t.Error("expected error for non-existent file")
+	}
+}
+
+func TestDeserializeMetaShortData(t *testing.T) {
+	// Test short data (less than 36 bytes)
+	_, err := deserializeMeta([]byte{1, 2, 3})
+	if err != ErrCorruptedData {
+		t.Errorf("deserializeMeta with short data: got %v, want ErrCorruptedData", err)
+	}
+
+	// Valid data should work
+	data := make([]byte, 36)
+	_, err = deserializeMeta(data)
+	if err != nil {
+		t.Errorf("deserializeMeta with valid data: got %v", err)
+	}
+}
+
+func TestSSTableGetMissingKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.sst")
+	opts := DefaultOptions(dir)
+
+	writer, err := NewSSTableWriter(1, path, 100, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write some data
+	for i := 0; i < 10; i++ {
+		key := fmt.Sprintf("key%04d", i*2) // Even numbers only
+		writer.Add(Entry{Key: []byte(key), Value: StringValue("value"), Sequence: uint64(i)})
+	}
+	writer.Finish(0)
+	writer.Close()
+
+	sst, err := OpenSSTable(1, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sst.Close()
+
+	cache := NewLRUCache(1024 * 1024)
+
+	// Try to get keys that don't exist (odd numbers)
+	for i := 0; i < 5; i++ {
+		key := fmt.Sprintf("key%04d", i*2+1)
+		_, found, err := sst.Get([]byte(key), cache, true)
+		if err != nil {
+			t.Errorf("Get(%s) error: %v", key, err)
+		}
+		if found {
+			t.Errorf("Get(%s) should not be found", key)
+		}
+	}
+
+	// Try key before all
+	_, found, _ := sst.Get([]byte("aaa"), cache, true)
+	if found {
+		t.Error("key before all should not be found")
+	}
+
+	// Try key after all
+	_, found, _ = sst.Get([]byte("zzz"), cache, true)
+	if found {
+		t.Error("key after all should not be found")
+	}
+}

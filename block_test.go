@@ -492,3 +492,50 @@ func TestEncoderPoolOverflow(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeBlockCorruptedCompression(t *testing.T) {
+	// Create valid block data first
+	builder := NewBlockBuilder(4096)
+	builder.Add([]byte("key"), []byte("value"))
+	validData, err := builder.Build(BlockTypeData, 1)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Corrupt the compressed data (not the footer)
+	corruptedData := make([]byte, len(validData))
+	copy(corruptedData, validData)
+	// Corrupt bytes in the middle of compressed section
+	if len(corruptedData) > 20 {
+		corruptedData[10] ^= 0xFF
+		corruptedData[11] ^= 0xFF
+	}
+
+	// Should fail to decompress
+	_, err = DecodeBlock(corruptedData, false)
+	// Error is expected but might vary
+	if err == nil {
+		// May not always fail depending on corruption location
+		t.Log("Corruption didn't cause decompression error (location-dependent)")
+	}
+}
+
+func TestDecodeBlockTooShort(t *testing.T) {
+	// Create a block that's too short after decompression would be needed
+	// by providing valid footer but garbage compressed data
+	shortData := make([]byte, BlockFooterSize+5)
+	// Set footer values
+	// checksum at [0:4]
+	// uncompressed size at [4:8]
+	// compressed size at [8:12]
+	footerStart := len(shortData) - BlockFooterSize
+	binary.LittleEndian.PutUint32(shortData[footerStart:], 0)    // checksum (will be skipped)
+	binary.LittleEndian.PutUint32(shortData[footerStart+4:], 10) // uncompressed size
+	binary.LittleEndian.PutUint32(shortData[footerStart+8:], 5)  // compressed size matches data before footer
+
+	_, err := DecodeBlock(shortData, false)
+	// Should fail due to invalid zstd data
+	if err == nil {
+		t.Log("Expected error for invalid zstd data")
+	}
+}

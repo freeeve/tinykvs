@@ -1443,3 +1443,156 @@ func TestStoreStatsWithData(t *testing.T) {
 		t.Error("Should have SSTables after flush")
 	}
 }
+
+func TestStoreScanEmptyMemtable(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Scan empty store
+	count := 0
+	store.ScanPrefix([]byte("any"), func(key []byte, value Value) bool {
+		count++
+		return true
+	})
+	if count != 0 {
+		t.Errorf("count = %d, want 0", count)
+	}
+}
+
+func TestStorePutDifferentValueTypes(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Put different types
+	store.PutString([]byte("str"), "hello")
+	store.PutInt64([]byte("int"), 123)
+	store.PutFloat64([]byte("float"), 3.14)
+	store.PutBool([]byte("bool"), true)
+	store.PutBytes([]byte("bytes"), []byte{1, 2, 3})
+
+	// Flush to SSTable
+	store.Flush()
+
+	// Get and verify
+	v, _ := store.GetString([]byte("str"))
+	if v != "hello" {
+		t.Errorf("str = %q", v)
+	}
+
+	i, _ := store.GetInt64([]byte("int"))
+	if i != 123 {
+		t.Errorf("int = %d", i)
+	}
+
+	f, _ := store.GetFloat64([]byte("float"))
+	if f != 3.14 {
+		t.Errorf("float = %f", f)
+	}
+
+	b, _ := store.GetBool([]byte("bool"))
+	if !b {
+		t.Error("bool should be true")
+	}
+
+	bs, _ := store.GetBytes([]byte("bytes"))
+	if len(bs) != 3 {
+		t.Errorf("bytes len = %d", len(bs))
+	}
+}
+
+func TestStoreUpdateSameKey(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Write same key multiple times
+	for i := 0; i < 10; i++ {
+		store.PutInt64([]byte("counter"), int64(i))
+	}
+
+	// Verify latest value
+	v, err := store.GetInt64([]byte("counter"))
+	if err != nil || v != 9 {
+		t.Errorf("counter = %d, err = %v, want 9", v, err)
+	}
+
+	// Flush and verify again
+	store.Flush()
+	v, err = store.GetInt64([]byte("counter"))
+	if err != nil || v != 9 {
+		t.Errorf("counter after flush = %d, err = %v, want 9", v, err)
+	}
+}
+
+func TestStoreDeleteAndRewrite(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Write, delete, rewrite
+	store.PutString([]byte("key"), "value1")
+	store.Delete([]byte("key"))
+	store.PutString([]byte("key"), "value2")
+
+	// Should have latest value
+	v, err := store.GetString([]byte("key"))
+	if err != nil || v != "value2" {
+		t.Errorf("key = %q, err = %v, want value2", v, err)
+	}
+}
+
+func TestStoreCompactEmptyL0(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Compact with no L0 tables
+	err = store.Compact()
+	if err != nil {
+		t.Errorf("Compact on empty L0 failed: %v", err)
+	}
+}
+
+func TestStoreLargeValue(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Write a large value
+	largeValue := make([]byte, 100000)
+	for i := range largeValue {
+		largeValue[i] = byte(i % 256)
+	}
+
+	store.PutBytes([]byte("large"), largeValue)
+	store.Flush()
+
+	// Read back
+	v, err := store.GetBytes([]byte("large"))
+	if err != nil {
+		t.Fatalf("GetBytes failed: %v", err)
+	}
+	if len(v) != len(largeValue) {
+		t.Errorf("value length = %d, want %d", len(v), len(largeValue))
+	}
+}
