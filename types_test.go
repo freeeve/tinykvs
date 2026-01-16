@@ -201,10 +201,10 @@ func TestDecodeValueErrors(t *testing.T) {
 		data []byte
 	}{
 		{"empty", []byte{}},
-		{"int64 truncated", []byte{byte(ValueTypeInt64), 1, 2, 3}},           // needs 9 bytes
-		{"float64 truncated", []byte{byte(ValueTypeFloat64), 1, 2, 3, 4}},   // needs 9 bytes
-		{"bool truncated", []byte{byte(ValueTypeBool)}},                      // needs 2 bytes
-		{"string no flag", []byte{byte(ValueTypeString)}},                    // needs flag byte
+		{"int64 truncated", []byte{byte(ValueTypeInt64), 1, 2, 3}},                 // needs 9 bytes
+		{"float64 truncated", []byte{byte(ValueTypeFloat64), 1, 2, 3, 4}},          // needs 9 bytes
+		{"bool truncated", []byte{byte(ValueTypeBool)}},                            // needs 2 bytes
+		{"string no flag", []byte{byte(ValueTypeString)}},                          // needs flag byte
 		{"string inline truncated", []byte{byte(ValueTypeString), 0, 10, 0, 0, 0}}, // claims 10 bytes
 		{"invalid type", []byte{99}},
 	}

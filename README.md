@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/freeeve/tinykvs/actions/workflows/ci.yml/badge.svg)](https://github.com/freeeve/tinykvs/actions/workflows/ci.yml)
 [![Coverage Status](https://coveralls.io/repos/github/freeeve/tinykvs/badge.svg?branch=main)](https://coveralls.io/github/freeeve/tinykvs?branch=main)
+[![Go Reference](https://pkg.go.dev/badge/github.com/freeeve/tinykvs.svg)](https://pkg.go.dev/github.com/freeeve/tinykvs)
+[![Go Report Card](https://goreportcard.com/badge/github.com/freeeve/tinykvs)](https://goreportcard.com/report/github.com/freeeve/tinykvs)
 
 A low-memory, sorted key-value store for Go built on LSM-tree architecture with zstd compression.
 

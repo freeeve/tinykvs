@@ -144,17 +144,17 @@ func TestIndexDeserializeInvalid(t *testing.T) {
 		data []byte
 	}{
 		{"too short", []byte{1, 2, 3}},
-		{"minkey length truncated", []byte{0, 0, 0, 0, 0, 0, 0, 0}}, // numKeys but no minKeyLen
+		{"minkey length truncated", []byte{0, 0, 0, 0, 0, 0, 0, 0}},            // numKeys but no minKeyLen
 		{"minkey data truncated", []byte{0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0}}, // claims 10 byte minkey
 		{"maxkey length truncated", []byte{
 			0, 0, 0, 0, 0, 0, 0, 0, // numKeys
 			1, 0, 0, 0, // minKeyLen = 1
-			'a',        // minKey
+			'a', // minKey
 		}}, // no maxKeyLen
 		{"maxkey data truncated", []byte{
 			0, 0, 0, 0, 0, 0, 0, 0, // numKeys
 			1, 0, 0, 0, // minKeyLen = 1
-			'a',        // minKey
+			'a',         // minKey
 			10, 0, 0, 0, // maxKeyLen = 10 (but only 0 bytes follow)
 		}},
 		{"numEntries truncated", []byte{
