@@ -209,6 +209,10 @@ func HighPerformanceOptions(dir string) Options  // Max throughput
 └────────────────────────────────────┘
 ```
 
+### Upgrading from v0.3.x
+
+v0.4.0 changed the block format to support configurable compression. Data files from v0.3.x are automatically readable and will be upgraded to the new format during compaction. No manual migration is required.
+
 ## Memory Usage
 
 | Component | Memory |
