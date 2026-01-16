@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"runtime/pprof"
 	"time"
 
 	"github.com/freeeve/tinykvs"
@@ -20,7 +21,38 @@ func main() {
 	skipCompact := flag.Bool("skip-compact", false, "Skip compaction phase")
 	memtableSize := flag.Int64("memtable", 1*1024*1024, "Memtable size in bytes (default 1MB)")
 	disableBloom := flag.Bool("no-bloom", true, "Disable bloom filters (default true for low memory)")
+	cpuProfile := flag.String("cpuprofile", "", "Write CPU profile to file")
+	memProfile := flag.String("memprofile", "", "Write memory profile to file")
 	flag.Parse()
+
+	if *cpuProfile != "" {
+		f, err := os.Create(*cpuProfile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Could not create CPU profile: %v\n", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			fmt.Fprintf(os.Stderr, "Could not start CPU profile: %v\n", err)
+			os.Exit(1)
+		}
+		defer pprof.StopCPUProfile()
+	}
+
+	if *memProfile != "" {
+		defer func() {
+			f, err := os.Create(*memProfile)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Could not create memory profile: %v\n", err)
+				return
+			}
+			defer f.Close()
+			runtime.GC()
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				fmt.Fprintf(os.Stderr, "Could not write memory profile: %v\n", err)
+			}
+		}()
+	}
 
 	fmt.Println("=== TinyKVS Benchmark ===")
 	fmt.Printf("Platform: %s/%s\n", runtime.GOOS, runtime.GOARCH)

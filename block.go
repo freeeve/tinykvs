@@ -16,18 +16,44 @@ var zstdDecoderPool = sync.Pool{
 	},
 }
 
-// Pooled zstd encoders by compression level
-var zstdEncoderPools [5]sync.Pool
+// Channel-based encoder pools (won't be cleared by GC like sync.Pool)
+// We use channels instead of sync.Pool to prevent GC from clearing encoders
+// under memory pressure, since encoder initialization is expensive (~8MB).
+var zstdEncoderPools [5]chan *zstd.Encoder
 
 func init() {
+	poolSize := 4 // Keep up to 4 encoders per level
 	for i := 0; i <= 4; i++ {
-		level := i
-		zstdEncoderPools[i] = sync.Pool{
-			New: func() interface{} {
-				encoder, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(level)))
-				return encoder
-			},
-		}
+		zstdEncoderPools[i] = make(chan *zstd.Encoder, poolSize)
+	}
+}
+
+func getEncoder(level int) *zstd.Encoder {
+	if level < 0 {
+		level = 0
+	} else if level > 4 {
+		level = 4
+	}
+	select {
+	case enc := <-zstdEncoderPools[level]:
+		return enc
+	default:
+		enc, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(level)))
+		return enc
+	}
+}
+
+func putEncoder(level int, enc *zstd.Encoder) {
+	if level < 0 {
+		level = 0
+	} else if level > 4 {
+		level = 4
+	}
+	select {
+	case zstdEncoderPools[level] <- enc:
+	default:
+		// Pool full, let it be GC'd
+		enc.Close()
 	}
 }
 
@@ -108,15 +134,9 @@ func (b *BlockBuilder) Build(blockType uint8, compressionLevel int) ([]byte, err
 	uncompressedSize := len(buf)
 
 	// Compress with pooled zstd encoder
-	poolIdx := compressionLevel
-	if poolIdx < 0 {
-		poolIdx = 0
-	} else if poolIdx > 4 {
-		poolIdx = 4
-	}
-	encoder := zstdEncoderPools[poolIdx].Get().(*zstd.Encoder)
+	encoder := getEncoder(compressionLevel)
 	compressed := encoder.EncodeAll(buf, make([]byte, 0, len(buf)))
-	zstdEncoderPools[poolIdx].Put(encoder)
+	putEncoder(compressionLevel, encoder)
 
 	// Append footer: checksum(4) + uncompressed_size(4) + compressed_size(4)
 	checksum := crc32.ChecksumIEEE(compressed)
