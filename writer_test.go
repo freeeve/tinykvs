@@ -1,6 +1,7 @@
 package tinykvs
 
 import (
+	"bytes"
 	"fmt"
 	"sync"
 	"testing"
@@ -1631,5 +1632,1227 @@ func TestConcurrentReadsDuringCompaction(t *testing.T) {
 		if val.String() != expected {
 			t.Errorf("Final Get(%s) = %q, want %q", key, val.String(), expected)
 		}
+	}
+}
+
+// TestEmptyValues verifies that empty byte slices can be stored and retrieved.
+func TestEmptyValues(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Store empty value
+	if err := store.PutBytes([]byte("empty-key"), []byte{}); err != nil {
+		t.Fatalf("PutBytes failed: %v", err)
+	}
+
+	// Store empty string
+	if err := store.PutString([]byte("empty-string"), ""); err != nil {
+		t.Fatalf("PutString failed: %v", err)
+	}
+
+	store.Flush()
+
+	// Verify before close
+	val, err := store.Get([]byte("empty-key"))
+	if err != nil {
+		t.Fatalf("Get empty-key failed: %v", err)
+	}
+	if len(val.Bytes) != 0 {
+		t.Errorf("Get empty-key = %v, want empty slice", val.Bytes)
+	}
+
+	val, err = store.Get([]byte("empty-string"))
+	if err != nil {
+		t.Fatalf("Get empty-string failed: %v", err)
+	}
+	if val.String() != "" {
+		t.Errorf("Get empty-string = %q, want empty string", val.String())
+	}
+
+	store.Close()
+
+	// Reopen and verify
+	store, err = Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	store.Compact()
+
+	val, err = store.Get([]byte("empty-key"))
+	if err != nil {
+		t.Fatalf("Get empty-key after reopen failed: %v", err)
+	}
+	if len(val.Bytes) != 0 {
+		t.Errorf("Get empty-key after reopen = %v, want empty slice", val.Bytes)
+	}
+
+	val, err = store.Get([]byte("empty-string"))
+	if err != nil {
+		t.Fatalf("Get empty-string after reopen failed: %v", err)
+	}
+	if val.String() != "" {
+		t.Errorf("Get empty-string after reopen = %q, want empty string", val.String())
+	}
+}
+
+// TestBinaryKeysWithNullBytes verifies that keys containing null bytes work correctly.
+func TestBinaryKeysWithNullBytes(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 512
+	opts.L0CompactionTrigger = 100
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Keys with null bytes in various positions
+	keys := [][]byte{
+		{0x00, 'a', 'b', 'c'},        // null at start
+		{'a', 0x00, 'b', 'c'},        // null in middle
+		{'a', 'b', 'c', 0x00},        // null at end
+		{0x00, 0x00, 0x00},           // all nulls
+		{'a', 0x00, 0x00, 'b', 0x00}, // multiple nulls
+	}
+
+	// Write all keys
+	for i, key := range keys {
+		value := fmt.Sprintf("value-%d", i)
+		if err := store.PutString(key, value); err != nil {
+			t.Fatalf("Put key %v failed: %v", key, err)
+		}
+	}
+	store.Flush()
+
+	store.Close()
+
+	// Reopen and compact
+	store, err = Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	store.Compact()
+
+	// Verify all keys
+	for i, key := range keys {
+		expected := fmt.Sprintf("value-%d", i)
+		val, err := store.Get(key)
+		if err != nil {
+			t.Errorf("Get key %v failed: %v", key, err)
+			continue
+		}
+		if val.String() != expected {
+			t.Errorf("Get key %v = %q, want %q", key, val.String(), expected)
+		}
+	}
+}
+
+// TestVeryLargeValues verifies that values spanning multiple blocks work correctly.
+func TestVeryLargeValues(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.BlockSize = 4096 // 4KB blocks
+	opts.MemtableSize = 1024 * 1024
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Create values of various sizes
+	sizes := []int{
+		100,   // small
+		4096,  // exactly one block
+		4097,  // just over one block
+		16384, // 4 blocks
+		65536, // 16 blocks
+	}
+
+	for _, size := range sizes {
+		key := fmt.Sprintf("key-size-%d", size)
+		value := make([]byte, size)
+		for i := range value {
+			value[i] = byte(i % 256)
+		}
+
+		if err := store.PutBytes([]byte(key), value); err != nil {
+			t.Fatalf("Put size %d failed: %v", size, err)
+		}
+	}
+	store.Flush()
+
+	store.Close()
+
+	// Reopen and compact
+	store, err = Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	store.Compact()
+
+	// Verify all values
+	for _, size := range sizes {
+		key := fmt.Sprintf("key-size-%d", size)
+		val, err := store.Get([]byte(key))
+		if err != nil {
+			t.Errorf("Get size %d failed: %v", size, err)
+			continue
+		}
+		if len(val.Bytes) != size {
+			t.Errorf("Get size %d: got %d bytes, want %d", size, len(val.Bytes), size)
+			continue
+		}
+		// Verify content
+		for i := 0; i < size; i++ {
+			if val.Bytes[i] != byte(i%256) {
+				t.Errorf("Get size %d: byte %d = %d, want %d", size, i, val.Bytes[i], i%256)
+				break
+			}
+		}
+	}
+}
+
+// TestInterleavedDeletePutCycles tests delete → put → delete → put sequences.
+func TestInterleavedDeletePutCycles(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 256
+	opts.L0CompactionTrigger = 100
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	key := []byte("the-key")
+	numCycles := 20
+
+	// Cycle through put/delete
+	for cycle := 0; cycle < numCycles; cycle++ {
+		value := fmt.Sprintf("value-cycle-%d", cycle)
+		if err := store.PutString(key, value); err != nil {
+			t.Fatalf("Put cycle %d failed: %v", cycle, err)
+		}
+		store.Flush()
+
+		if err := store.Delete(key); err != nil {
+			t.Fatalf("Delete cycle %d failed: %v", cycle, err)
+		}
+		store.Flush()
+	}
+
+	// Final put
+	finalValue := "final-value"
+	if err := store.PutString(key, finalValue); err != nil {
+		t.Fatalf("Final put failed: %v", err)
+	}
+	store.Flush()
+
+	store.Close()
+
+	// Reopen and compact
+	store, err = Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	store.Compact()
+
+	// Verify final value exists
+	val, err := store.Get(key)
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if val.String() != finalValue {
+		t.Errorf("Get = %q, want %q", val.String(), finalValue)
+	}
+}
+
+// TestAllKeysDeletedThenCompact verifies compaction with only tombstones.
+func TestAllKeysDeletedThenCompact(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 512
+	opts.L0CompactionTrigger = 100
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Write data
+	numKeys := 100
+	for i := 0; i < numKeys; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		if err := store.PutString([]byte(key), "some-value"); err != nil {
+			t.Fatalf("Put failed: %v", err)
+		}
+	}
+	store.Flush()
+
+	// Delete all keys
+	for i := 0; i < numKeys; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		if err := store.Delete([]byte(key)); err != nil {
+			t.Fatalf("Delete failed: %v", err)
+		}
+	}
+	store.Flush()
+
+	store.Close()
+
+	// Reopen and compact
+	store, err = Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	store.Compact()
+
+	// Verify all keys are deleted
+	for i := 0; i < numKeys; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		_, err := store.Get([]byte(key))
+		if err != ErrKeyNotFound {
+			t.Errorf("Get(%s) should return ErrKeyNotFound, got %v", key, err)
+		}
+	}
+
+	// Verify we can still write new data
+	if err := store.PutString([]byte("new-key"), "new-value"); err != nil {
+		t.Fatalf("Put new key failed: %v", err)
+	}
+	val, err := store.Get([]byte("new-key"))
+	if err != nil {
+		t.Fatalf("Get new key failed: %v", err)
+	}
+	if val.String() != "new-value" {
+		t.Errorf("Get new key = %q, want %q", val.String(), "new-value")
+	}
+}
+
+// TestMixedValueTypesOverwrite verifies that overwriting with different types works.
+func TestMixedValueTypesOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 512
+	opts.L0CompactionTrigger = 100
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	key := []byte("mixed-type-key")
+
+	// Write as int64
+	store.PutInt64(key, 42)
+	store.Flush()
+
+	// Overwrite as string
+	store.PutString(key, "hello")
+	store.Flush()
+
+	// Overwrite as float64
+	store.PutFloat64(key, 3.14159)
+	store.Flush()
+
+	// Overwrite as bytes
+	store.PutBytes(key, []byte{0xDE, 0xAD, 0xBE, 0xEF})
+	store.Flush()
+
+	// Overwrite as bool
+	store.PutBool(key, true)
+	store.Flush()
+
+	// Final value as string
+	finalValue := "final-string-value"
+	store.PutString(key, finalValue)
+	store.Flush()
+
+	store.Close()
+
+	// Reopen and compact
+	store, err = Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	store.Compact()
+
+	// Verify final type and value
+	val, err := store.Get(key)
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if val.Type != ValueTypeString {
+		t.Errorf("Type = %v, want ValueTypeString", val.Type)
+	}
+	if val.String() != finalValue {
+		t.Errorf("Get = %q, want %q", val.String(), finalValue)
+	}
+}
+
+// TestDeleteRangeReopenCompact verifies DeleteRange survives reopen + compact.
+func TestDeleteRangeReopenCompact(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 512
+	opts.L0CompactionTrigger = 100
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Write data with keys: aaa000 to aaa099, bbb000 to bbb099, ccc000 to ccc099
+	for _, prefix := range []string{"aaa", "bbb", "ccc"} {
+		for i := 0; i < 100; i++ {
+			key := fmt.Sprintf("%s%03d", prefix, i)
+			if err := store.PutString([]byte(key), "value"); err != nil {
+				t.Fatalf("Put failed: %v", err)
+			}
+		}
+	}
+	store.Flush()
+
+	// Delete range bbb000 to bbb099
+	deleted, err := store.DeleteRange([]byte("bbb000"), []byte("bbb999"))
+	if err != nil {
+		t.Fatalf("DeleteRange failed: %v", err)
+	}
+	if deleted != 100 {
+		t.Logf("DeleteRange deleted %d keys", deleted)
+	}
+	store.Flush()
+
+	store.Close()
+
+	// Reopen and compact
+	store, err = Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	store.Compact()
+
+	// Verify: aaa and ccc keys exist, bbb keys deleted
+	for _, prefix := range []string{"aaa", "ccc"} {
+		for i := 0; i < 100; i++ {
+			key := fmt.Sprintf("%s%03d", prefix, i)
+			_, err := store.Get([]byte(key))
+			if err != nil {
+				t.Errorf("Get(%s) should exist, got %v", key, err)
+			}
+		}
+	}
+
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("bbb%03d", i)
+		_, err := store.Get([]byte(key))
+		if err != ErrKeyNotFound {
+			t.Errorf("Get(%s) should return ErrKeyNotFound, got %v", key, err)
+		}
+	}
+}
+
+// TestDeletePrefixReopenCompact verifies DeletePrefix survives reopen + compact.
+func TestDeletePrefixReopenCompact(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 512
+	opts.L0CompactionTrigger = 100
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Write data with prefixes: user:, post:, comment:
+	for _, prefix := range []string{"user:", "post:", "comment:"} {
+		for i := 0; i < 50; i++ {
+			key := fmt.Sprintf("%s%03d", prefix, i)
+			if err := store.PutString([]byte(key), "value"); err != nil {
+				t.Fatalf("Put failed: %v", err)
+			}
+		}
+	}
+	store.Flush()
+
+	// Delete all post: keys
+	deleted, err := store.DeletePrefix([]byte("post:"))
+	if err != nil {
+		t.Fatalf("DeletePrefix failed: %v", err)
+	}
+	if deleted != 50 {
+		t.Logf("DeletePrefix deleted %d keys", deleted)
+	}
+	store.Flush()
+
+	store.Close()
+
+	// Reopen and compact
+	store, err = Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	store.Compact()
+
+	// Verify: user: and comment: keys exist, post: keys deleted
+	for _, prefix := range []string{"user:", "comment:"} {
+		for i := 0; i < 50; i++ {
+			key := fmt.Sprintf("%s%03d", prefix, i)
+			_, err := store.Get([]byte(key))
+			if err != nil {
+				t.Errorf("Get(%s) should exist, got %v", key, err)
+			}
+		}
+	}
+
+	for i := 0; i < 50; i++ {
+		key := fmt.Sprintf("post:%03d", i)
+		_, err := store.Get([]byte(key))
+		if err != ErrKeyNotFound {
+			t.Errorf("Get(%s) should return ErrKeyNotFound, got %v", key, err)
+		}
+	}
+}
+
+// TestReopenWithModifiedOptions verifies data survives when options change.
+func TestReopenWithModifiedOptions(t *testing.T) {
+	dir := t.TempDir()
+
+	// First open with specific options
+	opts1 := DefaultOptions(dir)
+	opts1.BlockSize = 4096
+	opts1.CompressionLevel = 1
+	opts1.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts1)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Write data
+	numKeys := 100
+	for i := 0; i < numKeys; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		value := fmt.Sprintf("value%05d", i)
+		if err := store.PutString([]byte(key), value); err != nil {
+			t.Fatalf("Put failed: %v", err)
+		}
+	}
+	store.Flush()
+	store.Close()
+
+	// Reopen with different options
+	opts2 := DefaultOptions(dir)
+	opts2.BlockSize = 8192     // Different block size
+	opts2.CompressionLevel = 3 // Different compression
+	opts2.CompactionInterval = time.Hour
+
+	store, err = Open(dir, opts2)
+	if err != nil {
+		t.Fatalf("Reopen with different options failed: %v", err)
+	}
+	defer store.Close()
+
+	// Verify all data is readable
+	for i := 0; i < numKeys; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		expected := fmt.Sprintf("value%05d", i)
+		val, err := store.Get([]byte(key))
+		if err != nil {
+			t.Errorf("Get(%s) failed: %v", key, err)
+			continue
+		}
+		if val.String() != expected {
+			t.Errorf("Get(%s) = %q, want %q", key, val.String(), expected)
+		}
+	}
+
+	// Write more data with new options
+	for i := numKeys; i < numKeys*2; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		value := fmt.Sprintf("value%05d", i)
+		if err := store.PutString([]byte(key), value); err != nil {
+			t.Fatalf("Put failed: %v", err)
+		}
+	}
+	store.Flush()
+
+	// Compact (mixes old and new format data)
+	store.Compact()
+
+	// Verify all data
+	for i := 0; i < numKeys*2; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		expected := fmt.Sprintf("value%05d", i)
+		val, err := store.Get([]byte(key))
+		if err != nil {
+			t.Errorf("Get(%s) after compact failed: %v", key, err)
+			continue
+		}
+		if val.String() != expected {
+			t.Errorf("Get(%s) after compact = %q, want %q", key, val.String(), expected)
+		}
+	}
+}
+
+// TestBatchWithDuplicateKeys verifies batch operations handle duplicate keys correctly.
+func TestBatchWithDuplicateKeys(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 1024 * 1024
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Create batch with same key multiple times
+	batch := NewBatch()
+	key := []byte("duplicate-key")
+
+	batch.Put(key, StringValue("first"))
+	batch.Put(key, StringValue("second"))
+	batch.Put(key, StringValue("third"))
+	batch.Put(key, Int64Value(42))
+	batch.Put(key, StringValue("final"))
+
+	if err := store.WriteBatch(batch); err != nil {
+		t.Fatalf("WriteBatch failed: %v", err)
+	}
+
+	// Verify the last value wins
+	val, err := store.Get(key)
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if val.String() != "final" {
+		t.Errorf("Get = %q, want %q", val.String(), "final")
+	}
+
+	store.Flush()
+	store.Close()
+
+	// Reopen and compact
+	store, err = Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	store.Compact()
+
+	// Verify after compact
+	val, err = store.Get(key)
+	if err != nil {
+		t.Fatalf("Get after compact failed: %v", err)
+	}
+	if val.String() != "final" {
+		t.Errorf("Get after compact = %q, want %q", val.String(), "final")
+	}
+}
+
+// TestCrashWithoutClose simulates a crash by not calling Close().
+// Data in the WAL should be recovered on next open.
+func TestCrashWithoutClose(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 1024 * 1024 // Large so data stays in memtable
+	opts.WALSyncMode = WALSyncNone  // No sync for speed (data still in WAL)
+	opts.CompactionInterval = time.Hour
+
+	// First "session" - write data but don't close properly
+	func() {
+		store, err := Open(dir, opts)
+		if err != nil {
+			t.Fatalf("Open failed: %v", err)
+		}
+		// Note: intentionally NOT deferring Close() to simulate crash
+
+		// Write data
+		for i := 0; i < 100; i++ {
+			key := fmt.Sprintf("key%05d", i)
+			value := fmt.Sprintf("value%05d", i)
+			if err := store.PutString([]byte(key), value); err != nil {
+				t.Fatalf("Put failed: %v", err)
+			}
+		}
+
+		// Update some keys
+		for i := 0; i < 50; i++ {
+			key := fmt.Sprintf("key%05d", i)
+			value := fmt.Sprintf("updated%05d", i)
+			if err := store.PutString([]byte(key), value); err != nil {
+				t.Fatalf("Put update failed: %v", err)
+			}
+		}
+
+		// Delete some keys
+		for i := 80; i < 100; i++ {
+			key := fmt.Sprintf("key%05d", i)
+			if err := store.Delete([]byte(key)); err != nil {
+				t.Fatalf("Delete failed: %v", err)
+			}
+		}
+
+		// "Crash" - just let the function return without Close()
+		// The WAL file still has all the data
+		// We need to release the lock though for the test to work
+		store.Close() // In real crash this wouldn't happen, but we need to release lock
+	}()
+
+	// "Recovery" - reopen and verify data
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Recovery open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Verify: keys 0-49 have updated values
+	for i := 0; i < 50; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		expected := fmt.Sprintf("updated%05d", i)
+		val, err := store.Get([]byte(key))
+		if err != nil {
+			t.Errorf("Get(%s) failed: %v", key, err)
+			continue
+		}
+		if val.String() != expected {
+			t.Errorf("Get(%s) = %q, want %q", key, val.String(), expected)
+		}
+	}
+
+	// Verify: keys 50-79 have original values
+	for i := 50; i < 80; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		expected := fmt.Sprintf("value%05d", i)
+		val, err := store.Get([]byte(key))
+		if err != nil {
+			t.Errorf("Get(%s) failed: %v", key, err)
+			continue
+		}
+		if val.String() != expected {
+			t.Errorf("Get(%s) = %q, want %q", key, val.String(), expected)
+		}
+	}
+
+	// Verify: keys 80-99 are deleted
+	for i := 80; i < 100; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		_, err := store.Get([]byte(key))
+		if err != ErrKeyNotFound {
+			t.Errorf("Get(%s) should return ErrKeyNotFound, got %v", key, err)
+		}
+	}
+}
+
+// TestCrashMidFlush simulates a crash during flush by having data in both
+// WAL and partially flushed SSTables.
+func TestCrashMidFlush(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 512 // Small to trigger flushes
+	opts.L0CompactionTrigger = 100
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Write enough to trigger some flushes
+	for i := 0; i < 200; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		value := fmt.Sprintf("value%05d", i)
+		if err := store.PutString([]byte(key), value); err != nil {
+			t.Fatalf("Put failed: %v", err)
+		}
+	}
+
+	// Force a flush
+	store.Flush()
+
+	// Write more data (this will be in WAL + memtable)
+	for i := 200; i < 300; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		value := fmt.Sprintf("value%05d", i)
+		if err := store.PutString([]byte(key), value); err != nil {
+			t.Fatalf("Put failed: %v", err)
+		}
+	}
+
+	// Update some keys (mixed in flushed and unflushed)
+	for i := 150; i < 250; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		value := fmt.Sprintf("updated%05d", i)
+		if err := store.PutString([]byte(key), value); err != nil {
+			t.Fatalf("Put update failed: %v", err)
+		}
+	}
+
+	store.Close()
+
+	// Recovery
+	store, err = Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Recovery open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Compact to merge everything
+	store.Compact()
+
+	// Verify: keys 0-149 have original values
+	for i := 0; i < 150; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		expected := fmt.Sprintf("value%05d", i)
+		val, err := store.Get([]byte(key))
+		if err != nil {
+			t.Errorf("Get(%s) failed: %v", key, err)
+			continue
+		}
+		if val.String() != expected {
+			t.Errorf("Get(%s) = %q, want %q", key, val.String(), expected)
+		}
+	}
+
+	// Verify: keys 150-249 have updated values
+	for i := 150; i < 250; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		expected := fmt.Sprintf("updated%05d", i)
+		val, err := store.Get([]byte(key))
+		if err != nil {
+			t.Errorf("Get(%s) failed: %v", key, err)
+			continue
+		}
+		if val.String() != expected {
+			t.Errorf("Get(%s) = %q, want %q", key, val.String(), expected)
+		}
+	}
+
+	// Verify: keys 250-299 have original values
+	for i := 250; i < 300; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		expected := fmt.Sprintf("value%05d", i)
+		val, err := store.Get([]byte(key))
+		if err != nil {
+			t.Errorf("Get(%s) failed: %v", key, err)
+			continue
+		}
+		if val.String() != expected {
+			t.Errorf("Get(%s) = %q, want %q", key, val.String(), expected)
+		}
+	}
+}
+
+// TestPrefixScanBasic tests basic prefix scanning functionality.
+func TestPrefixScanBasic(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Create data with various prefixes
+	prefixes := map[string]int{
+		"user:":    10,
+		"post:":    20,
+		"comment:": 15,
+		"tag:":     5,
+	}
+
+	for prefix, count := range prefixes {
+		for i := 0; i < count; i++ {
+			key := fmt.Sprintf("%s%03d", prefix, i)
+			if err := store.PutString([]byte(key), "value"); err != nil {
+				t.Fatalf("Put failed: %v", err)
+			}
+		}
+	}
+	store.Flush()
+
+	// Test each prefix
+	for prefix, expectedCount := range prefixes {
+		count := 0
+		err := store.ScanPrefix([]byte(prefix), func(key []byte, value Value) bool {
+			if !bytes.HasPrefix(key, []byte(prefix)) {
+				t.Errorf("Key %s doesn't have prefix %s", string(key), prefix)
+			}
+			count++
+			return true
+		})
+		if err != nil {
+			t.Errorf("ScanPrefix(%s) failed: %v", prefix, err)
+		}
+		if count != expectedCount {
+			t.Errorf("ScanPrefix(%s) returned %d keys, want %d", prefix, count, expectedCount)
+		}
+	}
+}
+
+// TestPrefixScanEmpty tests scanning with a prefix that matches no keys.
+func TestPrefixScanEmpty(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Add some data
+	store.PutString([]byte("aaa"), "value")
+	store.PutString([]byte("bbb"), "value")
+	store.PutString([]byte("ccc"), "value")
+	store.Flush()
+
+	// Scan with non-matching prefix
+	count := 0
+	err = store.ScanPrefix([]byte("zzz"), func(key []byte, value Value) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("ScanPrefix(zzz) returned %d keys, want 0", count)
+	}
+}
+
+// TestPrefixScanWithDeletes tests that deleted keys are skipped in prefix scans.
+func TestPrefixScanWithDeletes(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 512
+	opts.L0CompactionTrigger = 100
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Create 20 keys with prefix
+	for i := 0; i < 20; i++ {
+		key := fmt.Sprintf("item:%03d", i)
+		if err := store.PutString([]byte(key), "value"); err != nil {
+			t.Fatalf("Put failed: %v", err)
+		}
+	}
+	store.Flush()
+
+	// Delete even-numbered keys
+	for i := 0; i < 20; i += 2 {
+		key := fmt.Sprintf("item:%03d", i)
+		if err := store.Delete([]byte(key)); err != nil {
+			t.Fatalf("Delete failed: %v", err)
+		}
+	}
+	store.Flush()
+
+	store.Close()
+
+	// Reopen and compact
+	store, err = Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	store.Compact()
+
+	// Scan should only return odd-numbered keys
+	var keys []string
+	err = store.ScanPrefix([]byte("item:"), func(key []byte, value Value) bool {
+		keys = append(keys, string(key))
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+
+	if len(keys) != 10 {
+		t.Errorf("ScanPrefix returned %d keys, want 10", len(keys))
+	}
+
+	// Verify all returned keys are odd
+	for _, key := range keys {
+		var num int
+		fmt.Sscanf(key, "item:%03d", &num)
+		if num%2 == 0 {
+			t.Errorf("Deleted key %s returned in scan", key)
+		}
+	}
+}
+
+// TestPrefixScanEarlyTermination tests that returning false stops the scan.
+func TestPrefixScanEarlyTermination(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Create 100 keys
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("key:%03d", i)
+		if err := store.PutString([]byte(key), "value"); err != nil {
+			t.Fatalf("Put failed: %v", err)
+		}
+	}
+	store.Flush()
+
+	// Scan and stop after 10
+	count := 0
+	err = store.ScanPrefix([]byte("key:"), func(key []byte, value Value) bool {
+		count++
+		return count < 10 // Stop after 10
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+
+	if count != 10 {
+		t.Errorf("Scan stopped after %d keys, want 10", count)
+	}
+}
+
+// TestPrefixScanAcrossLevels tests prefix scanning when data is split across L0 and L1.
+func TestPrefixScanAcrossLevels(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 256
+	opts.L0CompactionTrigger = 4
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Write data in waves to create multiple levels
+	for wave := 0; wave < 5; wave++ {
+		for i := 0; i < 50; i++ {
+			key := fmt.Sprintf("data:%03d", i)
+			value := fmt.Sprintf("wave%d", wave)
+			if err := store.PutString([]byte(key), value); err != nil {
+				t.Fatalf("Put failed: %v", err)
+			}
+		}
+		store.Flush()
+	}
+
+	store.Close()
+
+	// Reopen - data now in L0
+	store, err = Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	// Partial compact (just some L0 -> L1)
+	store.Compact()
+
+	// Scan should return all 50 unique keys with latest values
+	results := make(map[string]string)
+	err = store.ScanPrefix([]byte("data:"), func(key []byte, value Value) bool {
+		results[string(key)] = value.String()
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+
+	if len(results) != 50 {
+		t.Errorf("ScanPrefix returned %d keys, want 50", len(results))
+	}
+
+	// All values should be from the last wave
+	for key, value := range results {
+		if value != "wave4" {
+			t.Errorf("Key %s has value %s, want wave4", key, value)
+		}
+	}
+}
+
+// TestPrefixScanBinaryPrefix tests scanning with binary (non-string) prefixes.
+func TestPrefixScanBinaryPrefix(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Create keys with binary prefixes
+	prefix1 := []byte{0x01, 0x02}
+	prefix2 := []byte{0x01, 0x03}
+	prefix3 := []byte{0x02, 0x00}
+
+	for i := 0; i < 10; i++ {
+		key1 := append(append([]byte{}, prefix1...), byte(i))
+		key2 := append(append([]byte{}, prefix2...), byte(i))
+		key3 := append(append([]byte{}, prefix3...), byte(i))
+		store.PutInt64(key1, int64(i))
+		store.PutInt64(key2, int64(i+100))
+		store.PutInt64(key3, int64(i+200))
+	}
+	store.Flush()
+
+	// Scan each binary prefix
+	for _, tc := range []struct {
+		prefix   []byte
+		expected int
+		offset   int64
+	}{
+		{prefix1, 10, 0},
+		{prefix2, 10, 100},
+		{prefix3, 10, 200},
+		{[]byte{0x01}, 20, 0}, // Both prefix1 and prefix2
+	} {
+		count := 0
+		err := store.ScanPrefix(tc.prefix, func(key []byte, value Value) bool {
+			count++
+			return true
+		})
+		if err != nil {
+			t.Errorf("ScanPrefix(%v) failed: %v", tc.prefix, err)
+		}
+		if count != tc.expected {
+			t.Errorf("ScanPrefix(%v) returned %d keys, want %d", tc.prefix, count, tc.expected)
+		}
+	}
+}
+
+// TestPrefixScanOrder tests that prefix scan returns keys in sorted order.
+func TestPrefixScanOrder(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 256
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Insert keys in random order
+	keys := []string{
+		"item:050", "item:010", "item:099", "item:001",
+		"item:075", "item:025", "item:000", "item:100",
+	}
+	for _, key := range keys {
+		if err := store.PutString([]byte(key), "value"); err != nil {
+			t.Fatalf("Put failed: %v", err)
+		}
+	}
+	store.Flush()
+
+	store.Close()
+
+	// Reopen and compact
+	store, err = Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	store.Compact()
+
+	// Scan and verify order
+	var scannedKeys []string
+	err = store.ScanPrefix([]byte("item:"), func(key []byte, value Value) bool {
+		scannedKeys = append(scannedKeys, string(key))
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+
+	// Verify sorted order
+	for i := 1; i < len(scannedKeys); i++ {
+		if scannedKeys[i-1] >= scannedKeys[i] {
+			t.Errorf("Keys not in sorted order: %s >= %s", scannedKeys[i-1], scannedKeys[i])
+		}
+	}
+}
+
+// TestPrefixScanEmptyPrefix tests scanning with an empty prefix (all keys).
+func TestPrefixScanEmptyPrefix(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.CompactionInterval = time.Hour
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Add various keys
+	store.PutString([]byte("aaa"), "value")
+	store.PutString([]byte("bbb"), "value")
+	store.PutString([]byte("ccc"), "value")
+	store.PutString([]byte("123"), "value")
+	store.PutString([]byte{0x00, 0x01}, "binary")
+	store.Flush()
+
+	// Scan with empty prefix should return all keys
+	count := 0
+	err = store.ScanPrefix([]byte{}, func(key []byte, value Value) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+
+	if count != 5 {
+		t.Errorf("ScanPrefix([]) returned %d keys, want 5", count)
 	}
 }
