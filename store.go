@@ -775,3 +775,35 @@ func (s *Store) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool)
 
 	return reader.ScanPrefix(prefix, fn)
 }
+
+// KeyLocation describes where a key is stored.
+type KeyLocation struct {
+	Level   int
+	TableID uint32
+}
+
+// FindKey returns the location of a key, or nil if in memtable or not found.
+func (s *Store) FindKey(key []byte) *KeyLocation {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Check each level
+	for level, tables := range s.levels {
+		for _, sst := range tables {
+			// Quick range check
+			if CompareKeys(key, sst.MinKey()) < 0 || CompareKeys(key, sst.MaxKey()) > 0 {
+				continue
+			}
+			// Check bloom filter
+			if sst.BloomFilter != nil && !sst.BloomFilter.MayContain(key) {
+				continue
+			}
+			// Try to get the key
+			_, found, err := sst.Get(key, s.cache, false)
+			if err == nil && found {
+				return &KeyLocation{Level: level, TableID: sst.ID}
+			}
+		}
+	}
+	return nil
+}

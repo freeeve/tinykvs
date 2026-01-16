@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bufio"
+	"encoding/csv"
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,6 +42,14 @@ func main() {
 		cmdCount(args)
 	case "compact":
 		cmdCompact(args)
+	case "repair":
+		cmdRepair(args)
+	case "info":
+		cmdInfo(args)
+	case "export":
+		cmdExport(args)
+	case "import":
+		cmdImport(args)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -61,6 +73,10 @@ Commands:
   stats    Show store statistics
   count    Count keys by prefix
   compact  Compact the store
+  repair   Remove orphan SST files
+  info     Show which level/SSTable contains a key
+  export   Export store to CSV file
+  import   Import data from CSV file
 
 Environment:
   TINYKVS_STORE  Default store directory (used if -dir not specified)
@@ -604,6 +620,381 @@ func cmdCompact(args []string) {
 
 	fmt.Printf("After:  L0=%d tables, L1=%d tables\n", l0After, l1After)
 	fmt.Printf("Done\n")
+}
+
+func cmdRepair(args []string) {
+	fs := flag.NewFlagSet("repair", flag.ExitOnError)
+	dir := fs.String("dir", "", "Path to store directory")
+	dryRun := fs.Bool("dry-run", false, "Show what would be deleted without deleting")
+	fs.Parse(args)
+
+	storeDir := requireDir(*dir)
+
+	// Read manifest to get valid table IDs
+	manifestPath := filepath.Join(storeDir, "MANIFEST")
+	manifest, err := tinykvs.OpenManifest(manifestPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening manifest: %v\n", err)
+		os.Exit(1)
+	}
+	tables := manifest.Tables()
+	manifest.Close()
+
+	// Build set of valid IDs
+	validIDs := make(map[uint32]bool)
+	for _, meta := range tables {
+		validIDs[meta.ID] = true
+	}
+
+	// Find orphan files
+	entries, err := os.ReadDir(storeDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	var orphans []string
+	var orphanSize int64
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".sst") {
+			continue
+		}
+		name := strings.TrimSuffix(e.Name(), ".sst")
+		id, err := parseUint32(name)
+		if err != nil {
+			continue
+		}
+		if !validIDs[id] {
+			info, _ := e.Info()
+			orphans = append(orphans, e.Name())
+			orphanSize += info.Size()
+		}
+	}
+
+	if len(orphans) == 0 {
+		fmt.Println("No orphan files found")
+		return
+	}
+
+	fmt.Printf("Found %d orphan files (%.2f GB)\n", len(orphans), float64(orphanSize)/1e9)
+
+	if *dryRun {
+		fmt.Println("\nOrphan files (dry run - not deleting):")
+		for _, name := range orphans {
+			fmt.Printf("  %s\n", name)
+		}
+		return
+	}
+
+	// Delete orphans
+	var deleted int
+	var deletedSize int64
+	for _, name := range orphans {
+		path := filepath.Join(storeDir, name)
+		info, _ := os.Stat(path)
+		if err := os.Remove(path); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to delete %s: %v\n", name, err)
+			continue
+		}
+		deleted++
+		deletedSize += info.Size()
+		fmt.Printf("Deleted: %s\n", name)
+	}
+
+	fmt.Printf("\nDeleted %d files, recovered %.2f GB\n", deleted, float64(deletedSize)/1e9)
+}
+
+func parseUint32(s string) (uint32, error) {
+	v, err := fmt.Sscanf(s, "%d", new(uint32))
+	if err != nil || v != 1 {
+		return 0, fmt.Errorf("invalid uint32: %s", s)
+	}
+	var result uint32
+	fmt.Sscanf(s, "%d", &result)
+	return result, nil
+}
+
+func cmdInfo(args []string) {
+	fs := flag.NewFlagSet("info", flag.ExitOnError)
+	dir := fs.String("dir", "", "Path to store directory")
+	key := fs.String("key", "", "Key to look up (string)")
+	keyHex := fs.String("key-hex", "", "Key to look up (hex encoded)")
+	fs.Parse(args)
+
+	storeDir := requireDir(*dir)
+
+	var keyBytes []byte
+	if *keyHex != "" {
+		var err error
+		keyBytes, err = hex.DecodeString(*keyHex)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error decoding hex key: %v\n", err)
+			os.Exit(1)
+		}
+	} else if *key != "" {
+		keyBytes = []byte(*key)
+	} else {
+		fmt.Fprintln(os.Stderr, "Error: -key or -key-hex is required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	opts := tinykvs.DefaultOptions(storeDir)
+	store, err := tinykvs.Open(storeDir, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	// Check memtable first
+	val, err := store.Get(keyBytes)
+	if err == tinykvs.ErrKeyNotFound {
+		fmt.Println("Key not found")
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Key: %s\n", formatKey(keyBytes))
+	fmt.Printf("Value type: %s\n", valueTypeName(val.Type))
+
+	// Find which SSTable contains it
+	location := store.FindKey(keyBytes)
+	if location != nil {
+		fmt.Printf("Location: L%d SSTable %06d\n", location.Level, location.TableID)
+	} else {
+		fmt.Printf("Location: memtable\n")
+	}
+}
+
+func valueTypeName(t tinykvs.ValueType) string {
+	switch t {
+	case tinykvs.ValueTypeInt64:
+		return "int64"
+	case tinykvs.ValueTypeFloat64:
+		return "float64"
+	case tinykvs.ValueTypeBool:
+		return "bool"
+	case tinykvs.ValueTypeString:
+		return "string"
+	case tinykvs.ValueTypeBytes:
+		return "bytes"
+	case tinykvs.ValueTypeTombstone:
+		return "tombstone"
+	default:
+		return fmt.Sprintf("unknown(%d)", t)
+	}
+}
+
+func cmdExport(args []string) {
+	fs := flag.NewFlagSet("export", flag.ExitOnError)
+	dir := fs.String("dir", "", "Path to store directory")
+	output := fs.String("output", "", "Output file path (required)")
+	prefix := fs.String("prefix", "", "Only export keys with this prefix")
+	prefixHex := fs.String("prefix-hex", "", "Only export keys with this prefix (hex)")
+	fs.Parse(args)
+
+	storeDir := requireDir(*dir)
+
+	if *output == "" {
+		fmt.Fprintln(os.Stderr, "Error: -output is required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	var prefixBytes []byte
+	if *prefixHex != "" {
+		var err error
+		prefixBytes, err = hex.DecodeString(*prefixHex)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error decoding hex prefix: %v\n", err)
+			os.Exit(1)
+		}
+	} else if *prefix != "" {
+		prefixBytes = []byte(*prefix)
+	}
+
+	opts := tinykvs.DefaultOptions(storeDir)
+	store, err := tinykvs.Open(storeDir, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	file, err := os.Create(*output)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating output file: %v\n", err)
+		os.Exit(1)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// Write header
+	writer.Write([]string{"key", "type", "value"})
+
+	var count int64
+	err = store.ScanPrefix(prefixBytes, func(key []byte, val tinykvs.Value) bool {
+		var valueStr string
+		switch val.Type {
+		case tinykvs.ValueTypeInt64:
+			valueStr = strconv.FormatInt(val.Int64, 10)
+		case tinykvs.ValueTypeFloat64:
+			valueStr = strconv.FormatFloat(val.Float64, 'g', -1, 64)
+		case tinykvs.ValueTypeBool:
+			valueStr = strconv.FormatBool(val.Bool)
+		case tinykvs.ValueTypeString, tinykvs.ValueTypeBytes:
+			valueStr = hex.EncodeToString(val.Bytes)
+		}
+
+		writer.Write([]string{
+			hex.EncodeToString(key),
+			valueTypeName(val.Type),
+			valueStr,
+		})
+
+		count++
+		if count%100000 == 0 {
+			fmt.Fprintf(os.Stderr, "\rExported %d keys...", count)
+		}
+		return true
+	})
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\nError scanning: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stderr, "\rExported %d keys to %s\n", count, *output)
+}
+
+func cmdImport(args []string) {
+	fs := flag.NewFlagSet("import", flag.ExitOnError)
+	dir := fs.String("dir", "", "Path to store directory")
+	input := fs.String("input", "", "Input file path (required)")
+	fs.Parse(args)
+
+	storeDir := requireDir(*dir)
+
+	if *input == "" {
+		fmt.Fprintln(os.Stderr, "Error: -input is required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	file, err := os.Open(*input)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening input file: %v\n", err)
+		os.Exit(1)
+	}
+	defer file.Close()
+
+	opts := tinykvs.DefaultOptions(storeDir)
+	store, err := tinykvs.Open(storeDir, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	reader := csv.NewReader(bufio.NewReader(file))
+
+	// Skip header
+	if _, err := reader.Read(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading header: %v\n", err)
+		os.Exit(1)
+	}
+
+	var count int64
+	var errors int64
+
+	for {
+		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			errors++
+			continue
+		}
+		if len(record) != 3 {
+			errors++
+			continue
+		}
+
+		keyBytes, err := hex.DecodeString(record[0])
+		if err != nil {
+			errors++
+			continue
+		}
+
+		typeName := record[1]
+		valueStr := record[2]
+
+		var val tinykvs.Value
+		switch typeName {
+		case "int64":
+			v, err := strconv.ParseInt(valueStr, 10, 64)
+			if err != nil {
+				errors++
+				continue
+			}
+			val = tinykvs.Int64Value(v)
+		case "float64":
+			v, err := strconv.ParseFloat(valueStr, 64)
+			if err != nil {
+				errors++
+				continue
+			}
+			val = tinykvs.Float64Value(v)
+		case "bool":
+			v, err := strconv.ParseBool(valueStr)
+			if err != nil {
+				errors++
+				continue
+			}
+			val = tinykvs.BoolValue(v)
+		case "string":
+			bytes, err := hex.DecodeString(valueStr)
+			if err != nil {
+				errors++
+				continue
+			}
+			val = tinykvs.StringValue(string(bytes))
+		case "bytes":
+			bytes, err := hex.DecodeString(valueStr)
+			if err != nil {
+				errors++
+				continue
+			}
+			val = tinykvs.BytesValue(bytes)
+		default:
+			errors++
+			continue
+		}
+
+		if err := store.Put(keyBytes, val); err != nil {
+			errors++
+			continue
+		}
+		count++
+
+		if count%100000 == 0 {
+			fmt.Fprintf(os.Stderr, "\rImported %d keys...", count)
+		}
+	}
+
+	if err := store.Flush(); err != nil {
+		fmt.Fprintf(os.Stderr, "\nError flushing: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stderr, "\rImported %d keys (%d errors)\n", count, errors)
 }
 
 func printValue(key []byte, val tinykvs.Value) {
