@@ -5,6 +5,7 @@ import (
 	"hash/crc32"
 	"sync"
 
+	"github.com/golang/snappy"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -14,6 +15,70 @@ var zstdDecoderPool = sync.Pool{
 		decoder, _ := zstd.NewReader(nil)
 		return decoder
 	},
+}
+
+// Buffer pools for decompression - size classes to reduce fragmentation
+// Sizes: 4KB, 16KB, 64KB, 256KB, 1MB
+var decompressPools = [5]sync.Pool{
+	{New: func() interface{} { return make([]byte, 0, 4*1024) }},
+	{New: func() interface{} { return make([]byte, 0, 16*1024) }},
+	{New: func() interface{} { return make([]byte, 0, 64*1024) }},
+	{New: func() interface{} { return make([]byte, 0, 256*1024) }},
+	{New: func() interface{} { return make([]byte, 0, 1024*1024) }},
+}
+
+var decompressPoolSizes = [5]int{4 * 1024, 16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024}
+
+func getDecompressBuffer(size int) []byte {
+	for i, poolSize := range decompressPoolSizes {
+		if size <= poolSize {
+			buf := decompressPools[i].Get().([]byte)
+			return buf[:0]
+		}
+	}
+	// Too large for pools, allocate directly
+	return make([]byte, 0, size)
+}
+
+func putDecompressBuffer(buf []byte) {
+	cap := cap(buf)
+	for i, poolSize := range decompressPoolSizes {
+		if cap == poolSize {
+			decompressPools[i].Put(buf[:0])
+			return
+		}
+	}
+	// Not a pooled size, let GC handle it
+}
+
+// Compression buffer pools (for snappy encode output)
+// Use same size classes as decompress pools
+var compressPools = [5]sync.Pool{
+	{New: func() interface{} { return make([]byte, 0, 4*1024) }},
+	{New: func() interface{} { return make([]byte, 0, 16*1024) }},
+	{New: func() interface{} { return make([]byte, 0, 64*1024) }},
+	{New: func() interface{} { return make([]byte, 0, 256*1024) }},
+	{New: func() interface{} { return make([]byte, 0, 1024*1024) }},
+}
+
+func getCompressBuffer(size int) []byte {
+	for i, poolSize := range decompressPoolSizes {
+		if size <= poolSize {
+			buf := compressPools[i].Get().([]byte)
+			return buf[:0]
+		}
+	}
+	return make([]byte, 0, size)
+}
+
+func putCompressBuffer(buf []byte) {
+	cap := cap(buf)
+	for i, poolSize := range decompressPoolSizes {
+		if cap == poolSize {
+			compressPools[i].Put(buf[:0])
+			return
+		}
+	}
 }
 
 // Channel-based encoder pools (won't be cleared by GC like sync.Pool)
@@ -66,7 +131,14 @@ const (
 )
 
 // BlockFooterSize is the size of the block footer in bytes.
-const BlockFooterSize = 12 // checksum(4) + uncompressed_size(4) + compressed_size(4)
+const BlockFooterSize = 13 // checksum(4) + uncompressed_size(4) + compressed_size(4) + compression_type(1)
+
+// Compression type markers in block footer
+const (
+	compressionTypeZstd   uint8 = 0
+	compressionTypeSnappy uint8 = 1
+	compressionTypeNone   uint8 = 2
+)
 
 // BlockEntry represents a key-value pair within a block.
 type BlockEntry struct {
@@ -78,6 +150,17 @@ type BlockEntry struct {
 type Block struct {
 	Type    uint8
 	Entries []BlockEntry
+	buffer  []byte // pooled buffer for decompressed data
+}
+
+// Release returns the block's buffer to the pool.
+// Call this when the block is no longer needed.
+func (b *Block) Release() {
+	if b.buffer != nil {
+		putDecompressBuffer(b.buffer)
+		b.buffer = nil
+		b.Entries = nil
+	}
 }
 
 // BlockBuilder builds blocks from entries.
@@ -85,13 +168,26 @@ type BlockBuilder struct {
 	entries   []BlockEntry
 	size      int
 	blockSize int
+
+	// Arena for value copies to avoid per-entry allocations
+	arena       []byte
+	arenaOffset int
+
+	// Reusable buffer for Build() (uncompressed data)
+	buildBuf []byte
+
+	// Reusable buffer for compressed output
+	compressBuf []byte
 }
 
 // NewBlockBuilder creates a new block builder.
 func NewBlockBuilder(blockSize int) *BlockBuilder {
 	return &BlockBuilder{
-		entries:   make([]BlockEntry, 0, 64),
-		blockSize: blockSize,
+		entries:     make([]BlockEntry, 0, 64),
+		blockSize:   blockSize,
+		arena:       make([]byte, blockSize*2), // Pre-allocate arena
+		buildBuf:    make([]byte, 0, blockSize+1024),
+		compressBuf: make([]byte, 0, snappy.MaxEncodedLen(blockSize+1024)),
 	}
 }
 
@@ -103,8 +199,8 @@ func (b *BlockBuilder) Add(key, value []byte) bool {
 		return false // Block is full
 	}
 
-	// Copy value to avoid issues with reused buffers
-	valueCopy := make([]byte, len(value))
+	// Copy value to arena to avoid issues with reused buffers
+	valueCopy := b.arenaAlloc(len(value))
 	copy(valueCopy, value)
 
 	b.entries = append(b.entries, BlockEntry{
@@ -115,11 +211,35 @@ func (b *BlockBuilder) Add(key, value []byte) bool {
 	return true
 }
 
+// arenaAlloc allocates from the arena, growing if needed.
+func (b *BlockBuilder) arenaAlloc(size int) []byte {
+	if b.arenaOffset+size > len(b.arena) {
+		// Grow arena
+		newSize := len(b.arena) * 2
+		if newSize < b.arenaOffset+size {
+			newSize = b.arenaOffset + size
+		}
+		newArena := make([]byte, newSize)
+		copy(newArena, b.arena[:b.arenaOffset])
+		b.arena = newArena
+	}
+	result := b.arena[b.arenaOffset : b.arenaOffset+size]
+	b.arenaOffset += size
+	return result
+}
+
 // Build serializes and compresses the block.
 func (b *BlockBuilder) Build(blockType uint8, compressionLevel int) ([]byte, error) {
+	return b.BuildWithCompression(blockType, CompressionZstd, compressionLevel)
+}
+
+// BuildWithCompression serializes and compresses the block with the specified compression type.
+func (b *BlockBuilder) BuildWithCompression(blockType uint8, compressionType CompressionType, compressionLevel int) ([]byte, error) {
+	// Reuse build buffer
+	buf := b.buildBuf[:0]
+
 	// Serialize entries
 	// Header: type(1) + num_entries(2)
-	buf := make([]byte, 0, b.size+8)
 	buf = append(buf, blockType)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(b.entries)))
 
@@ -131,19 +251,50 @@ func (b *BlockBuilder) Build(blockType uint8, compressionLevel int) ([]byte, err
 		buf = append(buf, entry.Value...)
 	}
 
+	// Save buffer for reuse (may have grown)
+	b.buildBuf = buf
+
 	uncompressedSize := len(buf)
 
-	// Compress with pooled zstd encoder
-	encoder := getEncoder(compressionLevel)
-	compressed := encoder.EncodeAll(buf, make([]byte, 0, len(buf)))
-	putEncoder(compressionLevel, encoder)
+	// Compress based on type
+	var compressed []byte
+	var compType uint8
 
-	// Append footer: checksum(4) + uncompressed_size(4) + compressed_size(4)
+	switch compressionType {
+	case CompressionSnappy:
+		// Reuse compressBuf, grow if needed
+		maxLen := snappy.MaxEncodedLen(len(buf))
+		if cap(b.compressBuf) < maxLen {
+			b.compressBuf = make([]byte, 0, maxLen)
+		}
+		compressed = snappy.Encode(b.compressBuf[:maxLen], buf)
+		compType = compressionTypeSnappy
+	case CompressionNone:
+		// Reuse compressBuf for uncompressed copy
+		if cap(b.compressBuf) < len(buf) {
+			b.compressBuf = make([]byte, len(buf))
+		}
+		compressed = b.compressBuf[:len(buf)]
+		copy(compressed, buf)
+		compType = compressionTypeNone
+	default: // CompressionZstd
+		encoder := getEncoder(compressionLevel)
+		// Reuse compressBuf for zstd output
+		if cap(b.compressBuf) < len(buf) {
+			b.compressBuf = make([]byte, 0, len(buf))
+		}
+		compressed = encoder.EncodeAll(buf, b.compressBuf[:0])
+		putEncoder(compressionLevel, encoder)
+		compType = compressionTypeZstd
+	}
+
+	// Append footer: checksum(4) + uncompressed_size(4) + compressed_size(4) + compression_type(1)
 	checksum := crc32.ChecksumIEEE(compressed)
 	footer := make([]byte, BlockFooterSize)
 	binary.LittleEndian.PutUint32(footer[0:], checksum)
 	binary.LittleEndian.PutUint32(footer[4:], uint32(uncompressedSize))
 	binary.LittleEndian.PutUint32(footer[8:], uint32(len(compressed)))
+	footer[12] = compType
 
 	return append(compressed, footer...), nil
 }
@@ -152,6 +303,7 @@ func (b *BlockBuilder) Build(blockType uint8, compressionLevel int) ([]byte, err
 func (b *BlockBuilder) Reset() {
 	b.entries = b.entries[:0]
 	b.size = 0
+	b.arenaOffset = 0 // Reset arena for next block
 }
 
 // Count returns the number of entries in the block.
@@ -180,6 +332,7 @@ func (b *BlockBuilder) Entries() []BlockEntry {
 // DecodeBlock decompresses and parses a block.
 // The returned Block's entries reference the internal decompressed buffer,
 // so the Block should not be modified and is only valid while cached.
+// Call Block.Release() when done to return the buffer to the pool.
 func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
 	if len(data) < BlockFooterSize {
 		return nil, ErrCorruptedData
@@ -190,6 +343,7 @@ func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
 	checksum := binary.LittleEndian.Uint32(footer[0:])
 	uncompressedSize := binary.LittleEndian.Uint32(footer[4:])
 	compressedSize := binary.LittleEndian.Uint32(footer[8:])
+	compType := footer[12]
 
 	compressed := data[:len(data)-BlockFooterSize]
 
@@ -201,16 +355,42 @@ func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
 		return nil, ErrChecksumMismatch
 	}
 
-	// Decompress using pooled decoder
-	decoder := zstdDecoderPool.Get().(*zstd.Decoder)
-	decompressed, err := decoder.DecodeAll(compressed, make([]byte, 0, uncompressedSize))
-	zstdDecoderPool.Put(decoder)
-	if err != nil {
-		return nil, err
+	// Get pooled buffer for decompression
+	buf := getDecompressBuffer(int(uncompressedSize))
+
+	// Decompress based on compression type
+	var decompressed []byte
+	var err error
+
+	switch compType {
+	case compressionTypeSnappy:
+		// snappy.Decode checks len(dst), not cap(dst), so pre-size it
+		if cap(buf) >= int(uncompressedSize) {
+			buf = buf[:uncompressedSize]
+		} else {
+			buf = make([]byte, uncompressedSize)
+		}
+		decompressed, err = snappy.Decode(buf, compressed)
+		if err != nil {
+			putDecompressBuffer(buf)
+			return nil, err
+		}
+	case compressionTypeNone:
+		decompressed = buf[:len(compressed)]
+		copy(decompressed, compressed)
+	default: // compressionTypeZstd (0) or legacy
+		decoder := zstdDecoderPool.Get().(*zstd.Decoder)
+		decompressed, err = decoder.DecodeAll(compressed, buf)
+		zstdDecoderPool.Put(decoder)
+		if err != nil {
+			putDecompressBuffer(buf)
+			return nil, err
+		}
 	}
 
 	// Parse header
 	if len(decompressed) < 3 {
+		putDecompressBuffer(decompressed)
 		return nil, ErrCorruptedData
 	}
 
@@ -223,12 +403,14 @@ func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
 
 	for i := uint16(0); i < numEntries; i++ {
 		if pos+4 > len(decompressed) {
+			putDecompressBuffer(decompressed)
 			return nil, ErrCorruptedData
 		}
 		keyLen := int(binary.LittleEndian.Uint32(decompressed[pos:]))
 		pos += 4
 
 		if pos+keyLen+4 > len(decompressed) {
+			putDecompressBuffer(decompressed)
 			return nil, ErrCorruptedData
 		}
 		// Zero-copy: slice into decompressed buffer
@@ -239,6 +421,7 @@ func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
 		pos += 4
 
 		if pos+valLen > len(decompressed) {
+			putDecompressBuffer(decompressed)
 			return nil, ErrCorruptedData
 		}
 		// Zero-copy: slice into decompressed buffer
@@ -249,6 +432,7 @@ func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
 	return &Block{
 		Type:    blockType,
 		Entries: entries,
+		buffer:  decompressed,
 	}, nil
 }
 

@@ -3,6 +3,7 @@ package tinykvs
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"testing"
 )
 
@@ -537,5 +538,54 @@ func TestDecodeBlockTooShort(t *testing.T) {
 	// Should fail due to invalid zstd data
 	if err == nil {
 		t.Log("Expected error for invalid zstd data")
+	}
+}
+
+func TestCompressionTypes(t *testing.T) {
+	tests := []struct {
+		name string
+		comp CompressionType
+	}{
+		{"zstd", CompressionZstd},
+		{"snappy", CompressionSnappy},
+		{"none", CompressionNone},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			builder := NewBlockBuilder(4096)
+
+			// Add some data
+			for i := 0; i < 10; i++ {
+				key := []byte(fmt.Sprintf("key%03d", i))
+				value := []byte(fmt.Sprintf("value%03d with some extra data to compress", i))
+				builder.Add(key, value)
+			}
+
+			// Build with specified compression
+			data, err := builder.BuildWithCompression(BlockTypeData, tc.comp, 1)
+			if err != nil {
+				t.Fatalf("Build failed: %v", err)
+			}
+
+			// Decode and verify
+			block, err := DecodeBlock(data, true)
+			if err != nil {
+				t.Fatalf("Decode failed: %v", err)
+			}
+			defer block.Release()
+
+			if len(block.Entries) != 10 {
+				t.Errorf("Expected 10 entries, got %d", len(block.Entries))
+			}
+
+			// Verify first and last entry
+			if string(block.Entries[0].Key) != "key000" {
+				t.Errorf("First key mismatch: %s", block.Entries[0].Key)
+			}
+			if string(block.Entries[9].Key) != "key009" {
+				t.Errorf("Last key mismatch: %s", block.Entries[9].Key)
+			}
+		})
 	}
 }
