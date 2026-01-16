@@ -20,10 +20,23 @@ func main() {
 	skipWrite := flag.Bool("skip-write", false, "Skip write phase (use existing data)")
 	skipCompact := flag.Bool("skip-compact", false, "Skip compaction phase")
 	memtableSize := flag.Int64("memtable", 4*1024*1024, "Memtable size in bytes (default 4MB)")
+	blockSize := flag.Int("block-size", 16*1024, "Block size in bytes (default 16KB)")
+	compression := flag.String("compression", "zstd", "Compression type: zstd, snappy, none")
 	disableBloom := flag.Bool("no-bloom", true, "Disable bloom filters (default true for low memory)")
 	cpuProfile := flag.String("cpuprofile", "", "Write CPU profile to file")
 	memProfile := flag.String("memprofile", "", "Write memory profile to file")
 	flag.Parse()
+
+	// Parse compression type
+	var compressionType tinykvs.CompressionType
+	switch *compression {
+	case "snappy":
+		compressionType = tinykvs.CompressionSnappy
+	case "none":
+		compressionType = tinykvs.CompressionNone
+	default:
+		compressionType = tinykvs.CompressionZstd
+	}
 
 	if *cpuProfile != "" {
 		f, err := os.Create(*cpuProfile)
@@ -59,6 +72,8 @@ func main() {
 	fmt.Printf("GOMEMLIMIT: %d bytes\n", debug.SetMemoryLimit(-1))
 	fmt.Printf("Records: %d\n", *numRecords)
 	fmt.Printf("Memtable: %d MB\n", *memtableSize/1024/1024)
+	fmt.Printf("Block size: %d KB\n", *blockSize/1024)
+	fmt.Printf("Compression: %s\n", *compression)
 	fmt.Printf("Bloom filters: %v\n", !*disableBloom)
 	fmt.Printf("Data dir: %s\n", *dataDir)
 	fmt.Println()
@@ -66,6 +81,8 @@ func main() {
 	// Configure options for low memory
 	opts := tinykvs.LowMemoryOptions(*dataDir)
 	opts.MemtableSize = *memtableSize
+	opts.BlockSize = *blockSize
+	opts.CompressionType = compressionType
 	opts.DisableBloomFilter = *disableBloom
 	opts.WALSyncMode = tinykvs.WALSyncNone
 
@@ -129,10 +146,11 @@ func runWrite(dir string, opts tinykvs.Options, numRecords int) {
 
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
+			storeStats := store.Stats()
 
-			fmt.Printf("[%s] Written: %dM / %dM (%.1f%%) | Batch: %.0f/s | Avg: %.0f/s | Heap: %dMB | Sys: %dMB\n",
+			fmt.Printf("[%s] Written: %dM / %dM (%.1f%%) | Batch: %.0f/s | Avg: %.0f/s | Heap: %dMB | Sys: %dMB | Idx: %dMB\n",
 				totalElapsed.Truncate(time.Second), (i+1)/1_000_000, numRecords/1_000_000, pct,
-				rate, avgRate, m.HeapAlloc/1024/1024, m.Sys/1024/1024)
+				rate, avgRate, m.HeapAlloc/1024/1024, m.Sys/1024/1024, storeStats.IndexMemory/1024/1024)
 
 			lastReport = time.Now()
 
@@ -236,10 +254,11 @@ func runReads(dir string, opts tinykvs.Options, numRecords, numReads int) {
 
 		var m runtime.MemStats
 		runtime.ReadMemStats(&m)
+		storeStats := store.Stats()
 
-		fmt.Printf("Cache %s: %d reads in %v (%.0f/s) | Found: %d | Heap: %dMB | Sys: %dMB\n",
+		fmt.Printf("Cache %s: %d reads in %v (%.0f/s) | Found: %d | Heap: %dMB | Sys: %dMB | Idx: %dMB\n",
 			cs.name, numReads, readDuration, readRate, found,
-			m.HeapAlloc/1024/1024, m.Sys/1024/1024)
+			m.HeapAlloc/1024/1024, m.Sys/1024/1024, storeStats.IndexMemory/1024/1024)
 
 		store.Close()
 	}
@@ -269,10 +288,11 @@ func runPrefixScans(dir string, opts tinykvs.Options, numRecords int) {
 
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
+	storeStats := store.Stats()
 
-	fmt.Printf("Full scan: %d keys in %v (%.0f keys/s) | Heap: %dMB | Sys: %dMB\n",
+	fmt.Printf("Full scan: %d keys in %v (%.0f keys/s) | Heap: %dMB | Sys: %dMB | Idx: %dMB\n",
 		count, scanDuration, scanRate,
-		m.HeapAlloc/1024/1024, m.Sys/1024/1024)
+		m.HeapAlloc/1024/1024, m.Sys/1024/1024, storeStats.IndexMemory/1024/1024)
 
 	// Scan 1000 random prefixes to measure per-prefix overhead
 	numPrefixScans := 1000
@@ -292,7 +312,8 @@ func runPrefixScans(dir string, opts tinykvs.Options, numRecords int) {
 	prefixRate := float64(numPrefixScans) / scanDuration.Seconds()
 
 	runtime.ReadMemStats(&m)
-	fmt.Printf("Random prefix scans: %d scans in %v (%.0f scans/s, avg %.1f keys/scan) | Heap: %dMB | Sys: %dMB\n",
+	storeStats = store.Stats()
+	fmt.Printf("Random prefix scans: %d scans in %v (%.0f scans/s, avg %.1f keys/scan) | Heap: %dMB | Sys: %dMB | Idx: %dMB\n",
 		numPrefixScans, scanDuration, prefixRate, avgKeysPerPrefix,
-		m.HeapAlloc/1024/1024, m.Sys/1024/1024)
+		m.HeapAlloc/1024/1024, m.Sys/1024/1024, storeStats.IndexMemory/1024/1024)
 }

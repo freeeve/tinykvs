@@ -241,6 +241,22 @@ func BenchmarkMemtablePut(b *testing.B) {
 	}
 }
 
+func BenchmarkMemtablePutPregen(b *testing.B) {
+	mt := NewMemtable()
+	value := StringValue("benchmark value")
+
+	// Pre-generate keys to isolate Put allocations
+	keys := make([][]byte, b.N)
+	for i := 0; i < b.N; i++ {
+		keys[i] = []byte(fmt.Sprintf("key%08d", i))
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		mt.Put(keys[i], value, uint64(i))
+	}
+}
+
 func BenchmarkMemtableGet(b *testing.B) {
 	mt := NewMemtable()
 	value := StringValue("benchmark value")
