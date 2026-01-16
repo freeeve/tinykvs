@@ -766,9 +766,14 @@ func (it *sstableIterator) Next() bool {
 			it.cache.Put(cacheKey, block)
 		}
 
+		// Skip empty blocks
+		if len(block.Entries) == 0 {
+			continue
+		}
+
 		it.block = block
 		it.entryIdx = 0
-		return len(block.Entries) > 0
+		return true
 	}
 }
 
