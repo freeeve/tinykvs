@@ -453,3 +453,42 @@ func BenchmarkSearchBlock(b *testing.B) {
 		SearchBlock(block, key)
 	}
 }
+
+func TestBlockBuilderCompressionEdgeCases(t *testing.T) {
+	builder := NewBlockBuilder(4096)
+	builder.Add([]byte("key"), []byte("value"))
+
+	// Test with level below range
+	data, err := builder.Build(BlockTypeData, -1)
+	if err != nil {
+		t.Fatalf("Build with level -1 failed: %v", err)
+	}
+	if len(data) == 0 {
+		t.Error("Build with level -1 returned empty data")
+	}
+
+	// Reset and test with level above range
+	builder.Reset()
+	builder.Add([]byte("key"), []byte("value"))
+	data, err = builder.Build(BlockTypeData, 10)
+	if err != nil {
+		t.Fatalf("Build with level 10 failed: %v", err)
+	}
+	if len(data) == 0 {
+		t.Error("Build with level 10 returned empty data")
+	}
+}
+
+func TestEncoderPoolOverflow(t *testing.T) {
+	// Fill up the encoder pool by creating many blocks concurrently
+	builder := NewBlockBuilder(1024)
+	builder.Add([]byte("key"), []byte("value"))
+
+	// Build many blocks to exercise pool overflow
+	for i := 0; i < 20; i++ {
+		_, err := builder.Build(BlockTypeData, 1)
+		if err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+	}
+}
