@@ -698,6 +698,11 @@ func newMergeIterator(tables []*SSTable, cache *LRUCache, verify bool) *mergeIte
 	// Initialize iterators and push first entry from each
 	// Note: Iterators don't use the cache to avoid use-after-free issues
 	for i, t := range tables {
+		// Ensure index is loaded for lazy-loaded SSTables
+		if err := t.ensureIndex(); err != nil {
+			continue // Skip tables that can't be loaded
+		}
+
 		iter := &sstableIterator{
 			sst:        t,
 			blockIdx:   0,
