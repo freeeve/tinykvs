@@ -17,10 +17,14 @@ type Options struct {
 	BlockCacheSize int64
 
 	// BlockSize is the target block size before compression.
-	// Default: 4KB
+	// Default: 16KB
 	BlockSize int
 
-	// CompressionLevel is the zstd compression level.
+	// CompressionType determines which compression algorithm to use.
+	// Default: CompressionZstd
+	CompressionType CompressionType
+
+	// CompressionLevel is the zstd compression level (ignored for snappy).
 	// 1 = fastest, 3 = default, higher = better compression.
 	// Default: 1 (fastest)
 	CompressionLevel int
@@ -88,13 +92,25 @@ const (
 	WALSyncPerWrite
 )
 
+// CompressionType determines the compression algorithm.
+type CompressionType int
+
+const (
+	// CompressionZstd uses zstd compression (good compression, fast).
+	CompressionZstd CompressionType = iota
+	// CompressionSnappy uses snappy compression (faster, less compression).
+	CompressionSnappy
+	// CompressionNone disables compression.
+	CompressionNone
+)
+
 // DefaultOptions returns production-ready defaults for the given directory.
 func DefaultOptions(dir string) Options {
 	return Options{
 		Dir:                 dir,
 		MemtableSize:        4 * 1024 * 1024,  // 4MB
 		BlockCacheSize:      64 * 1024 * 1024, // 64MB
-		BlockSize:           4 * 1024,         // 4KB
+		BlockSize:           16 * 1024,        // 16KB
 		CompressionLevel:    1,                // zstd fastest
 		BloomFPRate:         0.01,             // 1% false positive
 		CompactionStyle:     CompactionStyleLeveled,

@@ -219,6 +219,19 @@ func (sst *SSTable) Size() int64 {
 	return sst.fileSize
 }
 
+// MemorySize returns the in-memory size (index + bloom filter).
+func (sst *SSTable) MemorySize() int64 {
+	var size int64
+	if sst.Index != nil {
+		size += sst.Index.MemorySize()
+	}
+	if sst.BloomFilter != nil && sst.BloomFilter.filter != nil {
+		// Bloom filter: Cap() returns bits, convert to bytes
+		size += int64(sst.BloomFilter.filter.Cap()+7) / 8
+	}
+	return size
+}
+
 // SSTableWriter builds an SSTable file.
 type SSTableWriter struct {
 	file *os.File
@@ -313,7 +326,7 @@ func (w *SSTableWriter) flushDataBlock() error {
 	keysInBlock := w.blockBuilder.Count()
 
 	// Build and write block
-	blockData, err := w.blockBuilder.Build(BlockTypeData, w.opts.CompressionLevel)
+	blockData, err := w.blockBuilder.BuildWithCompression(BlockTypeData, w.opts.CompressionType, w.opts.CompressionLevel)
 	if err != nil {
 		return err
 	}
