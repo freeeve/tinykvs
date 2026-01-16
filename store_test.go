@@ -389,10 +389,10 @@ func TestStoreLowMemoryOptions(t *testing.T) {
 	}
 }
 
-func TestStoreUltraLowMemoryOptions(t *testing.T) {
+func TestStoreLowMemoryOptions(t *testing.T) {
 	dir := t.TempDir()
 
-	opts := UltraLowMemoryOptions(dir)
+	opts := LowMemoryOptions(dir)
 	store, err := Open(dir, opts)
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)

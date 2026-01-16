@@ -19,7 +19,7 @@ func main() {
 	dataDir := flag.String("dir", "/tmp/tinykvs-bench", "Data directory")
 	skipWrite := flag.Bool("skip-write", false, "Skip write phase (use existing data)")
 	skipCompact := flag.Bool("skip-compact", false, "Skip compaction phase")
-	memtableSize := flag.Int64("memtable", 1*1024*1024, "Memtable size in bytes (default 1MB)")
+	memtableSize := flag.Int64("memtable", 4*1024*1024, "Memtable size in bytes (default 4MB)")
 	disableBloom := flag.Bool("no-bloom", true, "Disable bloom filters (default true for low memory)")
 	cpuProfile := flag.String("cpuprofile", "", "Write CPU profile to file")
 	memProfile := flag.String("memprofile", "", "Write memory profile to file")
@@ -64,7 +64,7 @@ func main() {
 	fmt.Println()
 
 	// Configure options for low memory
-	opts := tinykvs.UltraLowMemoryOptions(*dataDir)
+	opts := tinykvs.LowMemoryOptions(*dataDir)
 	opts.MemtableSize = *memtableSize
 	opts.DisableBloomFilter = *disableBloom
 	opts.WALSyncMode = tinykvs.WALSyncNone
@@ -77,6 +77,10 @@ func main() {
 	fmt.Println("\n=== READ BEFORE COMPACTION ===")
 	runReads(*dataDir, opts, *numRecords, *numReads)
 
+	// Prefix scan before compaction
+	fmt.Println("\n=== PREFIX SCAN BEFORE COMPACTION ===")
+	runPrefixScans(*dataDir, opts, *numRecords)
+
 	if !*skipCompact {
 		runCompact(*dataDir, opts)
 	}
@@ -84,6 +88,10 @@ func main() {
 	// Read after compaction
 	fmt.Println("\n=== READ AFTER COMPACTION ===")
 	runReads(*dataDir, opts, *numRecords, *numReads)
+
+	// Prefix scan after compaction
+	fmt.Println("\n=== PREFIX SCAN AFTER COMPACTION ===")
+	runPrefixScans(*dataDir, opts, *numRecords)
 
 	fmt.Println("\n=== BENCHMARK COMPLETE ===")
 }
@@ -235,4 +243,56 @@ func runReads(dir string, opts tinykvs.Options, numRecords, numReads int) {
 
 		store.Close()
 	}
+}
+
+func runPrefixScans(dir string, opts tinykvs.Options, numRecords int) {
+	store, err := tinykvs.Open(dir, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to open store: %v\n", err)
+		return
+	}
+	defer store.Close()
+
+	// Full scan of all keys
+	scanStart := time.Now()
+	count := 0
+	err = store.ScanPrefix([]byte("key"), func(key []byte, value tinykvs.Value) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ScanPrefix failed: %v\n", err)
+		return
+	}
+	scanDuration := time.Since(scanStart)
+	scanRate := float64(count) / scanDuration.Seconds()
+
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	fmt.Printf("Full scan: %d keys in %v (%.0f keys/s) | Heap: %dMB | Sys: %dMB\n",
+		count, scanDuration, scanRate,
+		m.HeapAlloc/1024/1024, m.Sys/1024/1024)
+
+	// Scan 1000 random prefixes to measure per-prefix overhead
+	numPrefixScans := 1000
+	totalKeys := 0
+	scanStart = time.Now()
+	for i := 0; i < numPrefixScans; i++ {
+		// Pick a random key and use first 15 chars as prefix (matches ~10 keys)
+		idx := rand.Intn(numRecords)
+		prefix := fmt.Sprintf("key%012d", idx)[:15]
+		store.ScanPrefix([]byte(prefix), func(key []byte, value tinykvs.Value) bool {
+			totalKeys++
+			return true
+		})
+	}
+	scanDuration = time.Since(scanStart)
+	avgKeysPerPrefix := float64(totalKeys) / float64(numPrefixScans)
+	prefixRate := float64(numPrefixScans) / scanDuration.Seconds()
+
+	runtime.ReadMemStats(&m)
+	fmt.Printf("Random prefix scans: %d scans in %v (%.0f scans/s, avg %.1f keys/scan) | Heap: %dMB | Sys: %dMB\n",
+		numPrefixScans, scanDuration, prefixRate, avgKeysPerPrefix,
+		m.HeapAlloc/1024/1024, m.Sys/1024/1024)
 }

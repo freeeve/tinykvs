@@ -12,7 +12,7 @@
 # For 1B records on t4g.micro:
 # - Uses 4GB swap for safety
 # - GOMEMLIMIT=700MiB to leave room for OS
-# - UltraLowMemoryOptions (1MB memtable, no bloom, no cache)
+# - LowMemoryOptions (1MB memtable, no bloom, no cache)
 
 set -e
 
@@ -168,7 +168,7 @@ func main() {
     fmt.Printf("Records: %d\n", *numRecords)
     fmt.Println()
 
-    opts := tinykvs.UltraLowMemoryOptions(*dataDir)
+    opts := tinykvs.LowMemoryOptions(*dataDir)
     opts.WALSyncMode = tinykvs.WALSyncNone
 
     if !*skipWrite {

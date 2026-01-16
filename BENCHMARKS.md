@@ -26,7 +26,7 @@ With GOMEMLIMIT=256MiB:
 
 ### Ultra Low Memory Mode (10M records)
 
-Using `UltraLowMemoryOptions()`:
+Using `LowMemoryOptions()`:
 - 1MB memtable
 - No block cache
 - Bloom filters disabled

@@ -108,20 +108,12 @@ func DefaultOptions(dir string) Options {
 	}
 }
 
-// LowMemoryOptions returns options optimized for minimal memory usage.
+// LowMemoryOptions returns options for memory-constrained environments.
+// Suitable for running billions of records on systems with <1GB RAM.
 func LowMemoryOptions(dir string) Options {
 	opts := DefaultOptions(dir)
-	opts.MemtableSize = 1 * 1024 * 1024 // 1MB
+	opts.MemtableSize = 4 * 1024 * 1024 // 4MB (good balance of throughput vs memory)
 	opts.BlockCacheSize = 0             // No cache
-	return opts
-}
-
-// UltraLowMemoryOptions returns options for extremely constrained environments (<512MB).
-func UltraLowMemoryOptions(dir string) Options {
-	opts := DefaultOptions(dir)
-	opts.MemtableSize = 1 * 1024 * 1024 // 1MB
-	opts.BlockCacheSize = 0             // No cache
-	opts.BloomFPRate = 0.1              // 10% FP rate (smaller filters)
 	opts.DisableBloomFilter = true      // No bloom filters
 	opts.L0CompactionTrigger = 8        // Less frequent compaction
 	return opts

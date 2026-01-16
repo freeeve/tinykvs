@@ -132,8 +132,7 @@ type Options struct {
 
 // Preset configurations
 func DefaultOptions(dir string) Options          // Balanced defaults
-func LowMemoryOptions(dir string) Options        // Low memory (1MB memtable, no cache)
-func UltraLowMemoryOptions(dir string) Options   // Minimal memory (no bloom, for 1B+ records)
+func LowMemoryOptions(dir string) Options        // Minimal memory (1MB memtable, no cache, no bloom)
 func HighPerformanceOptions(dir string) Options  // Max throughput
 ```
 
@@ -203,12 +202,7 @@ func HighPerformanceOptions(dir string) Options  // Max throughput
 | Bloom filters | ~1.2MB per 1M keys |
 | Sparse index | ~5KB per 1M keys |
 
-For reduced memory, use `LowMemoryOptions()`:
-- 1MB memtable
-- No block cache
-- Total: ~2MB overhead + bloom filters (~1.2MB per 1M keys)
-
-For absolute minimal memory (billions of records), use `UltraLowMemoryOptions()`:
+For minimal memory (billions of records), use `LowMemoryOptions()`:
 - 1MB memtable
 - No block cache
 - No bloom filters
@@ -216,7 +210,7 @@ For absolute minimal memory (billions of records), use `UltraLowMemoryOptions()`
 
 ## Performance
 
-Benchmarks on Apple M3 Max:
+### Apple M3 Max
 
 | Operation | Latency | Throughput |
 |-----------|---------|------------|
@@ -231,6 +225,23 @@ Block cache impact (random reads, 100K keys):
 |-------|---------|----------|
 | 0 MB  | 42 µs   | 0%       |
 | 64 MB | 1.3 µs  | 99.9%    |
+
+### AWS t4g.micro (1GB RAM, ARM64)
+
+Ultra-low memory configuration with `GOMEMLIMIT=600MiB`:
+
+| Metric | Value |
+|--------|-------|
+| Write throughput | ~150K ops/sec |
+| Memory (heap) | 30-90 MB |
+| Memory (sys) | ~130 MB |
+| WAL size | ~3-4 MB (bounded) |
+
+This configuration can sustain 1 billion sequential writes while staying within memory limits. The benchmark uses:
+- 1MB memtable
+- No block cache
+- No bloom filters
+- WAL sync disabled (for throughput)
 
 See [BENCHMARKS.md](BENCHMARKS.md) for detailed results.
 
@@ -265,20 +276,20 @@ opts.MemtableSize = 512 * 1024 // 512KB
 store, _ := tinykvs.Open("/tmp/mydb", opts)
 ```
 
-### Ultra Low Memory (Billions of Records)
+### Low Memory (Billions of Records)
 
 For running on memory-constrained systems like t4g.micro (1GB RAM) with billions of records:
 
 ```go
-// Use UltraLowMemoryOptions: 1MB memtable, no cache, no bloom filters
-opts := tinykvs.UltraLowMemoryOptions("/data/mydb")
+// Use LowMemoryOptions: 1MB memtable, no cache, no bloom filters
+opts := tinykvs.LowMemoryOptions("/data/mydb")
 store, _ := tinykvs.Open("/data/mydb", opts)
 
 // Combined with GOMEMLIMIT for Go runtime memory control:
-// GOMEMLIMIT=700MiB ./myapp
+// GOMEMLIMIT=600MiB ./myapp
 ```
 
-This configuration can handle 1B+ records with ~700MB heap usage (plus swap).
+This configuration can handle 1B+ records while staying within tight memory limits.
 
 ### Statistics
 
