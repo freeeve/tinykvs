@@ -114,6 +114,11 @@ func (c *LRUCache) evict() {
 	delete(c.items, entry.key)
 	c.evictList.Remove(elem)
 	c.size -= entry.size
+
+	// Return block's buffer to pool
+	if entry.block != nil {
+		entry.block.Release()
+	}
 }
 
 // Remove removes a specific key from the cache.
@@ -130,6 +135,9 @@ func (c *LRUCache) Remove(key CacheKey) {
 		delete(c.items, key)
 		c.evictList.Remove(elem)
 		c.size -= entry.size
+		if entry.block != nil {
+			entry.block.Release()
+		}
 	}
 }
 
@@ -149,6 +157,9 @@ func (c *LRUCache) RemoveByFileID(fileID uint32) {
 			delete(c.items, key)
 			c.evictList.Remove(elem)
 			c.size -= entry.size
+			if entry.block != nil {
+				entry.block.Release()
+			}
 		}
 	}
 }
@@ -157,6 +168,14 @@ func (c *LRUCache) RemoveByFileID(fileID uint32) {
 func (c *LRUCache) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Release all block buffers
+	for _, elem := range c.items {
+		entry := elem.Value.(*cacheEntry)
+		if entry.block != nil {
+			entry.block.Release()
+		}
+	}
 
 	c.items = make(map[CacheKey]*list.Element)
 	c.evictList.Init()

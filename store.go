@@ -214,12 +214,14 @@ func (s *Store) Stats() StoreStats {
 		CacheStats:    s.cache.Stats(),
 	}
 
+	var totalIndexMemory int64
 	for level, tables := range s.levels {
 		var levelSize int64
 		var levelKeys uint64
 		for _, t := range tables {
 			levelSize += t.Size()
 			levelKeys += t.Footer.NumKeys
+			totalIndexMemory += t.MemorySize()
 		}
 		stats.Levels = append(stats.Levels, LevelStats{
 			Level:     level,
@@ -228,6 +230,7 @@ func (s *Store) Stats() StoreStats {
 			NumKeys:   levelKeys,
 		})
 	}
+	stats.IndexMemory = totalIndexMemory
 
 	return stats
 }
@@ -236,6 +239,7 @@ func (s *Store) Stats() StoreStats {
 type StoreStats struct {
 	MemtableSize  int64
 	MemtableCount int64
+	IndexMemory   int64 // Total in-memory size of indexes and bloom filters
 	CacheStats    CacheStats
 	Levels        []LevelStats
 }

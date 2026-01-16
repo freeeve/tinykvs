@@ -2,6 +2,7 @@ package tinykvs
 
 import (
 	"encoding/binary"
+	"unsafe"
 
 	"github.com/bits-and-blooms/bloom/v3"
 )
@@ -64,6 +65,23 @@ func (ib *IndexBuilder) Build() *Index {
 		MaxKey:  ib.maxKey,
 		NumKeys: ib.numKeys,
 	}
+}
+
+// MemorySize returns the exact memory usage of this index in bytes.
+func (idx *Index) MemorySize() int64 {
+	// Index struct itself
+	size := int64(unsafe.Sizeof(*idx))
+
+	// Backing arrays for slices in Index struct
+	size += int64(cap(idx.MinKey))
+	size += int64(cap(idx.MaxKey))
+	size += int64(cap(idx.Entries)) * int64(unsafe.Sizeof(IndexEntry{}))
+
+	// Key data in each entry (backing arrays)
+	for _, e := range idx.Entries {
+		size += int64(cap(e.Key))
+	}
+	return size
 }
 
 // Search finds the block that may contain the key.
