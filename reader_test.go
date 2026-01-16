@@ -1,6 +1,7 @@
 package tinykvs
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -361,5 +362,304 @@ func TestScanPrefixPrefixAfterAllKeys(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("count = %d, want 0", count)
+	}
+}
+
+func TestScanPrefixSpansMultipleBlocks(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.BlockSize = 256 // Very small blocks
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Write keys that will span multiple blocks
+	for i := 0; i < 100; i++ {
+		key := []byte("prefix" + string(rune('0'+i/10)) + string(rune('0'+i%10)))
+		store.PutString(key, "value-that-takes-some-space-in-block")
+	}
+	store.Flush()
+
+	// Scan subset
+	count := 0
+	err = store.ScanPrefix([]byte("prefix5"), func(key []byte, value Value) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+	if count != 10 {
+		t.Errorf("count = %d, want 10", count)
+	}
+}
+
+func TestScanPrefixExactMatch(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	store.PutString([]byte("exact"), "value1")
+	store.PutString([]byte("exactmatch"), "value2")
+	store.PutString([]byte("other"), "value3")
+	store.Flush()
+
+	// Scan with exact key as prefix
+	count := 0
+	err = store.ScanPrefix([]byte("exact"), func(key []byte, value Value) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("count = %d, want 2 (exact and exactmatch)", count)
+	}
+}
+
+func TestScanPrefixEmptyStore(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Empty prefix on empty store
+	count := 0
+	err = store.ScanPrefix([]byte{}, func(key []byte, value Value) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("count = %d, want 0", count)
+	}
+}
+
+func TestScanPrefixWithCacheDisabled(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.BlockCacheSize = 0 // No cache
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	for i := 0; i < 50; i++ {
+		store.PutString([]byte("key"+string(rune('0'+i/10))+string(rune('0'+i%10))), "value")
+	}
+	store.Flush()
+
+	count := 0
+	err = store.ScanPrefix([]byte("key2"), func(key []byte, value Value) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+	if count != 10 {
+		t.Errorf("count = %d, want 10", count)
+	}
+}
+
+func TestScanPrefixMemtableAndSSTableMerge(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Write some to SSTable
+	for i := 0; i < 10; i++ {
+		store.PutString([]byte("key"+string(rune('0'+i))), "sstable")
+	}
+	store.Flush()
+
+	// Write more to memtable (overlapping)
+	for i := 5; i < 15; i++ {
+		store.PutString([]byte("key"+string(rune('0'+i%10))), "memtable")
+	}
+
+	// Scan - should see merged results with memtable taking precedence
+	count := 0
+	err = store.ScanPrefix([]byte("key"), func(key []byte, value Value) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+	// Should see keys 0-9 from SSTable + keys 5-14 from memtable = unique keys 0-14 = 15 keys
+	// Wait, memtable has keys 5-14 which is key5 through key14, but key14 is actually "key4" since i%10
+	// Let me recalculate: memtable has keys for i=5..14, which is "key5", "key6", "key7", "key8", "key9", "key0", "key1", "key2", "key3", "key4"
+	// SSTable has keys "key0" through "key9"
+	// Unique keys: key0-key9 = 10 keys
+	if count != 10 {
+		t.Errorf("count = %d, want 10", count)
+	}
+}
+
+func TestScanPrefixPrefixBeforeIndexMinKey(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Write keys: bbb00, bbb01, ..., bbb19
+	for i := 0; i < 20; i++ {
+		key := fmt.Sprintf("bbb%02d", i)
+		store.PutString([]byte(key), "value")
+	}
+	store.Flush()
+
+	// Scan with prefix 'b' - should find all keys since they all start with 'b'
+	count := 0
+	err = store.ScanPrefix([]byte("b"), func(key []byte, value Value) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+	if count != 20 {
+		t.Errorf("count = %d, want 20", count)
+	}
+
+	// Scan with prefix 'bb' - should find all keys
+	count = 0
+	err = store.ScanPrefix([]byte("bb"), func(key []byte, value Value) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+	if count != 20 {
+		t.Errorf("count for 'bb' = %d, want 20", count)
+	}
+
+	// Scan with prefix 'bbb' - should find all keys
+	count = 0
+	err = store.ScanPrefix([]byte("bbb"), func(key []byte, value Value) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+	if count != 20 {
+		t.Errorf("count for 'bbb' = %d, want 20", count)
+	}
+
+	// Scan with prefix 'bbb0' - should find bbb00-bbb09 (10 keys)
+	count = 0
+	err = store.ScanPrefix([]byte("bbb0"), func(key []byte, value Value) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+	if count != 10 {
+		t.Errorf("count for 'bbb0' = %d, want 10", count)
+	}
+}
+
+func TestScanPrefixNextBlockTransition(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.BlockSize = 128 // Very small blocks to force transitions
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Write keys that will span multiple blocks
+	for i := 0; i < 100; i++ {
+		key := []byte("prefix" + string(rune('0'+i/10)) + string(rune('0'+i%10)))
+		store.PutString(key, "value-that-takes-space")
+	}
+	store.Flush()
+
+	// Scan prefix that spans multiple blocks
+	count := 0
+	var lastKey []byte
+	err = store.ScanPrefix([]byte("prefix"), func(key []byte, value Value) bool {
+		count++
+		if lastKey != nil && CompareKeys(key, lastKey) <= 0 {
+			t.Errorf("Keys not in order: %s came after %s", key, lastKey)
+		}
+		lastKey = append([]byte{}, key...)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+	if count != 100 {
+		t.Errorf("count = %d, want 100", count)
+	}
+}
+
+func TestScanPrefixEntryNotInFirstPosition(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.BlockSize = 512 // Medium blocks
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Write keys with gaps
+	store.PutString([]byte("aaa"), "value")
+	store.PutString([]byte("bbb"), "value")
+	store.PutString([]byte("ccc"), "value")
+	store.PutString([]byte("ddd"), "value")
+	store.PutString([]byte("zzz"), "value")
+	store.Flush()
+
+	// Scan for prefix that's after the first entry in its block
+	count := 0
+	err = store.ScanPrefix([]byte("ddd"), func(key []byte, value Value) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("count = %d, want 1", count)
+	}
+
+	// Scan for prefix that has no matches
+	count = 0
+	err = store.ScanPrefix([]byte("eee"), func(key []byte, value Value) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("count for 'eee' = %d, want 0", count)
 	}
 }

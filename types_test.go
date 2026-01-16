@@ -277,3 +277,98 @@ func TestValueStringAndGetBytes(t *testing.T) {
 		t.Errorf("StringValue.GetBytes() = %q, want test", sv.GetBytes())
 	}
 }
+
+func TestDataPointerEncoding(t *testing.T) {
+	// Test encoding/decoding of values with pointers (external data references)
+	pointer := &DataPointer{
+		FileID:      12345,
+		BlockOffset: 67890,
+		DataOffset:  100,
+		Length:      500,
+	}
+
+	v := Value{
+		Type:    ValueTypeString,
+		Pointer: pointer,
+	}
+
+	encoded := EncodeValue(v)
+	decoded, consumed, err := DecodeValue(encoded)
+	if err != nil {
+		t.Fatalf("DecodeValue failed: %v", err)
+	}
+	if consumed != len(encoded) {
+		t.Errorf("consumed %d bytes, encoded %d bytes", consumed, len(encoded))
+	}
+
+	if decoded.Pointer == nil {
+		t.Fatal("decoded pointer is nil")
+	}
+	if decoded.Pointer.FileID != pointer.FileID {
+		t.Errorf("FileID = %d, want %d", decoded.Pointer.FileID, pointer.FileID)
+	}
+	if decoded.Pointer.BlockOffset != pointer.BlockOffset {
+		t.Errorf("BlockOffset = %d, want %d", decoded.Pointer.BlockOffset, pointer.BlockOffset)
+	}
+	if decoded.Pointer.DataOffset != pointer.DataOffset {
+		t.Errorf("DataOffset = %d, want %d", decoded.Pointer.DataOffset, pointer.DataOffset)
+	}
+	if decoded.Pointer.Length != pointer.Length {
+		t.Errorf("Length = %d, want %d", decoded.Pointer.Length, pointer.Length)
+	}
+}
+
+func TestDataPointerZeroCopy(t *testing.T) {
+	pointer := &DataPointer{
+		FileID:      1,
+		BlockOffset: 2,
+		DataOffset:  3,
+		Length:      4,
+	}
+
+	v := Value{
+		Type:    ValueTypeBytes,
+		Pointer: pointer,
+	}
+
+	encoded := EncodeValue(v)
+	decoded, _, err := DecodeValueZeroCopy(encoded)
+	if err != nil {
+		t.Fatalf("DecodeValueZeroCopy failed: %v", err)
+	}
+
+	if decoded.Pointer == nil {
+		t.Fatal("decoded pointer is nil")
+	}
+	if decoded.Pointer.FileID != pointer.FileID {
+		t.Errorf("FileID = %d, want %d", decoded.Pointer.FileID, pointer.FileID)
+	}
+}
+
+func TestEncodedSizeWithPointer(t *testing.T) {
+	// Inline value
+	inline := StringValue("test")
+	inlineSize := inline.EncodedSize()
+
+	// Pointer value
+	pointer := Value{
+		Type: ValueTypeString,
+		Pointer: &DataPointer{
+			FileID:      1,
+			BlockOffset: 2,
+			DataOffset:  3,
+			Length:      4,
+		},
+	}
+	pointerSize := pointer.EncodedSize()
+
+	// Pointer encoding: 1 (type) + 1 (flag) + 4 + 4 + 2 + 4 = 16 bytes
+	if pointerSize != 16 {
+		t.Errorf("pointer EncodedSize = %d, want 16", pointerSize)
+	}
+
+	// Inline encoding: 1 (type) + 1 (flag) + 4 (len) + 4 (data) = 10 bytes
+	if inlineSize != 10 {
+		t.Errorf("inline EncodedSize = %d, want 10", inlineSize)
+	}
+}

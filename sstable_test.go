@@ -481,3 +481,320 @@ func BenchmarkSSTableGet(b *testing.B) {
 		sst.Get([]byte(key), cache, false)
 	}
 }
+
+func TestSSTableGetWithSmallBlocks(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.sst")
+	opts := DefaultOptions(dir)
+	opts.BlockSize = 64 // Very small blocks
+
+	writer, err := NewSSTableWriter(1, path, 100, opts)
+	if err != nil {
+		t.Fatalf("NewSSTableWriter failed: %v", err)
+	}
+
+	for i := 0; i < 50; i++ {
+		key := fmt.Sprintf("key%03d", i)
+		writer.Add(Entry{Key: []byte(key), Value: StringValue("value"), Sequence: uint64(i)})
+	}
+	writer.Finish(0)
+	writer.Close()
+
+	sst, err := OpenSSTable(1, path)
+	if err != nil {
+		t.Fatalf("OpenSSTable failed: %v", err)
+	}
+	defer sst.Close()
+
+	cache := NewLRUCache(1024 * 1024)
+
+	// Get first key
+	_, found, err := sst.Get([]byte("key000"), cache, true)
+	if err != nil || !found {
+		t.Errorf("Get(key000) failed: found=%v, err=%v", found, err)
+	}
+
+	// Get last key
+	_, found, err = sst.Get([]byte("key049"), cache, true)
+	if err != nil || !found {
+		t.Errorf("Get(key049) failed: found=%v, err=%v", found, err)
+	}
+
+	// Get middle key
+	_, found, err = sst.Get([]byte("key025"), cache, true)
+	if err != nil || !found {
+		t.Errorf("Get(key025) failed: found=%v, err=%v", found, err)
+	}
+}
+
+func TestSSTableDisabledBloomFilter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.sst")
+	opts := DefaultOptions(dir)
+	opts.DisableBloomFilter = true
+
+	writer, err := NewSSTableWriter(1, path, 100, opts)
+	if err != nil {
+		t.Fatalf("NewSSTableWriter failed: %v", err)
+	}
+
+	for i := 0; i < 50; i++ {
+		key := fmt.Sprintf("key%03d", i)
+		writer.Add(Entry{Key: []byte(key), Value: StringValue("value"), Sequence: uint64(i)})
+	}
+	writer.Finish(0)
+	writer.Close()
+
+	sst, err := OpenSSTable(1, path)
+	if err != nil {
+		t.Fatalf("OpenSSTable failed: %v", err)
+	}
+	defer sst.Close()
+
+	// Bloom filter should be nil when disabled
+	if sst.BloomFilter != nil {
+		t.Error("BloomFilter should be nil when disabled")
+	}
+
+	// Get should still work
+	cache := NewLRUCache(1024 * 1024)
+	_, found, err := sst.Get([]byte("key025"), cache, true)
+	if err != nil || !found {
+		t.Errorf("Get(key025) failed: found=%v, err=%v", found, err)
+	}
+}
+
+func TestOpenSSTableCorruptedIndex(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.sst")
+	opts := DefaultOptions(dir)
+
+	// Create valid SSTable first
+	writer, err := NewSSTableWriter(1, path, 10, opts)
+	if err != nil {
+		t.Fatalf("NewSSTableWriter failed: %v", err)
+	}
+	writer.Add(Entry{Key: []byte("key"), Value: StringValue("value"), Sequence: 1})
+	writer.Finish(0)
+	writer.Close()
+
+	// Corrupt the index by truncating file
+	data, _ := os.ReadFile(path)
+	if len(data) > SSTableFooterSize+100 {
+		// Write truncated data
+		os.WriteFile(path, data[:SSTableFooterSize+50], 0644)
+	}
+
+	// Should fail to open
+	_, err = OpenSSTable(1, path)
+	if err == nil {
+		t.Error("OpenSSTable should fail with corrupted index")
+	}
+}
+
+func TestSSTableGetKeyAtBlockBoundary(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.sst")
+	opts := DefaultOptions(dir)
+	opts.BlockSize = 128 // Small blocks to create boundaries
+
+	writer, err := NewSSTableWriter(1, path, 100, opts)
+	if err != nil {
+		t.Fatalf("NewSSTableWriter failed: %v", err)
+	}
+
+	// Write keys that will land at block boundaries
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		value := fmt.Sprintf("value%05d", i)
+		writer.Add(Entry{Key: []byte(key), Value: StringValue(value), Sequence: uint64(i)})
+	}
+	writer.Finish(0)
+	writer.Close()
+
+	sst, err := OpenSSTable(1, path)
+	if err != nil {
+		t.Fatalf("OpenSSTable failed: %v", err)
+	}
+	defer sst.Close()
+
+	cache := NewLRUCache(1024 * 1024)
+
+	// Verify all keys are accessible
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("key%05d", i)
+		expectedValue := fmt.Sprintf("value%05d", i)
+		entry, found, err := sst.Get([]byte(key), cache, true)
+		if err != nil {
+			t.Errorf("Get(%s) error: %v", key, err)
+			continue
+		}
+		if !found {
+			t.Errorf("Get(%s) not found", key)
+			continue
+		}
+		if entry.Value.String() != expectedValue {
+			t.Errorf("Get(%s) = %s, want %s", key, entry.Value.String(), expectedValue)
+		}
+	}
+}
+
+func TestSSTableGetKeyNotInBloomFilter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.sst")
+	opts := DefaultOptions(dir)
+
+	writer, err := NewSSTableWriter(1, path, 100, opts)
+	if err != nil {
+		t.Fatalf("NewSSTableWriter failed: %v", err)
+	}
+
+	// Only add keys with prefix "exists"
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("exists%03d", i)
+		writer.Add(Entry{Key: []byte(key), Value: StringValue("value"), Sequence: uint64(i)})
+	}
+	writer.Finish(0)
+	writer.Close()
+
+	sst, err := OpenSSTable(1, path)
+	if err != nil {
+		t.Fatalf("OpenSSTable failed: %v", err)
+	}
+	defer sst.Close()
+
+	cache := NewLRUCache(1024 * 1024)
+
+	// Query keys that definitely don't exist (bloom filter should reject most)
+	notFoundCount := 0
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("notexists%06d", i)
+		_, found, err := sst.Get([]byte(key), cache, true)
+		if err != nil {
+			t.Errorf("Get(%s) error: %v", key, err)
+			continue
+		}
+		if !found {
+			notFoundCount++
+		}
+	}
+
+	if notFoundCount != 1000 {
+		t.Errorf("Expected all 1000 keys to not be found, got %d not found", notFoundCount)
+	}
+}
+
+func TestSSTableGetWithVerifyChecksumDisabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.sst")
+	opts := DefaultOptions(dir)
+
+	writer, err := NewSSTableWriter(1, path, 10, opts)
+	if err != nil {
+		t.Fatalf("NewSSTableWriter failed: %v", err)
+	}
+
+	writer.Add(Entry{Key: []byte("key"), Value: StringValue("value"), Sequence: 1})
+	writer.Finish(0)
+	writer.Close()
+
+	sst, err := OpenSSTable(1, path)
+	if err != nil {
+		t.Fatalf("OpenSSTable failed: %v", err)
+	}
+	defer sst.Close()
+
+	cache := NewLRUCache(1024 * 1024)
+
+	// Get with verify=false
+	entry, found, err := sst.Get([]byte("key"), cache, false)
+	if err != nil {
+		t.Fatalf("Get error: %v", err)
+	}
+	if !found {
+		t.Fatal("key not found")
+	}
+	if entry.Value.String() != "value" {
+		t.Errorf("value = %s, want value", entry.Value.String())
+	}
+}
+
+func TestSSTableMetadataFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.sst")
+	opts := DefaultOptions(dir)
+
+	writer, err := NewSSTableWriter(42, path, 100, opts)
+	if err != nil {
+		t.Fatalf("NewSSTableWriter failed: %v", err)
+	}
+
+	for i := 0; i < 50; i++ {
+		key := fmt.Sprintf("key%03d", i)
+		writer.Add(Entry{Key: []byte(key), Value: StringValue("value"), Sequence: uint64(i)})
+	}
+	writer.Finish(2) // Level 2
+	writer.Close()
+
+	sst, err := OpenSSTable(42, path)
+	if err != nil {
+		t.Fatalf("OpenSSTable failed: %v", err)
+	}
+	defer sst.Close()
+
+	if sst.ID != 42 {
+		t.Errorf("ID = %d, want 42", sst.ID)
+	}
+	if sst.Level != 2 {
+		t.Errorf("Level = %d, want 2", sst.Level)
+	}
+	if sst.Footer.NumKeys != 50 {
+		t.Errorf("NumKeys = %d, want 50", sst.Footer.NumKeys)
+	}
+	if sst.Footer.NumDataBlocks == 0 {
+		t.Error("NumDataBlocks should be > 0")
+	}
+	if string(sst.MinKey()) != "key000" {
+		t.Errorf("MinKey = %s, want key000", sst.MinKey())
+	}
+	if string(sst.MaxKey()) != "key049" {
+		t.Errorf("MaxKey = %s, want key049", sst.MaxKey())
+	}
+}
+
+func TestSSTableSingleEntry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.sst")
+	opts := DefaultOptions(dir)
+
+	writer, err := NewSSTableWriter(1, path, 1, opts)
+	if err != nil {
+		t.Fatalf("NewSSTableWriter failed: %v", err)
+	}
+
+	writer.Add(Entry{Key: []byte("onlykey"), Value: StringValue("onlyvalue"), Sequence: 1})
+	writer.Finish(0)
+	writer.Close()
+
+	sst, err := OpenSSTable(1, path)
+	if err != nil {
+		t.Fatalf("OpenSSTable failed: %v", err)
+	}
+	defer sst.Close()
+
+	cache := NewLRUCache(1024 * 1024)
+
+	// Get the only key
+	entry, found, err := sst.Get([]byte("onlykey"), cache, true)
+	if err != nil || !found {
+		t.Fatalf("Get failed: found=%v, err=%v", found, err)
+	}
+	if entry.Value.String() != "onlyvalue" {
+		t.Errorf("value = %s, want onlyvalue", entry.Value.String())
+	}
+
+	// Min and max should be the same
+	if string(sst.MinKey()) != string(sst.MaxKey()) {
+		t.Errorf("MinKey=%s MaxKey=%s should be equal for single entry", sst.MinKey(), sst.MaxKey())
+	}
+}

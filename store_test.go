@@ -1242,3 +1242,204 @@ func TestConvenienceFunctionsErrorPath(t *testing.T) {
 		t.Errorf("GetBool should return ErrKeyNotFound, got %v", err)
 	}
 }
+
+func TestStoreOpenInvalidDir(t *testing.T) {
+	// Test opening in a path that can't be created
+	_, err := Open("/nonexistent/deeply/nested/path", DefaultOptions("/nonexistent"))
+	if err == nil {
+		t.Error("Open should fail for invalid directory")
+	}
+}
+
+func TestStoreRecoverySequence(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write data across multiple sequences
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	for i := 0; i < 100; i++ {
+		store.PutInt64([]byte(fmt.Sprintf("key%d", i)), int64(i))
+	}
+	store.Close() // Close without flush
+
+	// Reopen and verify recovery
+	store, err = Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	// Verify all keys recovered
+	for i := 0; i < 100; i++ {
+		val, err := store.GetInt64([]byte(fmt.Sprintf("key%d", i)))
+		if err != nil {
+			t.Errorf("GetInt64(key%d) failed: %v", i, err)
+			continue
+		}
+		if val != int64(i) {
+			t.Errorf("key%d = %d, want %d", i, val, i)
+		}
+	}
+}
+
+func TestStoreMultipleFlushes(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 1024
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Write and flush multiple times
+	for round := 0; round < 5; round++ {
+		for i := 0; i < 100; i++ {
+			key := fmt.Sprintf("round%d-key%d", round, i)
+			store.PutString([]byte(key), fmt.Sprintf("value%d", round))
+		}
+		store.Flush()
+	}
+
+	// Verify all data
+	for round := 0; round < 5; round++ {
+		for i := 0; i < 100; i++ {
+			key := fmt.Sprintf("round%d-key%d", round, i)
+			val, err := store.GetString([]byte(key))
+			if err != nil {
+				t.Errorf("Get(%s) failed: %v", key, err)
+				continue
+			}
+			expected := fmt.Sprintf("value%d", round)
+			if val != expected {
+				t.Errorf("Get(%s) = %q, want %q", key, val, expected)
+			}
+		}
+	}
+}
+
+func TestStoreCompactEmpty(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Compact empty store should not error
+	if err := store.Compact(); err != nil {
+		t.Errorf("Compact on empty store failed: %v", err)
+	}
+}
+
+func TestStoreFlushEmpty(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Flush empty memtable should not error
+	if err := store.Flush(); err != nil {
+		t.Errorf("Flush on empty store failed: %v", err)
+	}
+}
+
+func TestStoreCloseMultipleTimes(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	store.PutString([]byte("key"), "value")
+
+	// Close multiple times should not panic
+	store.Close()
+	store.Close() // Second close
+}
+
+func TestStoreOperationsAfterClose(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	store.PutString([]byte("key"), "value")
+	store.Close()
+
+	// Operations after close should return ErrStoreClosed
+	_, err = store.Get([]byte("key"))
+	if err != ErrStoreClosed {
+		t.Errorf("Get after close: got %v, want ErrStoreClosed", err)
+	}
+
+	err = store.PutString([]byte("key2"), "value2")
+	if err != ErrStoreClosed {
+		t.Errorf("Put after close: got %v, want ErrStoreClosed", err)
+	}
+
+	err = store.Delete([]byte("key"))
+	if err != ErrStoreClosed {
+		t.Errorf("Delete after close: got %v, want ErrStoreClosed", err)
+	}
+
+	err = store.Flush()
+	if err != ErrStoreClosed {
+		t.Errorf("Flush after close: got %v, want ErrStoreClosed", err)
+	}
+}
+
+func TestStoreStatsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	stats := store.Stats()
+	if stats.MemtableSize != 0 {
+		t.Errorf("MemtableSize = %d, want 0", stats.MemtableSize)
+	}
+}
+
+func TestStoreStatsWithData(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Write some data
+	for i := 0; i < 100; i++ {
+		store.PutString([]byte(fmt.Sprintf("key%d", i)), "value-data")
+	}
+
+	stats := store.Stats()
+	if stats.MemtableSize == 0 {
+		t.Error("MemtableSize should be > 0 after writes")
+	}
+
+	// Flush and check SSTable stats
+	store.Flush()
+	stats = store.Stats()
+	foundTables := false
+	for _, level := range stats.Levels {
+		if level.NumTables > 0 {
+			foundTables = true
+			break
+		}
+	}
+	if !foundTables {
+		t.Error("Should have SSTables after flush")
+	}
+}

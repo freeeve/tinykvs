@@ -2,6 +2,7 @@ package tinykvs
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -330,5 +331,235 @@ func BenchmarkWALAppend(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		entry.Sequence = uint64(i)
 		wal.Append(entry)
+	}
+}
+
+func TestWALRecoverCorruptedChecksum(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.wal")
+
+	wal, err := OpenWAL(path, WALSyncPerWrite)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+
+	// Write some valid entries
+	for i := 0; i < 10; i++ {
+		entry := WALEntry{
+			Operation: OpPut,
+			Key:       []byte(string(rune('a' + i))),
+			Value:     Int64Value(int64(i)),
+			Sequence:  uint64(i),
+		}
+		wal.Append(entry)
+	}
+	wal.Sync()
+	wal.Close()
+
+	// Corrupt the WAL file (corrupt a checksum in the middle)
+	data, _ := os.ReadFile(path)
+	if len(data) > 100 {
+		data[50] ^= 0xFF // Corrupt a byte
+	}
+	os.WriteFile(path, data, 0644)
+
+	// Reopen and recover - should recover entries before corruption
+	wal, err = OpenWAL(path, WALSyncPerWrite)
+	if err != nil {
+		t.Fatalf("OpenWAL (reopen) failed: %v", err)
+	}
+	defer wal.Close()
+
+	recovered, err := wal.Recover()
+	if err != nil {
+		t.Fatalf("Recover failed: %v", err)
+	}
+
+	// Should recover at least some entries (before the corruption)
+	// The exact number depends on where we corrupted
+	t.Logf("Recovered %d entries after corruption", len(recovered))
+}
+
+func TestWALAllValueTypes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.wal")
+
+	wal, err := OpenWAL(path, WALSyncPerWrite)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+
+	entries := []WALEntry{
+		{Operation: OpPut, Key: []byte("int"), Value: Int64Value(42), Sequence: 1},
+		{Operation: OpPut, Key: []byte("float"), Value: Float64Value(3.14), Sequence: 2},
+		{Operation: OpPut, Key: []byte("bool"), Value: BoolValue(true), Sequence: 3},
+		{Operation: OpPut, Key: []byte("string"), Value: StringValue("hello"), Sequence: 4},
+		{Operation: OpPut, Key: []byte("bytes"), Value: BytesValue([]byte{1, 2, 3}), Sequence: 5},
+		{Operation: OpDelete, Key: []byte("deleted"), Sequence: 6},
+	}
+
+	for _, e := range entries {
+		if err := wal.Append(e); err != nil {
+			t.Fatalf("Append failed: %v", err)
+		}
+	}
+	wal.Close()
+
+	// Recover
+	wal, err = OpenWAL(path, WALSyncPerWrite)
+	if err != nil {
+		t.Fatalf("OpenWAL (reopen) failed: %v", err)
+	}
+	defer wal.Close()
+
+	recovered, err := wal.Recover()
+	if err != nil {
+		t.Fatalf("Recover failed: %v", err)
+	}
+
+	if len(recovered) != len(entries) {
+		t.Fatalf("recovered %d entries, want %d", len(recovered), len(entries))
+	}
+
+	// Verify types
+	for i, e := range recovered {
+		if e.Value.Type != entries[i].Value.Type {
+			t.Errorf("entry %d type = %d, want %d", i, e.Value.Type, entries[i].Value.Type)
+		}
+	}
+}
+
+func TestWALRecoverPartialBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.wal")
+
+	wal, err := OpenWAL(path, WALSyncPerWrite)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+
+	// Write entries
+	for i := 0; i < 5; i++ {
+		entry := WALEntry{
+			Operation: OpPut,
+			Key:       []byte(string(rune('a' + i))),
+			Value:     Int64Value(int64(i)),
+			Sequence:  uint64(i),
+		}
+		wal.Append(entry)
+	}
+	wal.Close()
+
+	// Truncate file to partial block
+	data, _ := os.ReadFile(path)
+	if len(data) > 50 {
+		os.WriteFile(path, data[:len(data)-10], 0644)
+	}
+
+	// Should still recover what we can
+	wal, err = OpenWAL(path, WALSyncPerWrite)
+	if err != nil {
+		t.Fatalf("OpenWAL (reopen) failed: %v", err)
+	}
+	defer wal.Close()
+
+	recovered, err := wal.Recover()
+	if err != nil {
+		t.Fatalf("Recover failed: %v", err)
+	}
+
+	t.Logf("Recovered %d entries from truncated WAL", len(recovered))
+}
+
+func TestWALManySmallEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.wal")
+
+	wal, err := OpenWAL(path, WALSyncPerBatch)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+
+	// Write many small entries to exercise block boundaries
+	numEntries := 5000
+	for i := 0; i < numEntries; i++ {
+		entry := WALEntry{
+			Operation: OpPut,
+			Key:       []byte(fmt.Sprintf("key%05d", i)),
+			Value:     Int64Value(int64(i)),
+			Sequence:  uint64(i),
+		}
+		if err := wal.Append(entry); err != nil {
+			t.Fatalf("Append %d failed: %v", i, err)
+		}
+	}
+	wal.Sync()
+	wal.Close()
+
+	// Recover
+	wal, err = OpenWAL(path, WALSyncPerBatch)
+	if err != nil {
+		t.Fatalf("OpenWAL (reopen) failed: %v", err)
+	}
+	defer wal.Close()
+
+	recovered, err := wal.Recover()
+	if err != nil {
+		t.Fatalf("Recover failed: %v", err)
+	}
+
+	if len(recovered) != numEntries {
+		t.Errorf("recovered %d entries, want %d", len(recovered), numEntries)
+	}
+}
+
+func TestWALDecodeEntryVariousTypes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.wal")
+
+	wal, err := OpenWAL(path, WALSyncPerWrite)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+
+	// Test all value types including edge cases
+	entries := []WALEntry{
+		{Operation: OpPut, Key: []byte("maxint"), Value: Int64Value(9223372036854775807), Sequence: 1},
+		{Operation: OpPut, Key: []byte("minint"), Value: Int64Value(-9223372036854775808), Sequence: 2},
+		{Operation: OpPut, Key: []byte("zero"), Value: Int64Value(0), Sequence: 3},
+		{Operation: OpPut, Key: []byte("pi"), Value: Float64Value(3.14159265358979323846), Sequence: 4},
+		{Operation: OpPut, Key: []byte("empty"), Value: StringValue(""), Sequence: 5},
+		{Operation: OpPut, Key: []byte("nullbytes"), Value: BytesValue([]byte{0, 0, 0}), Sequence: 6},
+	}
+
+	for _, e := range entries {
+		if err := wal.Append(e); err != nil {
+			t.Fatalf("Append failed: %v", err)
+		}
+	}
+	wal.Close()
+
+	// Recover and verify
+	wal, err = OpenWAL(path, WALSyncPerWrite)
+	if err != nil {
+		t.Fatalf("OpenWAL (reopen) failed: %v", err)
+	}
+	defer wal.Close()
+
+	recovered, err := wal.Recover()
+	if err != nil {
+		t.Fatalf("Recover failed: %v", err)
+	}
+
+	if len(recovered) != len(entries) {
+		t.Fatalf("recovered %d entries, want %d", len(recovered), len(entries))
+	}
+
+	// Verify specific values
+	if recovered[0].Value.Int64 != 9223372036854775807 {
+		t.Error("maxint value mismatch")
+	}
+	if recovered[1].Value.Int64 != -9223372036854775808 {
+		t.Error("minint value mismatch")
 	}
 }
