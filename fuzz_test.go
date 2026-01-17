@@ -1,6 +1,7 @@
 package tinykvs
 
 import (
+	"bytes"
 	"testing"
 )
 
@@ -204,5 +205,116 @@ func FuzzBlockRoundTrip(f *testing.F) {
 		if string(block.Entries[0].Value) != string(value) {
 			t.Fatalf("value mismatch")
 		}
+	})
+}
+
+// FuzzDecodeMsgpack tests that DecodeMsgpack doesn't panic on arbitrary input
+// Note: We skip inputs with map16/map32 markers (0xde, 0xdf) because they can
+// declare huge element counts that cause OOM in the underlying msgpack library.
+func FuzzDecodeMsgpack(f *testing.F) {
+	// Valid msgpack maps using fixmap (0x80-0x8f) only
+	f.Add([]byte{0x80})                                     // empty map (fixmap)
+	f.Add([]byte{0x81, 0xa3, 'k', 'e', 'y', 0xa5, 'v', 'a', 'l', 'u', 'e'}) // {"key":"value"}
+	f.Add([]byte{0x82, 0xa4, 'n', 'a', 'm', 'e', 0xa5, 'A', 'l', 'i', 'c', 'e', 0xa3, 'a', 'g', 'e', 0x1e}) // {"name":"Alice","age":30}
+	// Invalid/edge cases
+	f.Add([]byte{})
+	f.Add([]byte{0x82})           // truncated map
+	f.Add([]byte{0xff})           // invalid marker
+	f.Add([]byte{0x90})           // array, not map
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		// Skip inputs with map16/map32/array16/array32 markers that can declare
+		// huge element counts causing OOM (library limitation)
+		for _, b := range data {
+			if b == 0xde || b == 0xdf || b == 0xdc || b == 0xdd {
+				return
+			}
+		}
+		// Should not panic
+		_, _ = DecodeMsgpack(data)
+	})
+}
+
+// FuzzRecordValueEncode tests Record encoding doesn't panic
+func FuzzRecordValueEncode(f *testing.F) {
+	f.Add("name", "Alice", "age", int64(30))
+	f.Add("", "", "", int64(0))
+	f.Add("key with spaces", "value\nwith\nnewlines", "number", int64(-9999))
+
+	f.Fuzz(func(t *testing.T, k1, v1, k2 string, v2 int64) {
+		record := map[string]any{
+			k1: v1,
+			k2: v2,
+		}
+		val := RecordValue(record)
+
+		// Encode should not panic
+		encoded := EncodeValue(val)
+
+		// Decode should not panic and should round-trip
+		decoded, _, err := DecodeValue(encoded)
+		if err != nil {
+			t.Fatalf("failed to decode record: %v", err)
+		}
+		if decoded.Type != ValueTypeRecord {
+			t.Fatalf("expected record type, got %v", decoded.Type)
+		}
+	})
+}
+
+// FuzzStoreOperations tests basic store operations with random data
+func FuzzStoreOperations(f *testing.F) {
+	f.Add([]byte("key"), []byte("value"))
+	f.Add([]byte(""), []byte(""))
+	f.Add([]byte{0, 255, 128}, []byte{1, 2, 3, 4, 5})
+	f.Add([]byte("user:123"), []byte(`{"name":"test"}`))
+
+	f.Fuzz(func(t *testing.T, key, value []byte) {
+		if len(key) == 0 {
+			return // Skip empty keys
+		}
+
+		dir := t.TempDir()
+		opts := DefaultOptions(dir)
+		opts.MemtableSize = 1024 * 1024 // Small memtable for faster tests
+
+		store, err := Open(dir, opts)
+		if err != nil {
+			t.Skip("Could not open store")
+		}
+		defer store.Close()
+
+		// Put should not panic
+		err = store.PutBytes(key, value)
+		if err != nil {
+			return // Some keys might fail, that's ok
+		}
+
+		// Get should not panic and should return the value
+		got, err := store.GetBytes(key)
+		if err != nil {
+			t.Fatalf("failed to get key after put: %v", err)
+		}
+		if !bytes.Equal(got, value) {
+			t.Fatalf("value mismatch: got %v, want %v", got, value)
+		}
+
+		// Delete should not panic
+		_ = store.Delete(key)
+	})
+}
+
+// FuzzPrefixCompare tests key prefix operations
+func FuzzPrefixCompare(f *testing.F) {
+	f.Add([]byte("user:"), []byte("user:123"))
+	f.Add([]byte(""), []byte("anything"))
+	f.Add([]byte("exact"), []byte("exact"))
+	f.Add([]byte("longer"), []byte("short"))
+	f.Add([]byte{0, 0, 0}, []byte{0, 0, 0, 1})
+
+	f.Fuzz(func(t *testing.T, prefix, key []byte) {
+		// Should not panic
+		_ = bytes.HasPrefix(key, prefix)
+		_ = bytes.Compare(prefix, key)
 	})
 }

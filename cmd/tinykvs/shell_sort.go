@@ -109,7 +109,13 @@ func ParseOrderBy(sql string) (string, []SortOrder) {
 		return sql, nil
 	}
 
-	orderPart := sql[idx+len(" order by "):]
+	// Bounds check - index from lowercase string must be valid for original
+	startIdx := idx + len(" order by ")
+	if startIdx > len(sql) || idx > len(sql) {
+		return sql, nil
+	}
+
+	orderPart := sql[startIdx:]
 	sql = sql[:idx]
 
 	// Remove any trailing LIMIT clause from orderPart
