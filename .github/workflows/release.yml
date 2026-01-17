@@ -98,10 +98,13 @@ jobs:
         with:
           path: artifacts
 
-      - name: Create checksums
+      - name: Prepare release files
         run: |
-          cd artifacts
-          find . -type f -name 'tinykvs-*' -exec mv {} . \;
+          mkdir -p release
+          # Find all binary files and copy to release dir
+          find artifacts -type f -name 'tinykvs-*' -exec cp {} release/ \;
+          ls -la release/
+          cd release
           sha256sum tinykvs-* > checksums.txt
           cat checksums.txt
 
@@ -109,8 +112,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            artifacts/tinykvs-*
-            artifacts/checksums.txt
+            release/*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
