@@ -456,7 +456,22 @@ TinyKVS includes an interactive SQL-like shell for exploring and manipulating da
 
 ```bash
 go install github.com/freeeve/tinykvs/cmd/tinykvs@latest
-tinykvs /path/to/db
+tinykvs shell -dir /path/to/db
+
+# Or use environment variable
+export TINYKVS_STORE=/path/to/db
+tinykvs shell
+```
+
+Results are displayed in a formatted table:
+```
+┌────────┬───────────────────────────┐
+│ k      │ v                         │
+├────────┼───────────────────────────┤
+│ user:1 │ {"age":30,"name":"Alice"} │
+│ user:2 │ {"age":25,"name":"Bob"}   │
+└────────┴───────────────────────────┘
+(2 rows) scanned 2 keys, 0 blocks, 0ms
 ```
 
 ### SQL Commands
@@ -472,9 +487,15 @@ SELECT * FROM kv LIMIT 100
 SELECT v.name, v.age FROM kv WHERE k = 'user:1'
 SELECT v.address.city FROM kv WHERE k = 'user:1'
 
+-- ORDER BY (buffers results for sorting)
+SELECT * FROM kv ORDER BY k DESC LIMIT 10
+SELECT v.name, v.age FROM kv ORDER BY v.age DESC, v.name
+SELECT * FROM kv WHERE k LIKE 'user:%' ORDER BY v.score LIMIT 100
+
 -- Insert data (JSON auto-detected as records)
 INSERT INTO kv VALUES ('user:1', '{"name":"Alice","age":30}')
 INSERT INTO kv VALUES ('key', 'simple string value')
+INSERT INTO kv VALUES ('bin', x'deadbeef')  -- hex bytes
 
 -- Update and delete
 UPDATE kv SET v = 'newvalue' WHERE k = 'key'
@@ -485,15 +506,39 @@ DELETE FROM kv WHERE k LIKE 'temp:%'
 ### Shell Commands
 
 ```
-\help      Show help
-\stats     Show store statistics
-\flush     Flush memtable to disk
-\compact   Run compaction
-\tables    Show table schema
-\export    Export all data to CSV
-\import    Import data from CSV
-\quit      Exit shell
+\help, \h, \?      Show help
+\stats             Show store statistics
+\flush             Flush memtable to disk
+\compact           Run compaction
+\tables            Show table schema
+\export <file>     Export to CSV
+\import <file>     Import from CSV
+\q, \quit          Exit shell
 ```
+
+### Binary Key Functions
+
+The shell supports functions for constructing binary keys:
+
+```sql
+-- uint64_be(n) - 8-byte big-endian encoding
+SELECT * FROM kv WHERE k = x'14' || uint64_be(28708)
+
+-- uint64_le(n) - 8-byte little-endian encoding
+-- uint32_be(n) - 4-byte big-endian encoding
+-- uint32_le(n) - 4-byte little-endian encoding
+
+-- byte(n) - single byte (0-255)
+SELECT * FROM kv WHERE k = byte(0x14) || uint64_be(12345)
+
+-- fnv64(s) - FNV-1a 64-bit hash of string
+SELECT * FROM kv WHERE k LIKE byte(0x10) || fnv64('user-123') || '%'
+
+-- Hex concatenation
+SELECT * FROM kv WHERE k = x'14' || uint64_be(28708) || fnv64('item-456')
+```
+
+These are useful for querying data with composite binary keys.
 
 ### CSV Import/Export
 
