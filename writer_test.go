@@ -2860,12 +2860,12 @@ func TestPrefixScanEmptyPrefix(t *testing.T) {
 func TestL1ToL2Compaction(t *testing.T) {
 	dir := t.TempDir()
 	opts := DefaultOptions(dir)
-	opts.MemtableSize = 4 * 1024           // 4KB memtable
-	opts.L1MaxSize = 8 * 1024              // 8KB L1 max - triggers L1 compaction quickly
-	opts.L0CompactionTrigger = 2           // Trigger L0 compaction after 2 files
-	opts.CompactionInterval = time.Hour    // Disable background compaction
-	opts.LevelSizeMultiplier = 2           // L2 = 16KB
-	opts.BlockCacheSize = 0                // No cache
+	opts.MemtableSize = 4 * 1024        // 4KB memtable
+	opts.L1MaxSize = 8 * 1024           // 8KB L1 max - triggers L1 compaction quickly
+	opts.L0CompactionTrigger = 2        // Trigger L0 compaction after 2 files
+	opts.CompactionInterval = time.Hour // Disable background compaction
+	opts.LevelSizeMultiplier = 2        // L2 = 16KB
+	opts.BlockCacheSize = 0             // No cache
 	opts.DisableBloomFilter = true
 
 	store, err := Open(dir, opts)
@@ -2936,7 +2936,7 @@ func TestCompactNoOverlapWithNextLevel(t *testing.T) {
 	dir := t.TempDir()
 	opts := DefaultOptions(dir)
 	opts.MemtableSize = 1024
-	opts.L1MaxSize = 1024      // 1KB L1 max - very small to trigger L1->L2
+	opts.L1MaxSize = 1024 // 1KB L1 max - very small to trigger L1->L2
 	opts.L0CompactionTrigger = 2
 	opts.LevelSizeMultiplier = 2
 	opts.MaxLevels = 4
@@ -3221,7 +3221,7 @@ func TestCompactL1ToL2WithEmptyL2(t *testing.T) {
 	dir := t.TempDir()
 	opts := DefaultOptions(dir)
 	opts.MemtableSize = 1024
-	opts.L1MaxSize = 2048      // 2KB L1 max
+	opts.L1MaxSize = 2048 // 2KB L1 max
 	opts.L0CompactionTrigger = 2
 	opts.LevelSizeMultiplier = 10
 	opts.MaxLevels = 4
@@ -3343,9 +3343,9 @@ func TestMergeTablesMultipleOutputs(t *testing.T) {
 
 	dir := t.TempDir()
 	opts := DefaultOptions(dir)
-	opts.MemtableSize = 16 * 1024 * 1024 // 16MB memtable
-	opts.L0CompactionTrigger = 100       // Don't auto-compact
-	opts.WALSyncMode = WALSyncNone       // Fast writes
+	opts.MemtableSize = 16 * 1024 * 1024   // 16MB memtable
+	opts.L0CompactionTrigger = 100         // Don't auto-compact
+	opts.WALSyncMode = WALSyncNone         // Fast writes
 	opts.CompressionType = CompressionNone // Disable compression so we hit size limits
 	opts.CompactionInterval = time.Hour
 

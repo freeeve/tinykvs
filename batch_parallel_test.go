@@ -8,13 +8,13 @@ import (
 )
 
 type TestUser struct {
-	ID       int64   `msgpack:"id"`
-	Name     string  `msgpack:"name"`
-	Email    string  `msgpack:"email"`
-	Age      int     `msgpack:"age"`
-	Balance  float64 `msgpack:"balance"`
-	Active   bool    `msgpack:"active"`
-	Tags     []string `msgpack:"tags"`
+	ID      int64    `msgpack:"id"`
+	Name    string   `msgpack:"name"`
+	Email   string   `msgpack:"email"`
+	Age     int      `msgpack:"age"`
+	Balance float64  `msgpack:"balance"`
+	Active  bool     `msgpack:"active"`
+	Tags    []string `msgpack:"tags"`
 }
 
 func makeTestUsers(n int) []KeyStruct {
@@ -128,4 +128,3 @@ func TestStorePutStructs(t *testing.T) {
 		}
 	}
 }
-
