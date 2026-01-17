@@ -353,3 +353,203 @@ func TestStoreAggregationsNestedFields(t *testing.T) {
 		t.Errorf("Sum(payment.tax) = %f, want 30", sumTax)
 	}
 }
+
+func TestScanPrefixMaps(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Insert some map records
+	store.PutMap([]byte("user:1"), map[string]any{"name": "Alice", "age": 30})
+	store.PutMap([]byte("user:2"), map[string]any{"name": "Bob", "age": 25})
+	store.PutMap([]byte("user:3"), map[string]any{"name": "Carol", "age": 35})
+	store.PutString([]byte("other:1"), "not a map") // should be skipped
+
+	var names []string
+	err = store.ScanPrefixMaps([]byte("user:"), func(key []byte, m map[string]any) bool {
+		if name, ok := m["name"].(string); ok {
+			names = append(names, name)
+		}
+		return true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(names) != 3 {
+		t.Errorf("got %d names, want 3", len(names))
+	}
+}
+
+func TestScanPrefixStructs(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	type User struct {
+		Name string `msgpack:"name"`
+		Age  int    `msgpack:"age"`
+	}
+
+	// Insert some struct records
+	store.PutStruct([]byte("user:1"), User{Name: "Alice", Age: 30})
+	store.PutStruct([]byte("user:2"), User{Name: "Bob", Age: 25})
+	store.PutStruct([]byte("user:3"), User{Name: "Carol", Age: 35})
+
+	var users []User
+	err = ScanPrefixStructs(store, []byte("user:"), func(key []byte, u *User) bool {
+		users = append(users, *u)
+		return true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(users) != 3 {
+		t.Errorf("got %d users, want 3", len(users))
+	}
+	if users[0].Name != "Alice" {
+		t.Errorf("first user = %s, want Alice", users[0].Name)
+	}
+}
+
+func TestScanRangeMaps(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	store.PutMap([]byte("key:01"), map[string]any{"v": 1})
+	store.PutMap([]byte("key:02"), map[string]any{"v": 2})
+	store.PutMap([]byte("key:03"), map[string]any{"v": 3})
+	store.PutMap([]byte("key:04"), map[string]any{"v": 4})
+	store.PutMap([]byte("key:05"), map[string]any{"v": 5})
+
+	var count int
+	err = store.ScanRangeMaps([]byte("key:02"), []byte("key:04"), func(key []byte, m map[string]any) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if count != 2 {
+		t.Errorf("got %d, want 2 (key:02, key:03)", count)
+	}
+}
+
+func TestScanRangeStructs(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	type Item struct {
+		ID    int    `msgpack:"id"`
+		Value string `msgpack:"value"`
+	}
+
+	store.PutStruct([]byte("item:01"), Item{ID: 1, Value: "one"})
+	store.PutStruct([]byte("item:02"), Item{ID: 2, Value: "two"})
+	store.PutStruct([]byte("item:03"), Item{ID: 3, Value: "three"})
+	store.PutStruct([]byte("item:04"), Item{ID: 4, Value: "four"})
+	store.PutStruct([]byte("item:05"), Item{ID: 5, Value: "five"})
+
+	var items []Item
+	err = ScanRangeStructs(store, []byte("item:02"), []byte("item:05"), func(key []byte, item *Item) bool {
+		items = append(items, *item)
+		return true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(items) != 3 {
+		t.Errorf("got %d items, want 3 (item:02, item:03, item:04)", len(items))
+	}
+	if items[0].ID != 2 {
+		t.Errorf("first item ID = %d, want 2", items[0].ID)
+	}
+	if items[2].ID != 4 {
+		t.Errorf("last item ID = %d, want 4", items[2].ID)
+	}
+}
+
+func TestScanRangeJson(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	type Event struct {
+		Type string `json:"type"`
+		Time int    `json:"time"`
+	}
+
+	store.PutJson([]byte("event:100"), Event{Type: "click", Time: 100})
+	store.PutJson([]byte("event:200"), Event{Type: "view", Time: 200})
+	store.PutJson([]byte("event:300"), Event{Type: "submit", Time: 300})
+	store.PutJson([]byte("event:400"), Event{Type: "load", Time: 400})
+
+	var events []Event
+	err = ScanRangeJson(store, []byte("event:200"), []byte("event:400"), func(key []byte, e *Event) bool {
+		events = append(events, *e)
+		return true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(events) != 2 {
+		t.Errorf("got %d events, want 2 (event:200, event:300)", len(events))
+	}
+	if events[0].Type != "view" {
+		t.Errorf("first event type = %s, want view", events[0].Type)
+	}
+}
+
+func TestScanPrefixJson(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	type Product struct {
+		Name  string  `json:"name"`
+		Price float64 `json:"price"`
+	}
+
+	store.PutJson([]byte("product:1"), Product{Name: "Widget", Price: 9.99})
+	store.PutJson([]byte("product:2"), Product{Name: "Gadget", Price: 19.99})
+
+	var products []Product
+	err = ScanPrefixJson(store, []byte("product:"), func(key []byte, p *Product) bool {
+		products = append(products, *p)
+		return true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(products) != 2 {
+		t.Errorf("got %d products, want 2", len(products))
+	}
+	if products[0].Name != "Widget" {
+		t.Errorf("first product = %s, want Widget", products[0].Name)
+	}
+}

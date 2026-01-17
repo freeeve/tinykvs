@@ -1,12 +1,22 @@
 package tinykvs
 
 import (
+	"bytes"
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 
 	"github.com/vmihailenco/msgpack/v5"
 )
+
+// readerPool provides reusable bytes.Reader instances to reduce allocations
+// during scan operations.
+var readerPool = sync.Pool{
+	New: func() any {
+		return bytes.NewReader(nil)
+	},
+}
 
 // PutInt64 stores an int64 value.
 func (s *Store) PutInt64(key []byte, value int64) error {
@@ -56,6 +66,7 @@ func (s *Store) PutStruct(key []byte, v any) error {
 // GetStruct retrieves msgpack data and decodes it into the provided struct pointer.
 // The dest parameter must be a pointer to a struct.
 // Supports both ValueTypeMsgpack (efficient) and ValueTypeRecord (legacy).
+// Uses pooled decoder for reduced allocations.
 func (s *Store) GetStruct(key []byte, dest any) error {
 	val, err := s.Get(key)
 	if err != nil {
@@ -64,8 +75,15 @@ func (s *Store) GetStruct(key []byte, dest any) error {
 
 	switch val.Type {
 	case ValueTypeMsgpack:
-		// Direct unmarshal from raw bytes - most efficient
-		return msgpack.Unmarshal(val.Bytes, dest)
+		// Use pooled reader and decoder
+		r := readerPool.Get().(*bytes.Reader)
+		r.Reset(val.Bytes)
+		dec := msgpack.GetDecoder()
+		dec.Reset(r)
+		err := dec.Decode(dest)
+		msgpack.PutDecoder(dec)
+		readerPool.Put(r)
+		return err
 	case ValueTypeRecord:
 		// Legacy: convert from map using reflection
 		return mapToStruct(val.Record, dest)
@@ -151,6 +169,7 @@ func (s *Store) GetBytes(key []byte) ([]byte, error) {
 }
 
 // GetMap retrieves a structured record by key.
+// Uses pooled decoder for reduced allocations.
 func (s *Store) GetMap(key []byte) (map[string]any, error) {
 	val, err := s.Get(key)
 	if err != nil {
@@ -159,7 +178,15 @@ func (s *Store) GetMap(key []byte) (map[string]any, error) {
 	switch val.Type {
 	case ValueTypeMsgpack:
 		var m map[string]any
-		if err := msgpack.Unmarshal(val.Bytes, &m); err != nil {
+		// Use pooled reader and decoder
+		r := readerPool.Get().(*bytes.Reader)
+		r.Reset(val.Bytes)
+		dec := msgpack.GetDecoder()
+		dec.Reset(r)
+		err := dec.Decode(&m)
+		msgpack.PutDecoder(dec)
+		readerPool.Put(r)
+		if err != nil {
 			return nil, err
 		}
 		return m, nil
@@ -381,4 +408,122 @@ func setFieldValue(fv reflect.Value, val any) error {
 	}
 
 	return nil // Skip incompatible types silently
+}
+
+// ScanPrefixMaps scans keys with the given prefix and decodes each value as a map.
+func (s *Store) ScanPrefixMaps(prefix []byte, fn func(key []byte, m map[string]any) bool) error {
+	return s.ScanPrefix(prefix, func(key []byte, val Value) bool {
+		m, err := decodeAsMap(val)
+		if err != nil {
+			return true // skip invalid entries
+		}
+		return fn(key, m)
+	})
+}
+
+// ScanRangeMaps scans keys in [start, end) and decodes each value as a map.
+func (s *Store) ScanRangeMaps(start, end []byte, fn func(key []byte, m map[string]any) bool) error {
+	return s.ScanRange(start, end, func(key []byte, val Value) bool {
+		m, err := decodeAsMap(val)
+		if err != nil {
+			return true // skip invalid entries
+		}
+		return fn(key, m)
+	})
+}
+
+// ScanPrefixStructs scans keys with the given prefix and decodes each value into a struct.
+func ScanPrefixStructs[T any](s *Store, prefix []byte, fn func(key []byte, val *T) bool) error {
+	return s.ScanPrefix(prefix, func(key []byte, v Value) bool {
+		var dest T
+		if err := decodeAsStruct(v, &dest); err != nil {
+			return true // skip invalid entries
+		}
+		return fn(key, &dest)
+	})
+}
+
+// ScanRangeStructs scans keys in [start, end) and decodes each value into a struct.
+func ScanRangeStructs[T any](s *Store, start, end []byte, fn func(key []byte, val *T) bool) error {
+	return s.ScanRange(start, end, func(key []byte, v Value) bool {
+		var dest T
+		if err := decodeAsStruct(v, &dest); err != nil {
+			return true // skip invalid entries
+		}
+		return fn(key, &dest)
+	})
+}
+
+// ScanPrefixJson scans keys with the given prefix and decodes JSON values into a struct.
+func ScanPrefixJson[T any](s *Store, prefix []byte, fn func(key []byte, val *T) bool) error {
+	return s.ScanPrefix(prefix, func(key []byte, v Value) bool {
+		if v.Type != ValueTypeString {
+			return true // skip non-JSON entries
+		}
+		var dest T
+		if err := DecodeJson(v.Bytes, &dest); err != nil {
+			return true // skip invalid entries
+		}
+		return fn(key, &dest)
+	})
+}
+
+// ScanRangeJson scans keys in [start, end) and decodes JSON values into a struct.
+func ScanRangeJson[T any](s *Store, start, end []byte, fn func(key []byte, val *T) bool) error {
+	return s.ScanRange(start, end, func(key []byte, v Value) bool {
+		if v.Type != ValueTypeString {
+			return true // skip non-JSON entries
+		}
+		var dest T
+		if err := DecodeJson(v.Bytes, &dest); err != nil {
+			return true // skip invalid entries
+		}
+		return fn(key, &dest)
+	})
+}
+
+// decodeAsMap decodes a Value as map[string]any.
+// Uses pooled decoder and reader for reduced allocations.
+func decodeAsMap(val Value) (map[string]any, error) {
+	switch val.Type {
+	case ValueTypeMsgpack:
+		var m map[string]any
+		// Use pooled reader and decoder
+		r := readerPool.Get().(*bytes.Reader)
+		r.Reset(val.Bytes)
+		dec := msgpack.GetDecoder()
+		dec.Reset(r)
+		err := dec.Decode(&m)
+		msgpack.PutDecoder(dec)
+		readerPool.Put(r)
+		if err != nil {
+			return nil, err
+		}
+		return m, nil
+	case ValueTypeRecord:
+		return val.Record, nil
+	default:
+		return nil, fmt.Errorf("expected msgpack or record, got %d", val.Type)
+	}
+}
+
+// decodeAsStruct decodes a Value into a struct pointer.
+// Uses pooled decoder and reader for reduced allocations.
+func decodeAsStruct(val Value, dest any) error {
+	switch val.Type {
+	case ValueTypeMsgpack:
+		// Use pooled reader and decoder
+		r := readerPool.Get().(*bytes.Reader)
+		r.Reset(val.Bytes)
+		dec := msgpack.GetDecoder()
+		dec.Reset(r)
+		err := dec.Decode(dest)
+		msgpack.PutDecoder(dec)
+		readerPool.Put(r)
+		return err
+	case ValueTypeRecord:
+		return mapToStruct(val.Record, dest)
+	default:
+		return fmt.Errorf("expected msgpack or record, got %d", val.Type)
+	}
 }

@@ -179,9 +179,13 @@ func (r *reader) GetLevels() [][]*SSTable {
 // ScanPrefix iterates over all keys with the given prefix in sorted order.
 // Keys are deduplicated (newest version wins) and tombstones are skipped.
 // Return false from the callback to stop iteration early.
+//
+// The callback may safely call other Store methods including writes.
+// Keys and values passed to the callback are copies owned by the caller.
 func (r *reader) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool) error {
+	// Collect all matching entries while holding the lock
+	// This ensures consistent snapshot even if compaction runs during callback
 	r.mu.RLock()
-	defer r.mu.RUnlock()
 
 	// Build a prefix scanner with all sources
 	scanner := newPrefixScanner(prefix, r.cache, r.opts.VerifyChecksums)
@@ -217,8 +221,14 @@ func (r *reader) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool
 
 	scanner.init()
 
-	// Iterate and call callback
+	// Collect all matching entries into a slice while holding the lock
+	type scanEntry struct {
+		key   []byte
+		value Value
+	}
+	var entries []scanEntry
 	var lastKey []byte
+
 	for scanner.next() {
 		entry := scanner.entry()
 
@@ -226,7 +236,10 @@ func (r *reader) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool
 		if lastKey != nil && CompareKeys(entry.Key, lastKey) == 0 {
 			continue
 		}
-		lastKey = entry.Key
+
+		// Copy key for dedup tracking
+		lastKey = make([]byte, len(entry.Key))
+		copy(lastKey, entry.Key)
 
 		// Skip tombstones
 		if entry.Value.IsTombstone() {
@@ -238,13 +251,50 @@ func (r *reader) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool
 			break
 		}
 
-		if !fn(entry.Key, entry.Value) {
+		// Make copies (entry data references internal buffers that may be reused)
+		keyCopy := make([]byte, len(entry.Key))
+		copy(keyCopy, entry.Key)
+
+		entries = append(entries, scanEntry{
+			key:   keyCopy,
+			value: copyValue(entry.Value),
+		})
+	}
+
+	scanner.close()
+	r.mu.RUnlock()
+
+	// Call callbacks with lock released (safe to write in callbacks)
+	for _, e := range entries {
+		if !fn(e.key, e.value) {
 			break
 		}
 	}
 
-	scanner.close()
 	return nil
+}
+
+// copyValue creates a deep copy of a Value.
+func copyValue(v Value) Value {
+	result := Value{
+		Type:    v.Type,
+		Int64:   v.Int64,
+		Float64: v.Float64,
+		Bool:    v.Bool,
+	}
+	if v.Bytes != nil {
+		result.Bytes = make([]byte, len(v.Bytes))
+		copy(result.Bytes, v.Bytes)
+	}
+	if v.Pointer != nil {
+		result.Pointer = &dataPointer{
+			FileID:      v.Pointer.FileID,
+			BlockOffset: v.Pointer.BlockOffset,
+			DataOffset:  v.Pointer.DataOffset,
+			Length:      v.Pointer.Length,
+		}
+	}
+	return result
 }
 
 // hasPrefix returns true if key starts with prefix.

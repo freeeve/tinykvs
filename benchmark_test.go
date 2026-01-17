@@ -1,8 +1,11 @@
 package tinykvs
 
 import (
+	"bytes"
 	"fmt"
 	"testing"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 type benchUser struct {
@@ -295,5 +298,315 @@ func BenchmarkGetJson(b *testing.B) {
 		key := fmt.Sprintf("user:%08d", i%n)
 		var got User
 		store.GetJson([]byte(key), &got)
+	}
+}
+
+func BenchmarkPutStructIndividual(b *testing.B) {
+	dir := b.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		b.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	user := benchUser{
+		Name:    "Alice Smith",
+		Email:   "alice@example.com",
+		Age:     30,
+		Active:  true,
+		Balance: 1234.56,
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		key := fmt.Sprintf("user:%08d", i)
+		store.PutStruct([]byte(key), user)
+	}
+}
+
+func BenchmarkPutStructBatch100(b *testing.B) {
+	dir := b.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		b.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	user := benchUser{
+		Name:    "Alice Smith",
+		Email:   "alice@example.com",
+		Age:     30,
+		Active:  true,
+		Balance: 1234.56,
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		batch := NewBatch()
+		for j := 0; j < 100; j++ {
+			key := fmt.Sprintf("user:%08d:%04d", i, j)
+			batch.PutStruct([]byte(key), user)
+		}
+		store.WriteBatch(batch)
+	}
+}
+
+func BenchmarkPutMapIndividual(b *testing.B) {
+	dir := b.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		b.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	record := map[string]any{
+		"name":    "Alice Smith",
+		"email":   "alice@example.com",
+		"age":     30,
+		"active":  true,
+		"balance": 1234.56,
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		key := fmt.Sprintf("user:%08d", i)
+		store.PutMap([]byte(key), record)
+	}
+}
+
+func BenchmarkPutMapBatch100(b *testing.B) {
+	dir := b.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		b.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	record := map[string]any{
+		"name":    "Alice Smith",
+		"email":   "alice@example.com",
+		"age":     30,
+		"active":  true,
+		"balance": 1234.56,
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		batch := NewBatch()
+		for j := 0; j < 100; j++ {
+			key := fmt.Sprintf("user:%08d:%04d", i, j)
+			batch.PutMap([]byte(key), record)
+		}
+		store.WriteBatch(batch)
+	}
+}
+
+// BenchmarkBatchEncodeOnly tests just batch encoding without writing
+func BenchmarkBatchEncodeStructs(b *testing.B) {
+	user := benchUser{
+		Name:    "Alice Smith",
+		Email:   "alice@example.com",
+		Age:     30,
+		Active:  true,
+		Balance: 1234.56,
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		batch := NewBatch()
+		for j := 0; j < 100; j++ {
+			key := fmt.Sprintf("user:%08d:%04d", i, j)
+			batch.PutStruct([]byte(key), user)
+		}
+	}
+}
+
+// BenchmarkBatchEncodeMaps tests just batch encoding without writing
+func BenchmarkBatchEncodeMaps(b *testing.B) {
+	record := map[string]any{
+		"name":    "Alice Smith",
+		"email":   "alice@example.com",
+		"age":     30,
+		"active":  true,
+		"balance": 1234.56,
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		batch := NewBatch()
+		for j := 0; j < 100; j++ {
+			key := fmt.Sprintf("user:%08d:%04d", i, j)
+			batch.PutMap([]byte(key), record)
+		}
+	}
+}
+
+func BenchmarkScanPrefixStructs(b *testing.B) {
+	dir := b.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		b.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Pre-populate with 1000 structs
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("user:%04d", i)
+		store.PutStruct([]byte(key), benchUser{
+			Name:    "Alice Smith",
+			Email:   "alice@example.com",
+			Age:     30,
+			Active:  true,
+			Balance: 1234.56,
+		})
+	}
+	store.Flush()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		count := 0
+		ScanPrefixStructs(store, []byte("user:"), func(key []byte, u *benchUser) bool {
+			count++
+			return true
+		})
+	}
+}
+
+func BenchmarkScanPrefixMaps(b *testing.B) {
+	dir := b.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		b.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Pre-populate with 1000 maps
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("user:%04d", i)
+		store.PutMap([]byte(key), map[string]any{
+			"name":    "Alice Smith",
+			"email":   "alice@example.com",
+			"age":     30,
+			"active":  true,
+			"balance": 1234.56,
+		})
+	}
+	store.Flush()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		count := 0
+		store.ScanPrefixMaps([]byte("user:"), func(key []byte, m map[string]any) bool {
+			count++
+			return true
+		})
+	}
+}
+
+func BenchmarkScanPrefixRaw(b *testing.B) {
+	dir := b.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		b.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Pre-populate with 1000 structs
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("user:%04d", i)
+		store.PutStruct([]byte(key), benchUser{
+			Name:    "Alice Smith",
+			Email:   "alice@example.com",
+			Age:     30,
+			Active:  true,
+			Balance: 1234.56,
+		})
+	}
+	store.Flush()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		count := 0
+		store.ScanPrefix([]byte("user:"), func(key []byte, val Value) bool {
+			count++
+			return true
+		})
+	}
+}
+
+// BenchmarkBatchEncodeStructsOldWay simulates the old way without shared buffer
+func BenchmarkBatchEncodeStructsOldWay(b *testing.B) {
+	user := benchUser{
+		Name:    "Alice Smith",
+		Email:   "alice@example.com",
+		Age:     30,
+		Active:  true,
+		Balance: 1234.56,
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		batch := NewBatch()
+		for j := 0; j < 100; j++ {
+			key := fmt.Sprintf("user:%08d:%04d", i, j)
+			// Old way: marshal directly
+			data, _ := msgpack.Marshal(user)
+			batch.Put([]byte(key), MsgpackValue(data))
+		}
+	}
+}
+
+// BenchmarkDecodeStructOldWay simulates decoding without pooled decoder
+func BenchmarkDecodeStructOldWay(b *testing.B) {
+	user := benchUser{
+		Name:    "Alice Smith",
+		Email:   "alice@example.com",
+		Age:     30,
+		Active:  true,
+		Balance: 1234.56,
+	}
+	data, _ := msgpack.Marshal(user)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		var dest benchUser
+		// Old way: Unmarshal directly (creates new decoder each time)
+		msgpack.Unmarshal(data, &dest)
+	}
+}
+
+// BenchmarkDecodeStructPooled tests decoding with pooled decoder
+func BenchmarkDecodeStructPooled(b *testing.B) {
+	user := benchUser{
+		Name:    "Alice Smith",
+		Email:   "alice@example.com",
+		Age:     30,
+		Active:  true,
+		Balance: 1234.56,
+	}
+	data, _ := msgpack.Marshal(user)
+	r := bytes.NewReader(nil)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		var dest benchUser
+		// New way: pooled decoder with reusable reader
+		r.Reset(data)
+		dec := msgpack.GetDecoder()
+		dec.Reset(r)
+		dec.Decode(&dest)
+		msgpack.PutDecoder(dec)
 	}
 }
