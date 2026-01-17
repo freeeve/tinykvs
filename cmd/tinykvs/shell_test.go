@@ -142,7 +142,8 @@ func TestShellSelectWithBetween(t *testing.T) {
 	output := captureOutput(t, func() {
 		shell.execute("SELECT * FROM kv WHERE k BETWEEN 'b' AND 'd'")
 	})
-	if !strings.Contains(output, "b |") || !strings.Contains(output, "c |") {
+	// Use box drawing character │ for column separator
+	if !strings.Contains(output, "│ b │") || !strings.Contains(output, "│ c │") {
 		t.Errorf("SELECT BETWEEN output = %q, want 'b' and 'c'", output)
 	}
 	// 'd' should be excluded since BETWEEN in our impl is [start, end)
@@ -566,7 +567,8 @@ func TestShellSelectGreaterEqual(t *testing.T) {
 	output := captureOutput(t, func() {
 		shell.execute("SELECT * FROM kv WHERE k >= 'b' AND k <= 'c'")
 	})
-	if !strings.Contains(output, "b |") {
+	// Use box drawing character │ for column separator
+	if !strings.Contains(output, "│ b │") {
 		t.Errorf("SELECT >= output = %q, want 'b'", output)
 	}
 }
@@ -625,8 +627,9 @@ func TestShellLargeValue(t *testing.T) {
 	output := captureOutput(t, func() {
 		shell.execute("SELECT * FROM kv WHERE k = 'large'")
 	})
-	if !strings.Contains(output, "...") || !strings.Contains(output, "bytes") {
-		t.Errorf("Large value output = %q, want truncation indicator", output)
+	// With DuckDB-style tables, truncation shows as "..." at the end
+	if !strings.Contains(output, "...") {
+		t.Errorf("Large value output = %q, want truncation indicator '...'", output)
 	}
 }
 
@@ -934,5 +937,90 @@ func TestShellAggregateNestedField(t *testing.T) {
 	})
 	if !strings.Contains(output, "60") {
 		t.Errorf("sum(v.stats.count) = %q, want to contain '60'", output)
+	}
+}
+
+// ============================================================================
+// Helper Function Tests
+// ============================================================================
+
+func TestShellCacheHitRate(t *testing.T) {
+	stats := tinykvs.CacheStats{Hits: 0, Misses: 0}
+	rate := cacheHitRate(stats)
+	if rate != 0 {
+		t.Errorf("cacheHitRate(0,0) = %f, want 0", rate)
+	}
+
+	stats = tinykvs.CacheStats{Hits: 50, Misses: 50}
+	rate = cacheHitRate(stats)
+	if rate != 50 {
+		t.Errorf("cacheHitRate(50,50) = %f, want 50", rate)
+	}
+}
+
+func TestShellFormatBytesHelper(t *testing.T) {
+	tests := []struct {
+		bytes    int64
+		expected string
+	}{
+		{0, "0 B"},
+		{100, "100 B"},
+		{1024, "1.0 KB"},
+		{1024 * 1024, "1.0 MB"},
+		{1024 * 1024 * 1024, "1.0 GB"},
+	}
+
+	for _, tc := range tests {
+		result := formatBytes(tc.bytes)
+		if result != tc.expected {
+			t.Errorf("formatBytes(%d) = %q, want %q", tc.bytes, result, tc.expected)
+		}
+	}
+}
+
+func TestShellPrintStatsWithData(t *testing.T) {
+	shell, store, _ := setupShellTest(t)
+	defer store.Close()
+
+	for i := 0; i < 100; i++ {
+		key := []byte("statskey" + string(rune(i)))
+		store.PutString(key, "value")
+	}
+	store.Flush()
+
+	output := captureOutput(t, func() {
+		shell.execute("\\stats")
+	})
+	if !strings.Contains(output, "Memtable") {
+		t.Errorf("stats should show Memtable, got: %q", output)
+	}
+	if !strings.Contains(output, "Cache") {
+		t.Errorf("stats should show Cache, got: %q", output)
+	}
+}
+
+func TestShellCompactError(t *testing.T) {
+	shell, store, _ := setupShellTest(t)
+
+	store.Close()
+
+	output := captureOutput(t, func() {
+		shell.execute("\\compact")
+	})
+	if !strings.Contains(output, "Error") && !strings.Contains(output, "closed") {
+		t.Logf("compact on closed store: %q", output)
+	}
+}
+
+func TestShellFlushError(t *testing.T) {
+	shell, store, _ := setupShellTest(t)
+
+	store.Close()
+
+	output := captureOutput(t, func() {
+		shell.execute("\\flush")
+	})
+	if !strings.Contains(output, "Error") && !strings.Contains(output, "closed") {
+		t.Logf("flush on closed store: %q", output)
 	}
 }

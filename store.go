@@ -252,6 +252,20 @@ func (s *Store) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool)
 	return reader.ScanPrefix(prefix, fn)
 }
 
+// ScanPrefixWithStats is like ScanPrefix but also returns scan statistics.
+// The progress callback (if non-nil) is called periodically during the scan.
+func (s *Store) ScanPrefixWithStats(prefix []byte, fn func(key []byte, value Value) bool, progress ScanProgress) (ScanStats, error) {
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return ScanStats{}, ErrStoreClosed
+	}
+	reader := s.reader
+	s.mu.RUnlock()
+
+	return reader.ScanPrefixWithStats(prefix, fn, progress)
+}
+
 // ScanRange iterates over all keys in the range [start, end) in sorted order.
 // The callback receives the key and value bytes directly (zero-copy).
 // Return false from the callback to stop iteration.

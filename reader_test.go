@@ -1080,6 +1080,115 @@ func TestScanRangeEdgeCases(t *testing.T) {
 	}
 }
 
+// TestScanPrefixBlockSkipBug tests for the bug where seekToPrefix could skip blocks
+// when the prefix isn't found in the first block.
+// Bug: seekToPrefix calls blockIdx++ then next(), but next() also does blockIdx++,
+// causing a block to be skipped.
+func TestScanPrefixBlockSkipBug(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.BlockSize = 128 // Very small blocks to force multiple blocks
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Write keys in sorted order:
+	// Block 0: keys starting with "aaa" (before prefix "mmm")
+	// Block 1: keys starting with "mmm" (the prefix we'll search)
+	// Block 2: keys starting with "zzz" (after prefix "mmm")
+	for i := 0; i < 10; i++ {
+		store.PutString([]byte(fmt.Sprintf("aaa%02d", i)), "before-value")
+	}
+	for i := 0; i < 10; i++ {
+		store.PutString([]byte(fmt.Sprintf("mmm%02d", i)), "target-value")
+	}
+	for i := 0; i < 10; i++ {
+		store.PutString([]byte(fmt.Sprintf("zzz%02d", i)), "after-value")
+	}
+	store.Flush()
+
+	// Scan for prefix "mmm" - should find all 10 keys
+	// With the bug, block 1 would be skipped and we'd get 0 keys (or only partial)
+	count := 0
+	var foundKeys []string
+	err = store.ScanPrefix([]byte("mmm"), func(key []byte, value Value) bool {
+		count++
+		foundKeys = append(foundKeys, string(key))
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+	if count != 10 {
+		t.Errorf("count = %d, want 10. Found keys: %v", count, foundKeys)
+	}
+
+	// Verify we found the right keys
+	for i := 0; i < 10; i++ {
+		expected := fmt.Sprintf("mmm%02d", i)
+		found := false
+		for _, k := range foundKeys {
+			if k == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Missing expected key: %s", expected)
+		}
+	}
+}
+
+// TestScanPrefixNonMatchingKeysFromSource tests that non-matching keys
+// don't get pushed to the heap after a matching key.
+func TestScanPrefixNonMatchingKeysFromSource(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.BlockSize = 64 // Very small blocks
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Create data that spans multiple blocks with mixed prefixes
+	// This tests that when we exhaust matching keys in a block,
+	// we don't accidentally return non-matching keys from the next block
+	for i := 0; i < 20; i++ {
+		store.PutString([]byte(fmt.Sprintf("aa%02d", i)), "value")
+	}
+	for i := 0; i < 20; i++ {
+		store.PutString([]byte(fmt.Sprintf("bb%02d", i)), "value")
+	}
+	for i := 0; i < 20; i++ {
+		store.PutString([]byte(fmt.Sprintf("cc%02d", i)), "value")
+	}
+	store.Flush()
+
+	// Scan for prefix "bb" - should get exactly 20 keys
+	count := 0
+	var foundKeys []string
+	err = store.ScanPrefix([]byte("bb"), func(key []byte, value Value) bool {
+		count++
+		foundKeys = append(foundKeys, string(key))
+		// Verify this key actually has the prefix
+		if !hasPrefix(key, []byte("bb")) {
+			t.Errorf("Got non-matching key: %s", string(key))
+		}
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix failed: %v", err)
+	}
+	if count != 20 {
+		t.Errorf("count = %d, want 20. Found keys: %v", count, foundKeys)
+	}
+}
+
 func TestScanRangeMultipleSSTables(t *testing.T) {
 	dir := t.TempDir()
 	opts := DefaultOptions(dir)

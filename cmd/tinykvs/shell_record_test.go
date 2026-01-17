@@ -241,9 +241,9 @@ func TestShellSelectFieldFromMsgpackRecord(t *testing.T) {
 	shell, store, _ := setupShellTest(t)
 	defer store.Close()
 
-	// Insert msgpack hex record
+	// Insert msgpack hex record: {"name":"Bob","age":25}
 	captureOutput(t, func() {
-		shell.execute("INSERT INTO kv VALUES ('mp:2', x'82a46e616d65a3426f62a3616765')")
+		shell.execute("INSERT INTO kv VALUES ('mp:2', x'82a46e616d65a3426f62a361676519')")
 	})
 
 	// Select specific field
@@ -370,21 +370,21 @@ func TestShellJSONTypes(t *testing.T) {
 		shell.execute(`INSERT INTO kv VALUES ('types:1', '{"str":"hello","num":42,"float":3.14,"bool":true,"null":null}')`)
 	})
 
-	// Select all fields
+	// Select specific fields to avoid truncation issues with table display
 	output := captureOutput(t, func() {
-		shell.execute("SELECT * FROM kv WHERE k = 'types:1'")
+		shell.execute("SELECT v.str, v.num, v.float, v.bool FROM kv WHERE k = 'types:1'")
 	})
 	if !strings.Contains(output, "hello") {
-		t.Errorf("SELECT JSON types = %q, want 'hello'", output)
+		t.Errorf("SELECT v.str = %q, want 'hello'", output)
 	}
 	if !strings.Contains(output, "42") {
-		t.Errorf("SELECT JSON types = %q, want '42'", output)
+		t.Errorf("SELECT v.num = %q, want '42'", output)
 	}
 	if !strings.Contains(output, "3.14") {
-		t.Errorf("SELECT JSON types = %q, want '3.14'", output)
+		t.Errorf("SELECT v.float = %q, want '3.14'", output)
 	}
 	if !strings.Contains(output, "true") {
-		t.Errorf("SELECT JSON types = %q, want 'true'", output)
+		t.Errorf("SELECT v.bool = %q, want 'true'", output)
 	}
 }
 

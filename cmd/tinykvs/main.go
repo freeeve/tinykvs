@@ -18,6 +18,21 @@ import (
 	"github.com/freeeve/tinykvs"
 )
 
+// Version info - set via ldflags at build time
+// go build -ldflags "-X main.Version=1.0.0 -X main.GitCommit=$(git rev-parse --short HEAD)"
+var (
+	Version   = "dev"
+	GitCommit = "unknown"
+)
+
+// versionString returns the version, only appending commit if not already in version
+func versionString() string {
+	if strings.Contains(Version, GitCommit) {
+		return Version
+	}
+	return Version + " (" + GitCommit + ")"
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -28,6 +43,9 @@ func main() {
 	args := os.Args[2:]
 
 	switch cmd {
+	case "version", "-v", "--version":
+		fmt.Println("tinykvs " + versionString())
+		return
 	case "get":
 		cmdGet(args)
 	case "put":
@@ -439,6 +457,13 @@ func cmdStats(args []string) {
 	fmt.Printf("\nTotal: %d tables, %s, %d keys\n", totalTables, formatBytes(totalSize), totalKeys)
 }
 
+// prefixStats holds count and size statistics for a prefix
+type prefixStats struct {
+	count            int64
+	compressedSize   int64 // apportioned from block sizes
+	uncompressedSize int64 // actual key + value bytes
+}
+
 func cmdCount(args []string) {
 	fs := flag.NewFlagSet("count", flag.ExitOnError)
 	dir := fs.String("dir", "", "Path to store directory (required)")
@@ -477,10 +502,12 @@ func cmdCount(args []string) {
 
 	// Process tables in parallel
 	var total int64
+	var totalCompressed int64
+	var totalUncompressed int64
 	var processed int64
-	counts := make([]map[string]int64, *workers)
-	for i := range counts {
-		counts[i] = make(map[string]int64)
+	stats := make([]map[string]*prefixStats, *workers)
+	for i := range stats {
+		stats[i] = make(map[string]*prefixStats)
 	}
 
 	tableChan := make(chan *tinykvs.TableMeta, len(tables))
@@ -494,7 +521,7 @@ func cmdCount(args []string) {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			localCounts := counts[workerID]
+			localStats := stats[workerID]
 
 			for meta := range tableChan {
 				path := filepath.Join(storeDir, fmt.Sprintf("%06d.sst", meta.ID))
@@ -521,12 +548,43 @@ func cmdCount(args []string) {
 						continue
 					}
 
+					// Count keys and uncompressed size per prefix in this block
+					type blockStats struct {
+						count            int
+						uncompressedSize int64
+					}
+					blockPrefixStats := make(map[string]*blockStats)
+					totalKeysInBlock := 0
 					for _, e := range block.Entries {
 						if len(e.Key) >= *prefixLen {
 							prefix := string(e.Key[:*prefixLen])
-							localCounts[prefix]++
-							atomic.AddInt64(&total, 1)
+							bs := blockPrefixStats[prefix]
+							if bs == nil {
+								bs = &blockStats{}
+								blockPrefixStats[prefix] = bs
+							}
+							bs.count++
+							bs.uncompressedSize += int64(len(e.Key) + len(e.Value))
+							totalKeysInBlock++
 						}
+					}
+
+					// Apportion block size to prefixes based on key count
+					blockSize := int64(entry.BlockSize)
+					for prefix, bs := range blockPrefixStats {
+						ps := localStats[prefix]
+						if ps == nil {
+							ps = &prefixStats{}
+							localStats[prefix] = ps
+						}
+						ps.count += int64(bs.count)
+						ps.uncompressedSize += bs.uncompressedSize
+						// Apportion compressed size proportionally
+						apportionedSize := blockSize * int64(bs.count) / int64(totalKeysInBlock)
+						ps.compressedSize += apportionedSize
+						atomic.AddInt64(&total, int64(bs.count))
+						atomic.AddInt64(&totalCompressed, apportionedSize)
+						atomic.AddInt64(&totalUncompressed, bs.uncompressedSize)
 					}
 					block.Release()
 				}
@@ -544,35 +602,47 @@ func cmdCount(args []string) {
 
 	wg.Wait()
 
-	// Merge counts
-	merged := make(map[string]int64)
-	for _, c := range counts {
-		for k, v := range c {
-			merged[k] += v
+	// Merge stats
+	merged := make(map[string]*prefixStats)
+	for _, s := range stats {
+		for k, v := range s {
+			if merged[k] == nil {
+				merged[k] = &prefixStats{}
+			}
+			merged[k].count += v.count
+			merged[k].compressedSize += v.compressedSize
+			merged[k].uncompressedSize += v.uncompressedSize
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "\rProcessed %d tables, %d total keys\n\n", len(tables), total)
+	overallRatio := float64(totalUncompressed) / float64(totalCompressed)
+	fmt.Fprintf(os.Stderr, "\rProcessed %d tables, %d total keys\n", len(tables), total)
+	fmt.Fprintf(os.Stderr, "Compressed: %s, Uncompressed: %s, Ratio: %.2fx\n\n",
+		formatBytes(totalCompressed), formatBytes(totalUncompressed), overallRatio)
 
 	// Sort by count descending
 	type kv struct {
 		prefix string
-		count  int64
+		stats  *prefixStats
 	}
 	var sorted []kv
 	for k, v := range merged {
 		sorted = append(sorted, kv{k, v})
 	}
 	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].count > sorted[j].count
+		return sorted[i].stats.count > sorted[j].stats.count
 	})
 
 	// Print results
-	fmt.Printf("%-20s %15s %8s\n", "Prefix", "Count", "Percent")
-	fmt.Println(strings.Repeat("-", 45))
+	fmt.Printf("%-20s %12s %7s %10s %12s %6s\n", "Prefix", "Count", "Pct", "Compressed", "Uncompressed", "Ratio")
+	fmt.Println(strings.Repeat("-", 73))
 	for _, kv := range sorted {
-		pct := float64(kv.count) / float64(total) * 100
-		fmt.Printf("%-20s %15d %7.2f%%\n", formatKey([]byte(kv.prefix)), kv.count, pct)
+		countPct := float64(kv.stats.count) / float64(total) * 100
+		ratio := float64(kv.stats.uncompressedSize) / float64(kv.stats.compressedSize)
+		fmt.Printf("%-20s %12d %6.2f%% %10s %12s %5.2fx\n",
+			formatKey([]byte(kv.prefix)), kv.stats.count, countPct,
+			formatBytes(kv.stats.compressedSize),
+			formatBytes(kv.stats.uncompressedSize), ratio)
 	}
 }
 

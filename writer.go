@@ -614,7 +614,7 @@ func (w *writer) mergeTables(tables []*SSTable, targetLevel int) (*mergeResult, 
 	}
 
 	// Finish last SSTable
-	if writer != nil && currentKeys > 0 {
+	if writer != nil {
 		if err := writer.Finish(targetLevel); err != nil {
 			writer.Abort()
 			return nil, err
@@ -627,8 +627,6 @@ func (w *writer) mergeTables(tables []*SSTable, targetLevel int) (*mergeResult, 
 			return nil, err
 		}
 		newTables = append(newTables, sst)
-	} else if writer != nil {
-		writer.Abort()
 	}
 
 	return &mergeResult{

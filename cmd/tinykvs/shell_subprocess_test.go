@@ -205,13 +205,14 @@ SELECT * FROM kv WHERE k BETWEEN 'b' AND 'e'
 	}
 
 	// Should include b, c, d (and possibly e depending on BETWEEN semantics)
-	if !strings.Contains(stdout, "b |") {
+	// Use box drawing character │ for column separator in DuckDB-style output
+	if !strings.Contains(stdout, "│ b │") {
 		t.Errorf("BETWEEN should include 'b', got: %s", stdout)
 	}
-	if !strings.Contains(stdout, "c |") {
+	if !strings.Contains(stdout, "│ c │") {
 		t.Errorf("BETWEEN should include 'c', got: %s", stdout)
 	}
-	if !strings.Contains(stdout, "d |") {
+	if !strings.Contains(stdout, "│ d │") {
 		t.Errorf("BETWEEN should include 'd', got: %s", stdout)
 	}
 }

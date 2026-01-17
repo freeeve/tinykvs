@@ -1,6 +1,21 @@
 package tinykvs
 
-import "sync"
+import (
+	"fmt"
+	"os"
+	"sync"
+	"sync/atomic"
+)
+
+// ScanStats tracks statistics during scan operations.
+type ScanStats struct {
+	BlocksLoaded int64 // Number of SSTable blocks loaded from disk or cache
+	KeysExamined int64 // Total keys examined (including duplicates and tombstones)
+}
+
+// ScanProgress is called periodically during scan operations to report progress.
+// Return false to stop the scan early.
+type ScanProgress func(stats ScanStats) bool
 
 // reader coordinates lookups across memtable and SSTables.
 type reader struct {
@@ -179,37 +194,29 @@ func (r *reader) GetLevels() [][]*SSTable {
 // ScanPrefix iterates over all keys with the given prefix in sorted order.
 // Keys are deduplicated (newest version wins) and tombstones are skipped.
 // Return false from the callback to stop iteration early.
-//
-// The callback may safely call other Store methods including writes.
 // Keys and values passed to the callback are copies owned by the caller.
+// Note: Streams entries directly without buffering for constant memory usage.
 func (r *reader) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool) error {
-	// Collect all matching entries while holding the lock
-	// This ensures consistent snapshot even if compaction runs during callback
 	r.mu.RLock()
+	defer r.mu.RUnlock()
 
-	// Build a prefix scanner with all sources
 	scanner := newPrefixScanner(prefix, r.cache, r.opts.VerifyChecksums)
 
-	// Add memtable (highest priority - index 0)
 	scanner.addmemtable(r.memtable, 0)
 
-	// Add immutable memtables (newest first)
 	for i := len(r.immutables) - 1; i >= 0; i-- {
 		scanner.addmemtable(r.immutables[i], len(r.immutables)-i)
 	}
 
-	// Add SSTable levels
 	baseIdx := len(r.immutables) + 1
 	for level := 0; level < len(r.levels); level++ {
 		tables := r.levels[level]
 		if level == 0 {
-			// L0: add all tables (newest first)
 			for i := len(tables) - 1; i >= 0; i-- {
 				scanner.addSSTable(tables[i], baseIdx)
 				baseIdx++
 			}
 		} else {
-			// L1+: add tables that may contain prefix
 			for _, t := range tables {
 				if hasKeyInRange(prefix, t.MinKey(), t.MaxKey()) {
 					scanner.addSSTable(t, baseIdx)
@@ -221,12 +228,6 @@ func (r *reader) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool
 
 	scanner.init()
 
-	// Collect all matching entries into a slice while holding the lock
-	type scanEntry struct {
-		key   []byte
-		value Value
-	}
-	var entries []scanEntry
 	var lastKey []byte
 
 	for scanner.next() {
@@ -237,7 +238,6 @@ func (r *reader) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool
 			continue
 		}
 
-		// Copy key for dedup tracking
 		lastKey = make([]byte, len(entry.Key))
 		copy(lastKey, entry.Key)
 
@@ -251,27 +251,101 @@ func (r *reader) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool
 			break
 		}
 
-		// Make copies (entry data references internal buffers that may be reused)
+		// Stream directly to callback
 		keyCopy := make([]byte, len(entry.Key))
 		copy(keyCopy, entry.Key)
 
-		entries = append(entries, scanEntry{
-			key:   keyCopy,
-			value: copyValue(entry.Value),
-		})
-	}
-
-	scanner.close()
-	r.mu.RUnlock()
-
-	// Call callbacks with lock released (safe to write in callbacks)
-	for _, e := range entries {
-		if !fn(e.key, e.value) {
+		if !fn(keyCopy, copyValue(entry.Value)) {
 			break
 		}
 	}
 
+	scanner.close()
 	return nil
+}
+
+// ScanPrefixWithStats is like ScanPrefix but also returns scan statistics.
+// The progress callback (if non-nil) is called periodically during the scan
+// with current stats. Return false from progress to stop the scan early.
+// Note: This streams entries directly to the callback without buffering,
+// so it uses constant memory regardless of result size.
+func (r *reader) ScanPrefixWithStats(prefix []byte, fn func(key []byte, value Value) bool, progress ScanProgress) (ScanStats, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	scanner := newPrefixScanner(prefix, r.cache, r.opts.VerifyChecksums)
+
+	scanner.addmemtable(r.memtable, 0)
+
+	for i := len(r.immutables) - 1; i >= 0; i-- {
+		scanner.addmemtable(r.immutables[i], len(r.immutables)-i)
+	}
+
+	baseIdx := len(r.immutables) + 1
+	for level := 0; level < len(r.levels); level++ {
+		tables := r.levels[level]
+		if level == 0 {
+			for i := len(tables) - 1; i >= 0; i-- {
+				scanner.addSSTable(tables[i], baseIdx)
+				baseIdx++
+			}
+		} else {
+			for _, t := range tables {
+				if hasKeyInRange(prefix, t.MinKey(), t.MaxKey()) {
+					scanner.addSSTable(t, baseIdx)
+					baseIdx++
+				}
+			}
+		}
+	}
+
+	scanner.init()
+
+	var lastKey []byte
+	var progressCount int64
+
+	for scanner.next() {
+		entry := scanner.entry()
+
+		// Call progress every 10000 keys
+		progressCount++
+		if progress != nil && progressCount%10000 == 0 {
+			if !progress(scanner.stats) {
+				break
+			}
+		}
+
+		// Skip duplicates (newer version already seen)
+		if lastKey != nil && CompareKeys(entry.Key, lastKey) == 0 {
+			continue
+		}
+
+		lastKey = make([]byte, len(entry.Key))
+		copy(lastKey, entry.Key)
+
+		// Skip tombstones
+		if entry.Value.IsTombstone() {
+			continue
+		}
+
+		// Check prefix still matches
+		if !hasPrefix(entry.Key, prefix) {
+			break
+		}
+
+		// Stream directly to callback (no buffering)
+		keyCopy := make([]byte, len(entry.Key))
+		copy(keyCopy, entry.Key)
+
+		if !fn(keyCopy, copyValue(entry.Value)) {
+			break
+		}
+	}
+
+	stats := scanner.stats
+	scanner.close()
+
+	return stats, nil
 }
 
 // copyValue creates a deep copy of a Value.
@@ -362,6 +436,7 @@ type prefixScanner struct {
 	verify  bool
 	heap    prefixHeap
 	current Entry
+	stats   ScanStats // Tracks blocks loaded and keys examined
 }
 
 type prefixHeapEntry struct {
@@ -467,11 +542,20 @@ func (s *prefixScanner) addSSTable(sst *SSTable, priority int) {
 		prefix: s.prefix,
 		cache:  s.cache,
 		verify: s.verify,
+		stats:  &s.stats,
 	}
 	src.seekToPrefix()
 	if src.valid {
+		entry := src.entry()
+		// Debug: ALWAYS log initial entry for debugging
+		if len(s.prefix) > 0 && !hasPrefix(entry.Key, s.prefix) {
+			fmt.Fprintf(os.Stderr, "[DEBUG] SSTable %d (priority %d) adding NON-MATCHING initial key %x (prefix %x)\n",
+				sst.ID, priority, entry.Key, s.prefix)
+			fmt.Fprintf(os.Stderr, "[DEBUG]   minKey=%x maxKey=%x blockIdx=%d entryIdx=%d\n",
+				sst.MinKey(), sst.MaxKey(), src.blockIdx, src.entryIdx)
+		}
 		s.heap = append(s.heap, prefixHeapEntry{
-			entry:    src.entry(),
+			entry:    entry,
 			priority: priority,
 			source:   src,
 		})
@@ -485,6 +569,8 @@ func (s *prefixScanner) init() {
 	s.heap.init()
 }
 
+var debugPushCount int
+
 func (s *prefixScanner) next() bool {
 	if len(s.heap) == 0 {
 		return false
@@ -492,10 +578,29 @@ func (s *prefixScanner) next() bool {
 
 	he := s.heap.pop()
 	s.current = he.entry
+	s.stats.KeysExamined++
+
+	// Debug: verify the popped entry matches our prefix
+	if len(s.prefix) > 0 && !hasPrefix(he.entry.Key, s.prefix) {
+		fmt.Fprintf(os.Stderr, "[DEBUG] POPPED non-matching key %x (prefix %x) at priority %d\n",
+			he.entry.Key, s.prefix, he.priority)
+	}
 
 	if he.source.next() {
+		newEntry := he.source.entry()
+		debugPushCount++
+		// Debug: check if source is pushing non-matching key
+		if len(s.prefix) > 0 && !hasPrefix(newEntry.Key, s.prefix) {
+			fmt.Fprintf(os.Stderr, "[DEBUG] Push %d: non-matching key %x after %x (prefix %x)\n",
+				debugPushCount, newEntry.Key, he.entry.Key, s.prefix)
+		}
+		// Debug: check if key ordering is violated (new key < old key is bad for same source)
+		if len(s.prefix) > 0 && CompareKeys(newEntry.Key, he.entry.Key) < 0 {
+			fmt.Fprintf(os.Stderr, "[DEBUG] Push %d: KEY ORDER VIOLATION! new=%x < old=%x\n",
+				debugPushCount, newEntry.Key, he.entry.Key)
+		}
 		s.heap.push(prefixHeapEntry{
-			entry:    he.source.entry(),
+			entry:    newEntry,
 			priority: he.priority,
 			source:   he.source,
 		})
@@ -561,7 +666,8 @@ type sstablePrefixSource struct {
 	entryIdx  int
 	block     *Block
 	valid     bool
-	fromCache bool // True if current block came from cache (don't release it)
+	fromCache bool       // True if current block came from cache (don't release it)
+	stats     *ScanStats // Shared stats counter (may be nil)
 }
 
 func (s *sstablePrefixSource) seekToPrefix() {
@@ -603,10 +709,41 @@ func (s *sstablePrefixSource) seekToPrefix() {
 		}
 	}
 
-	// Not found in this block, try next
-	s.blockIdx++
-	s.entryIdx = -1
-	s.valid = s.next()
+	// Not found in this block - keep scanning subsequent blocks
+	for {
+		// Release old block and clear it
+		if s.block != nil && !s.fromCache {
+			s.block.Release()
+		}
+		s.block = nil
+		s.blockIdx++
+
+		if s.blockIdx >= len(s.sst.Index.Entries) {
+			s.valid = false
+			return
+		}
+
+		if err := s.loadBlock(); err != nil {
+			s.valid = false
+			return
+		}
+
+		if len(s.block.Entries) == 0 {
+			continue
+		}
+
+		// Find first entry >= prefix in this block
+		for s.entryIdx = 0; s.entryIdx < len(s.block.Entries); s.entryIdx++ {
+			key := s.block.Entries[s.entryIdx].Key
+			cmp := CompareKeys(key, s.prefix)
+			if cmp >= 0 {
+				// Found entry >= prefix, check if it matches
+				s.valid = hasPrefix(key, s.prefix)
+				return
+			}
+		}
+		// All entries in this block are < prefix, continue to next block
+	}
 }
 
 func (s *sstablePrefixSource) loadBlock() error {
@@ -628,6 +765,9 @@ func (s *sstablePrefixSource) loadBlock() error {
 		if cached, found := s.cache.Get(cacheKey); found {
 			s.block = cached
 			s.fromCache = true
+			if s.stats != nil {
+				atomic.AddInt64(&s.stats.BlocksLoaded, 1)
+			}
 			return nil
 		}
 	}
@@ -650,6 +790,9 @@ func (s *sstablePrefixSource) loadBlock() error {
 		s.fromCache = false // Not cached, we own it
 	}
 	s.block = block
+	if s.stats != nil {
+		atomic.AddInt64(&s.stats.BlocksLoaded, 1)
+	}
 	return nil
 }
 
@@ -658,7 +801,13 @@ func (s *sstablePrefixSource) next() bool {
 
 	// Try next entry in current block
 	if s.block != nil && s.entryIdx < len(s.block.Entries) {
-		s.valid = hasPrefix(s.block.Entries[s.entryIdx].Key, s.prefix)
+		key := s.block.Entries[s.entryIdx].Key
+		s.valid = hasPrefix(key, s.prefix)
+		// Debug: if returning true but key doesn't match, that's a bug
+		if s.valid && len(s.prefix) > 0 && len(key) > 0 && key[0] != s.prefix[0] {
+			fmt.Fprintf(os.Stderr, "[BUG] next() in-block: returning true, key=%x prefix=%x sst=%d block=%d entry=%d\n",
+				key, s.prefix, s.sst.ID, s.blockIdx, s.entryIdx)
+		}
 		return s.valid
 	}
 
@@ -681,7 +830,13 @@ func (s *sstablePrefixSource) next() bool {
 		return false
 	}
 
-	s.valid = hasPrefix(s.block.Entries[0].Key, s.prefix)
+	key := s.block.Entries[0].Key
+	s.valid = hasPrefix(key, s.prefix)
+	// Debug: if returning true but key doesn't match, that's a bug
+	if s.valid && len(s.prefix) > 0 && len(key) > 0 && key[0] != s.prefix[0] {
+		fmt.Fprintf(os.Stderr, "[BUG] next() new-block: returning true, key=%x prefix=%x sst=%d block=%d\n",
+			key, s.prefix, s.sst.ID, s.blockIdx)
+	}
 	return s.valid
 }
 
@@ -692,8 +847,11 @@ func (s *sstablePrefixSource) entry() Entry {
 	be := s.block.Entries[s.entryIdx]
 	// Decode value from block entry
 	val, _, _ := DecodeValue(be.Value)
+	// IMPORTANT: Copy the key since the block may be released later
+	keyCopy := make([]byte, len(be.Key))
+	copy(keyCopy, be.Key)
 	return Entry{
-		Key:   be.Key,
+		Key:   keyCopy,
 		Value: val,
 	}
 }
@@ -800,6 +958,7 @@ type rangeScanner struct {
 	verify  bool
 	heap    rangeHeap
 	current Entry
+	stats   ScanStats
 }
 
 type rangeHeapEntry struct {
@@ -906,6 +1065,7 @@ func (s *rangeScanner) addSSTable(sst *SSTable, priority int) {
 		end:    s.end,
 		cache:  s.cache,
 		verify: s.verify,
+		stats:  &s.stats,
 	}
 	src.seekToStart()
 	if src.valid {
@@ -930,6 +1090,7 @@ func (s *rangeScanner) next() bool {
 
 	he := s.heap.pop()
 	s.current = he.entry
+	s.stats.KeysExamined++
 
 	if he.source.next() {
 		s.heap.push(rangeHeapEntry{
@@ -1003,6 +1164,7 @@ type sstableRangeSource struct {
 	block     *Block
 	valid     bool
 	fromCache bool
+	stats     *ScanStats
 }
 
 func (s *sstableRangeSource) seekToStart() {
@@ -1039,10 +1201,34 @@ func (s *sstableRangeSource) seekToStart() {
 		}
 	}
 
-	// Not found in this block, try next
+	// Not found in this block, try next block
+	// Release old block and clear it so we load the new block
+	if s.block != nil && !s.fromCache {
+		s.block.Release()
+	}
+	s.block = nil
 	s.blockIdx++
-	s.entryIdx = -1
-	s.valid = s.next()
+	s.entryIdx = 0
+
+	// Load and check the next block directly (don't call next() which would increment blockIdx again)
+	if s.blockIdx >= len(s.sst.Index.Entries) {
+		s.valid = false
+		return
+	}
+
+	if err := s.loadBlock(); err != nil {
+		s.valid = false
+		return
+	}
+
+	if len(s.block.Entries) == 0 {
+		s.valid = false
+		return
+	}
+
+	// Check if first entry is in range
+	key := s.block.Entries[0].Key
+	s.valid = CompareKeys(key, s.end) < 0
 }
 
 func (s *sstableRangeSource) loadBlock() error {
@@ -1064,6 +1250,9 @@ func (s *sstableRangeSource) loadBlock() error {
 		if cached, found := s.cache.Get(cacheKey); found {
 			s.block = cached
 			s.fromCache = true
+			if s.stats != nil {
+				atomic.AddInt64(&s.stats.BlocksLoaded, 1)
+			}
 			return nil
 		}
 	}
@@ -1086,6 +1275,9 @@ func (s *sstableRangeSource) loadBlock() error {
 		s.fromCache = false
 	}
 	s.block = block
+	if s.stats != nil {
+		atomic.AddInt64(&s.stats.BlocksLoaded, 1)
+	}
 	return nil
 }
 
@@ -1129,8 +1321,11 @@ func (s *sstableRangeSource) entry() Entry {
 	}
 	be := s.block.Entries[s.entryIdx]
 	val, _, _ := DecodeValue(be.Value)
+	// IMPORTANT: Copy the key since the block may be released later
+	keyCopy := make([]byte, len(be.Key))
+	copy(keyCopy, be.Key)
 	return Entry{
-		Key:   be.Key,
+		Key:   keyCopy,
 		Value: val,
 	}
 }
