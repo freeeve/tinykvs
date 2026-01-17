@@ -213,14 +213,14 @@ func FuzzBlockRoundTrip(f *testing.F) {
 // declare huge element counts that cause OOM in the underlying msgpack library.
 func FuzzDecodeMsgpack(f *testing.F) {
 	// Valid msgpack maps using fixmap (0x80-0x8f) only
-	f.Add([]byte{0x80})                                     // empty map (fixmap)
-	f.Add([]byte{0x81, 0xa3, 'k', 'e', 'y', 0xa5, 'v', 'a', 'l', 'u', 'e'}) // {"key":"value"}
+	f.Add([]byte{0x80})                                                                                     // empty map (fixmap)
+	f.Add([]byte{0x81, 0xa3, 'k', 'e', 'y', 0xa5, 'v', 'a', 'l', 'u', 'e'})                                 // {"key":"value"}
 	f.Add([]byte{0x82, 0xa4, 'n', 'a', 'm', 'e', 0xa5, 'A', 'l', 'i', 'c', 'e', 0xa3, 'a', 'g', 'e', 0x1e}) // {"name":"Alice","age":30}
 	// Invalid/edge cases
 	f.Add([]byte{})
-	f.Add([]byte{0x82})           // truncated map
-	f.Add([]byte{0xff})           // invalid marker
-	f.Add([]byte{0x90})           // array, not map
+	f.Add([]byte{0x82}) // truncated map
+	f.Add([]byte{0xff}) // invalid marker
+	f.Add([]byte{0x90}) // array, not map
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// Skip inputs with map16/map32/array16/array32 markers that can declare
