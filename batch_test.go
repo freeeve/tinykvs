@@ -348,3 +348,91 @@ func TestBatchPutStruct(t *testing.T) {
 		t.Errorf("user:2 = %+v, want {Bob 25}", got2)
 	}
 }
+
+func TestBatchPutBytes(t *testing.T) {
+	dir := t.TempDir()
+
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	batch := NewBatch()
+	batch.PutBytes([]byte("bin:1"), []byte{0x00, 0x01, 0x02, 0x03})
+	batch.PutBytes([]byte("bin:2"), []byte{0xFF, 0xFE, 0xFD})
+	batch.PutBytes([]byte("bin:3"), []byte{}) // empty bytes
+
+	if err := store.WriteBatch(batch); err != nil {
+		t.Fatalf("WriteBatch failed: %v", err)
+	}
+
+	// Verify all bytes
+	got1, err := store.GetBytes([]byte("bin:1"))
+	if err != nil {
+		t.Fatalf("GetBytes bin:1 failed: %v", err)
+	}
+	if string(got1) != string([]byte{0x00, 0x01, 0x02, 0x03}) {
+		t.Errorf("bin:1 = %v, want [0 1 2 3]", got1)
+	}
+
+	got2, err := store.GetBytes([]byte("bin:2"))
+	if err != nil {
+		t.Fatalf("GetBytes bin:2 failed: %v", err)
+	}
+	if string(got2) != string([]byte{0xFF, 0xFE, 0xFD}) {
+		t.Errorf("bin:2 = %v, want [255 254 253]", got2)
+	}
+
+	got3, err := store.GetBytes([]byte("bin:3"))
+	if err != nil {
+		t.Fatalf("GetBytes bin:3 failed: %v", err)
+	}
+	if len(got3) != 0 {
+		t.Errorf("bin:3 = %v, want empty", got3)
+	}
+}
+
+func TestBatchPutJson(t *testing.T) {
+	dir := t.TempDir()
+
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	type User struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	}
+
+	batch := NewBatch()
+	if err := batch.PutJson([]byte("user:1"), User{Name: "Alice", Email: "alice@example.com"}); err != nil {
+		t.Fatalf("batch.PutJson failed: %v", err)
+	}
+	if err := batch.PutJson([]byte("user:2"), map[string]any{"name": "Bob", "age": 25}); err != nil {
+		t.Fatalf("batch.PutJson map failed: %v", err)
+	}
+
+	if err := store.WriteBatch(batch); err != nil {
+		t.Fatalf("WriteBatch failed: %v", err)
+	}
+
+	// Verify using GetJson
+	var got1 User
+	if err := store.GetJson([]byte("user:1"), &got1); err != nil {
+		t.Fatalf("GetJson user:1 failed: %v", err)
+	}
+	if got1.Name != "Alice" || got1.Email != "alice@example.com" {
+		t.Errorf("user:1 = %+v, want {Alice alice@example.com}", got1)
+	}
+
+	var got2 map[string]any
+	if err := store.GetJson([]byte("user:2"), &got2); err != nil {
+		t.Fatalf("GetJson user:2 failed: %v", err)
+	}
+	if got2["name"] != "Bob" {
+		t.Errorf("user:2 name = %v, want Bob", got2["name"])
+	}
+}

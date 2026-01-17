@@ -646,8 +646,11 @@ func (w *writer) levelSize(tables []*SSTable) int64 {
 }
 
 func (w *writer) maxLevelSize(level int) int64 {
-	// L1: 10MB, each subsequent level 10x larger
-	base := int64(10 * 1024 * 1024) // 10MB
+	// L1: configurable (default 10MB), each subsequent level LevelSizeMultiplier larger
+	base := w.store.opts.L1MaxSize
+	if base <= 0 {
+		base = 10 * 1024 * 1024 // 10MB default
+	}
 	for i := 1; i < level; i++ {
 		base *= int64(w.store.opts.LevelSizeMultiplier)
 	}
@@ -668,15 +671,39 @@ func (w *writer) SetSequence(seq uint64) {
 	atomic.StoreUint64(&w.sequence, seq)
 }
 
-// ForceCompact forces compaction of all L0 tables to L1.
+// ForceCompact forces compaction of all levels that need it.
+// First compacts all L0 tables to L1, then compacts any levels exceeding their size limit.
 func (w *writer) ForceCompact() error {
+	// First: compact all L0 tables
 	for {
 		levels := w.reader.GetLevels()
 		if len(levels) == 0 || len(levels[0]) == 0 {
-			return nil // No more L0 tables
+			break // No more L0 tables
 		}
 		w.compactL0ToL1()
 	}
+
+	// Second: compact any levels that exceed their size limit
+	for {
+		levels := w.reader.GetLevels()
+		compacted := false
+
+		for level := 1; level < len(levels); level++ {
+			levelSize := w.levelSize(levels[level])
+			maxSize := w.maxLevelSize(level)
+			if levelSize > maxSize {
+				w.compactLevelToNext(level)
+				compacted = true
+				break // Re-check from the beginning after compaction
+			}
+		}
+
+		if !compacted {
+			break // No more levels to compact
+		}
+	}
+
+	return nil
 }
 
 // mergeIterator performs k-way merge over multiple SSTables.

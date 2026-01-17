@@ -358,27 +358,6 @@ func (m *Manifest) AddTable(meta *TableMeta) error {
 	return m.writer.Flush()
 }
 
-// DeleteTable records removal of an SSTable.
-func (m *Manifest) DeleteTable(id uint32) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.sequence++
-	entry := &manifestEntry{
-		Type:     manifestEntryDelete,
-		Sequence: m.sequence,
-		TableID:  id,
-	}
-
-	if err := m.writeEntry(entry); err != nil {
-		return err
-	}
-
-	delete(m.tables, id)
-
-	return m.writer.Flush()
-}
-
 // DeleteTables records removal of multiple SSTables atomically.
 func (m *Manifest) DeleteTables(ids []uint32) error {
 	m.mu.Lock()
@@ -522,22 +501,6 @@ func (m *Manifest) Close() error {
 	}
 	if m.file != nil {
 		return m.file.Close()
-	}
-	return nil
-}
-
-// Sync flushes and syncs the manifest to disk.
-func (m *Manifest) Sync() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.writer != nil {
-		if err := m.writer.Flush(); err != nil {
-			return err
-		}
-	}
-	if m.file != nil {
-		return m.file.Sync()
 	}
 	return nil
 }

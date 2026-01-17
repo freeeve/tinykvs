@@ -54,6 +54,11 @@ type Options struct {
 	// Default: 10
 	LevelSizeMultiplier int
 
+	// L1MaxSize is the maximum size of L1 level in bytes.
+	// L2+ sizes are calculated as L1MaxSize * LevelSizeMultiplier^(level-1).
+	// Default: 10MB (0 = use default)
+	L1MaxSize int64
+
 	// WALSyncMode determines when WAL is synced to disk.
 	// Default: WALSyncPerBatch
 	WALSyncMode WALSyncMode

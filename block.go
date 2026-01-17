@@ -51,36 +51,6 @@ func putDecompressBuffer(buf []byte) {
 	// Not a pooled size, let GC handle it
 }
 
-// Compression buffer pools (for snappy encode output)
-// Use same size classes as decompress pools
-var compressPools = [5]sync.Pool{
-	{New: func() interface{} { return make([]byte, 0, 4*1024) }},
-	{New: func() interface{} { return make([]byte, 0, 16*1024) }},
-	{New: func() interface{} { return make([]byte, 0, 64*1024) }},
-	{New: func() interface{} { return make([]byte, 0, 256*1024) }},
-	{New: func() interface{} { return make([]byte, 0, 1024*1024) }},
-}
-
-func getCompressBuffer(size int) []byte {
-	for i, poolSize := range decompressPoolSizes {
-		if size <= poolSize {
-			buf := compressPools[i].Get().([]byte)
-			return buf[:0]
-		}
-	}
-	return make([]byte, 0, size)
-}
-
-func putCompressBuffer(buf []byte) {
-	cap := cap(buf)
-	for i, poolSize := range decompressPoolSizes {
-		if cap == poolSize {
-			compressPools[i].Put(buf[:0])
-			return
-		}
-	}
-}
-
 // Channel-based encoder pools (won't be cleared by GC like sync.Pool)
 // We use channels instead of sync.Pool to prevent GC from clearing encoders
 // under memory pressure, since encoder initialization is expensive (~8MB).

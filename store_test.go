@@ -1635,3 +1635,55 @@ func GetStruct(val Value, dest any) error {
 	}
 	return fmt.Errorf("expected msgpack, got type %d", val.Type)
 }
+
+func TestFindKey(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 64 * 1024 // 64KB memtable
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Key in memtable should return nil
+	store.PutString([]byte("memtable_key"), "value")
+	loc := store.FindKey([]byte("memtable_key"))
+	if loc != nil {
+		t.Errorf("FindKey for memtable key = %+v, want nil", loc)
+	}
+
+	// Add keys and flush to create SSTable
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("sstable_key_%03d", i)
+		store.PutString([]byte(key), "value")
+	}
+	store.Flush()
+
+	// Key in SSTable should return location with valid level
+	loc = store.FindKey([]byte("sstable_key_050"))
+	if loc == nil {
+		t.Fatal("FindKey for SSTable key returned nil")
+	}
+	// Level could be 0 or 1 depending on compaction timing
+	if loc.Level < 0 || loc.Level > 1 {
+		t.Errorf("FindKey level = %d, want 0 or 1", loc.Level)
+	}
+	if loc.TableID == 0 {
+		t.Error("FindKey TableID should not be 0")
+	}
+
+	// Non-existent key should return nil
+	loc = store.FindKey([]byte("nonexistent_key"))
+	if loc != nil {
+		t.Errorf("FindKey for nonexistent key = %+v, want nil", loc)
+	}
+
+	// Compact and verify key is still findable
+	store.Compact()
+	loc = store.FindKey([]byte("sstable_key_050"))
+	if loc == nil {
+		t.Fatal("FindKey after compaction returned nil")
+	}
+}

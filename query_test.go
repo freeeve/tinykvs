@@ -264,6 +264,19 @@ func TestStoreAggregations(t *testing.T) {
 	if r.Count != 4 || r.Sum != 100.5 || r.Min != 10 || r.Max != 40.5 {
 		t.Errorf("Aggregate = %+v", r)
 	}
+	// Test AggregateResult.Avg() method
+	if r.Avg() != 25.125 {
+		t.Errorf("Aggregate.Avg() = %f, want 25.125", r.Avg())
+	}
+
+	// Test Avg on empty result
+	emptyResult, err := store.Aggregate([]byte("nonexistent:"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emptyResult.Avg() != 0 {
+		t.Errorf("empty Aggregate.Avg() = %f, want 0", emptyResult.Avg())
+	}
 }
 
 func TestStoreAggregationsWithRecords(t *testing.T) {
