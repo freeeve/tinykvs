@@ -47,11 +47,18 @@ func newReader(memtable *memtable, levels [][]*SSTable, cache *lruCache, opts Op
 
 // Get looks up a key, checking memtable first, then SSTables.
 func (r *reader) Get(key []byte) (Value, error) {
+	// Snapshot state under brief lock to minimize blocking.
+	// Deep copy slices to avoid race with concurrent modifications.
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	memtable := r.memtable
+	immutables := copyImmutables(r.immutables)
+	levels := copyLevels(r.levels)
+	cache := r.cache
+	verify := r.opts.VerifyChecksums
+	r.mu.RUnlock()
 
 	// 1. Check active memtable
-	if entry, found := r.memtable.Get(key); found {
+	if entry, found := memtable.Get(key); found {
 		if entry.Value.IsTombstone() {
 			return Value{}, ErrKeyNotFound
 		}
@@ -59,8 +66,8 @@ func (r *reader) Get(key []byte) (Value, error) {
 	}
 
 	// 2. Check immutable memtables (newest first)
-	for i := len(r.immutables) - 1; i >= 0; i-- {
-		if entry, found := r.immutables[i].Get(key); found {
+	for i := len(immutables) - 1; i >= 0; i-- {
+		if entry, found := immutables[i].Get(key); found {
 			if entry.Value.IsTombstone() {
 				return Value{}, ErrKeyNotFound
 			}
@@ -69,13 +76,13 @@ func (r *reader) Get(key []byte) (Value, error) {
 	}
 
 	// 3. Check SSTables level by level (L0 to Lmax)
-	for level := 0; level < len(r.levels); level++ {
-		tables := r.levels[level]
+	for level := 0; level < len(levels); level++ {
+		tables := levels[level]
 
 		if level == 0 {
 			// L0: Check all tables (newest first, may have overlapping keys)
 			for i := len(tables) - 1; i >= 0; i-- {
-				entry, found, err := tables[i].Get(key, r.cache, r.opts.VerifyChecksums)
+				entry, found, err := tables[i].Get(key, cache, verify)
 				if err != nil {
 					return Value{}, err
 				}
@@ -88,9 +95,9 @@ func (r *reader) Get(key []byte) (Value, error) {
 			}
 		} else {
 			// L1+: Tables are sorted and non-overlapping, binary search
-			idx := r.findTableForKey(tables, key)
+			idx := findTableForKey(tables, key)
 			if idx >= 0 {
-				entry, found, err := tables[idx].Get(key, r.cache, r.opts.VerifyChecksums)
+				entry, found, err := tables[idx].Get(key, cache, verify)
 				if err != nil {
 					return Value{}, err
 				}
@@ -109,7 +116,7 @@ func (r *reader) Get(key []byte) (Value, error) {
 
 // findTableForKey finds the SSTable that may contain the key (for L1+).
 // Returns the index of the table, or -1 if not found.
-func (r *reader) findTableForKey(tables []*SSTable, key []byte) int {
+func findTableForKey(tables []*SSTable, key []byte) int {
 	lo, hi := 0, len(tables)-1
 
 	for lo <= hi {
@@ -197,20 +204,27 @@ func (r *reader) GetLevels() [][]*SSTable {
 // Keys and values passed to the callback are copies owned by the caller.
 // Note: Streams entries directly without buffering for constant memory usage.
 func (r *reader) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool) error {
+	// Snapshot state under brief lock to minimize blocking.
+	// Deep copy slices to avoid race with concurrent modifications.
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	memtable := r.memtable
+	immutables := copyImmutables(r.immutables)
+	levels := copyLevels(r.levels)
+	cache := r.cache
+	verify := r.opts.VerifyChecksums
+	r.mu.RUnlock()
 
-	scanner := newPrefixScanner(prefix, r.cache, r.opts.VerifyChecksums)
+	scanner := newPrefixScanner(prefix, cache, verify)
 
-	scanner.addmemtable(r.memtable, 0)
+	scanner.addmemtable(memtable, 0)
 
-	for i := len(r.immutables) - 1; i >= 0; i-- {
-		scanner.addmemtable(r.immutables[i], len(r.immutables)-i)
+	for i := len(immutables) - 1; i >= 0; i-- {
+		scanner.addmemtable(immutables[i], len(immutables)-i)
 	}
 
-	baseIdx := len(r.immutables) + 1
-	for level := 0; level < len(r.levels); level++ {
-		tables := r.levels[level]
+	baseIdx := len(immutables) + 1
+	for level := 0; level < len(levels); level++ {
+		tables := levels[level]
 		if level == 0 {
 			for i := len(tables) - 1; i >= 0; i-- {
 				scanner.addSSTable(tables[i], baseIdx)
@@ -270,20 +284,27 @@ func (r *reader) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool
 // Note: This streams entries directly to the callback without buffering,
 // so it uses constant memory regardless of result size.
 func (r *reader) ScanPrefixWithStats(prefix []byte, fn func(key []byte, value Value) bool, progress ScanProgress) (ScanStats, error) {
+	// Snapshot state under brief lock to minimize blocking.
+	// Deep copy slices to avoid race with concurrent modifications.
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	memtable := r.memtable
+	immutables := copyImmutables(r.immutables)
+	levels := copyLevels(r.levels)
+	cache := r.cache
+	verify := r.opts.VerifyChecksums
+	r.mu.RUnlock()
 
-	scanner := newPrefixScanner(prefix, r.cache, r.opts.VerifyChecksums)
+	scanner := newPrefixScanner(prefix, cache, verify)
 
-	scanner.addmemtable(r.memtable, 0)
+	scanner.addmemtable(memtable, 0)
 
-	for i := len(r.immutables) - 1; i >= 0; i-- {
-		scanner.addmemtable(r.immutables[i], len(r.immutables)-i)
+	for i := len(immutables) - 1; i >= 0; i-- {
+		scanner.addmemtable(immutables[i], len(immutables)-i)
 	}
 
-	baseIdx := len(r.immutables) + 1
-	for level := 0; level < len(r.levels); level++ {
-		tables := r.levels[level]
+	baseIdx := len(immutables) + 1
+	for level := 0; level < len(levels); level++ {
+		tables := levels[level]
 		if level == 0 {
 			for i := len(tables) - 1; i >= 0; i-- {
 				scanner.addSSTable(tables[i], baseIdx)
@@ -368,6 +389,25 @@ func copyValue(v Value) Value {
 			Length:      v.Pointer.Length,
 		}
 	}
+	return result
+}
+
+// copyLevels creates a deep copy of the levels slice.
+// This is needed to prevent race conditions when readers snapshot state
+// while writers are modifying the levels.
+func copyLevels(levels [][]*SSTable) [][]*SSTable {
+	result := make([][]*SSTable, len(levels))
+	for i, level := range levels {
+		result[i] = make([]*SSTable, len(level))
+		copy(result[i], level)
+	}
+	return result
+}
+
+// copyImmutables creates a copy of the immutables slice.
+func copyImmutables(immutables []*memtable) []*memtable {
+	result := make([]*memtable, len(immutables))
+	copy(result, immutables)
 	return result
 }
 
@@ -868,24 +908,31 @@ func (s *sstablePrefixSource) close() {
 // Keys are deduplicated (newest version wins) and tombstones are skipped.
 // Return false from the callback to stop iteration early.
 func (r *reader) ScanRange(start, end []byte, fn func(key []byte, value Value) bool) error {
+	// Snapshot state under brief lock to minimize blocking.
+	// Deep copy slices to avoid race with concurrent modifications.
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	memtable := r.memtable
+	immutables := copyImmutables(r.immutables)
+	levels := copyLevels(r.levels)
+	cache := r.cache
+	verify := r.opts.VerifyChecksums
+	r.mu.RUnlock()
 
 	// Build a range scanner with all sources
-	scanner := newRangeScanner(start, end, r.cache, r.opts.VerifyChecksums)
+	scanner := newRangeScanner(start, end, cache, verify)
 
 	// Add memtable (highest priority - index 0)
-	scanner.addMemtable(r.memtable, 0)
+	scanner.addMemtable(memtable, 0)
 
 	// Add immutable memtables (newest first)
-	for i := len(r.immutables) - 1; i >= 0; i-- {
-		scanner.addMemtable(r.immutables[i], len(r.immutables)-i)
+	for i := len(immutables) - 1; i >= 0; i-- {
+		scanner.addMemtable(immutables[i], len(immutables)-i)
 	}
 
 	// Add SSTable levels
-	baseIdx := len(r.immutables) + 1
-	for level := 0; level < len(r.levels); level++ {
-		tables := r.levels[level]
+	baseIdx := len(immutables) + 1
+	for level := 0; level < len(levels); level++ {
+		tables := levels[level]
 		if level == 0 {
 			// L0: add all tables that may overlap with range (newest first)
 			for i := len(tables) - 1; i >= 0; i-- {

@@ -142,9 +142,9 @@ func (s *Store) Get(key []byte) (Value, error) {
 		return Value{}, ErrStoreClosed
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	// Note: We don't take s.mu.RLock() here. The reader has its own internal
+	// locking (r.mu) and s.reader is set once during Open() and never changes.
+	// This allows reads to proceed without blocking on flush/compaction.
 	return s.reader.Get(key)
 }
 
@@ -189,14 +189,18 @@ func (s *Store) Flush() error {
 // Data remains in the memtable and will be recovered from WAL on restart.
 // Use this for frequent durability checkpoints; use Flush() less frequently
 // to convert memtable data to SSTables.
+//
+// Sync does not block on pending writes - it syncs whatever is currently
+// in the WAL buffer. This allows Sync to proceed even during backpressure.
 func (s *Store) Sync() error {
 	if s.closed.Load() {
 		return ErrStoreClosed
 	}
 
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
+	// Note: We don't take writeMu here. The WAL has its own internal lock
+	// and Sync should not block on write backpressure. Each Put() writes
+	// to the WAL before returning, so calling Sync() after Puts ensures
+	// those writes are durable.
 	return s.wal.Sync()
 }
 

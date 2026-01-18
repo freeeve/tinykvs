@@ -296,7 +296,6 @@ func (w *writer) flushmemtable(mt *memtable) error {
 	}
 	w.flushMu.Unlock()
 
-
 	// Check if compaction needed
 	w.maybeScheduleCompaction()
 

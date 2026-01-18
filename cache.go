@@ -119,11 +119,9 @@ func (c *lruCache) evict() {
 	delete(c.items, entry.key)
 	c.evictList.Remove(elem)
 	c.size -= entry.size
-
-	// Return block's buffer to pool
-	if entry.block != nil {
-		entry.block.Release()
-	}
+	// Note: We don't call block.Release() here because readers may still have
+	// a reference to this block. The block and its buffer will be garbage
+	// collected when all references are gone.
 }
 
 // Remove removes a specific key from the cache.
@@ -140,9 +138,7 @@ func (c *lruCache) Remove(key cacheKey) {
 		delete(c.items, key)
 		c.evictList.Remove(elem)
 		c.size -= entry.size
-		if entry.block != nil {
-			entry.block.Release()
-		}
+		// Note: We don't call block.Release() here - see evict() comment.
 	}
 }
 
@@ -162,9 +158,7 @@ func (c *lruCache) RemoveByFileID(fileID uint32) {
 			delete(c.items, key)
 			c.evictList.Remove(elem)
 			c.size -= entry.size
-			if entry.block != nil {
-				entry.block.Release()
-			}
+			// Note: We don't call block.Release() here - see evict() comment.
 		}
 	}
 }
@@ -174,13 +168,8 @@ func (c *lruCache) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Release all block buffers
-	for _, elem := range c.items {
-		entry := elem.Value.(*cacheEntry)
-		if entry.block != nil {
-			entry.block.Release()
-		}
-	}
+	// Note: We don't call block.Release() here - see evict() comment.
+	// Blocks will be garbage collected when all references are gone.
 
 	c.items = make(map[cacheKey]*list.Element)
 	c.evictList.Init()
