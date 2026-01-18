@@ -116,7 +116,7 @@ func (s *Store) WriteBatch(batch *Batch) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	if s.closed {
+	if s.closed.Load() {
 		return ErrStoreClosed
 	}
 
@@ -129,7 +129,7 @@ func (s *Store) PutIfNotExists(key []byte, value Value) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	if s.closed {
+	if s.closed.Load() {
 		return ErrStoreClosed
 	}
 
@@ -151,7 +151,7 @@ func (s *Store) PutIfEquals(key []byte, value Value, expected Value) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	if s.closed {
+	if s.closed.Load() {
 		return ErrStoreClosed
 	}
 
@@ -176,7 +176,7 @@ func (s *Store) Increment(key []byte, delta int64) (int64, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	if s.closed {
+	if s.closed.Load() {
 		return 0, ErrStoreClosed
 	}
 
@@ -210,7 +210,7 @@ func (s *Store) DeleteRange(start, end []byte) (int64, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	if s.closed {
+	if s.closed.Load() {
 		return 0, ErrStoreClosed
 	}
 
@@ -252,7 +252,7 @@ func (s *Store) DeletePrefix(prefix []byte) (int64, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	if s.closed {
+	if s.closed.Load() {
 		return 0, ErrStoreClosed
 	}
 

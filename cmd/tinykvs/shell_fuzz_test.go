@@ -88,6 +88,8 @@ func FuzzShellJSONInsert(f *testing.F) {
 
 func FuzzShellCommands(f *testing.F) {
 	// Seed corpus with shell commands
+	// Note: export/import removed from seeds - they write files and fuzzing
+	// creates garbage files in the working directory
 	seeds := []string{
 		"\\help",
 		"\\stats",
@@ -98,8 +100,6 @@ func FuzzShellCommands(f *testing.F) {
 		"\\quit",
 		"\\exit",
 		"\\unknown",
-		"\\export /tmp/test.csv",
-		"\\import /tmp/test.csv",
 	}
 	for _, s := range seeds {
 		f.Add(s)
@@ -108,6 +108,13 @@ func FuzzShellCommands(f *testing.F) {
 	f.Fuzz(func(t *testing.T, cmd string) {
 		// Only fuzz commands starting with backslash
 		if !strings.HasPrefix(cmd, "\\") {
+			return
+		}
+
+		// Skip export/import commands - they write files to cwd and fuzzing
+		// creates garbage filenames that pollute the source directory
+		cmdLower := strings.ToLower(cmd)
+		if strings.HasPrefix(cmdLower, "\\export") || strings.HasPrefix(cmdLower, "\\import") {
 			return
 		}
 

@@ -46,3 +46,45 @@ jobs:
             gofmt -d .
             exit 1
           fi
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Run core library fuzz tests (30s each)
+        run: |
+          for fuzz in FuzzDecodeValue FuzzDecodeValueZeroCopy FuzzDecodeBlock FuzzValueRoundTrip \
+                      FuzzDecodeEntry FuzzEntryRoundTrip FuzzBlockRoundTrip FuzzDecodeMsgpack \
+                      FuzzRecordValueEncode FuzzStoreOperations FuzzPrefixCompare; do
+            echo "=== Running $fuzz ==="
+            go test -fuzz=$fuzz -fuzztime=30s . || exit 1
+          done
+
+      - name: Run shell fuzz tests (30s each)
+        run: |
+          cd cmd/tinykvs
+          for fuzz in FuzzShellSQL FuzzShellJSONInsert FuzzShellCommands FuzzShellOrderBy \
+                      FuzzShellBinaryFunctions FuzzShellAggregations FuzzShellNestedFields \
+                      FuzzShellHexValues; do
+            echo "=== Running $fuzz ==="
+            go test -fuzz=$fuzz -fuzztime=30s . || exit 1
+          done
+
+      - name: Commit fuzz corpus
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add testdata/fuzz/ cmd/tinykvs/testdata/fuzz/ 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No new fuzz corpus entries to commit"
+          else
+            git commit -m "ci: update fuzz corpus with new findings"
+            git push
+          fi

@@ -35,7 +35,7 @@ type Store struct {
 
 	// State
 	nextID uint32 // Atomic SSTable ID counter
-	closed bool
+	closed atomic.Bool
 }
 
 // Open opens or creates a store at the given path.
@@ -138,61 +138,77 @@ func Open(path string, opts Options) (*Store, error) {
 
 // Get retrieves a value by key.
 func (s *Store) Get(key []byte) (Value, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.closed {
+	if s.closed.Load() {
 		return Value{}, ErrStoreClosed
 	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	return s.reader.Get(key)
 }
 
 // Put stores a key-value pair.
 func (s *Store) Put(key []byte, value Value) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
-	if s.closed {
+	if s.closed.Load() {
 		return ErrStoreClosed
 	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	return s.writer.Put(key, value)
 }
 
 // Delete removes a key.
 func (s *Store) Delete(key []byte) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
-	if s.closed {
+	if s.closed.Load() {
 		return ErrStoreClosed
 	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	return s.writer.Delete(key)
 }
 
 // Flush forces all data to disk.
 func (s *Store) Flush() error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
-	if s.closed {
+	if s.closed.Load() {
 		return ErrStoreClosed
 	}
 
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	return s.writer.Flush()
+}
+
+// Sync ensures all written data is durable by syncing the WAL.
+// This is faster than Flush() because it doesn't create an SSTable.
+// Data remains in the memtable and will be recovered from WAL on restart.
+// Use this for frequent durability checkpoints; use Flush() less frequently
+// to convert memtable data to SSTables.
+func (s *Store) Sync() error {
+	if s.closed.Load() {
+		return ErrStoreClosed
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	return s.wal.Sync()
 }
 
 // Compact forces compaction of all L0 tables to L1.
 // This makes reads faster by converting overlapping L0 tables to disjoint L1 tables.
 func (s *Store) Compact() error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
-	if s.closed {
+	if s.closed.Load() {
 		return ErrStoreClosed
 	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	return s.writer.ForceCompact()
 }
@@ -202,9 +218,12 @@ func (s *Store) Close() error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	if s.closed {
+	if s.closed.Load() {
 		return nil
 	}
+
+	// Mark as closed early to reject new operations
+	s.closed.Store(true)
 
 	// Stop background goroutines
 	s.writer.Stop()
@@ -232,7 +251,6 @@ func (s *Store) Close() error {
 	// Release lock file
 	s.releaseLock()
 
-	s.closed = true
 	return nil
 }
 
@@ -241,44 +259,32 @@ func (s *Store) Close() error {
 // Return false from the callback to stop iteration.
 // Keys are deduplicated (newest version wins) and tombstones are skipped.
 func (s *Store) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool) error {
-	s.mu.RLock()
-	if s.closed {
-		s.mu.RUnlock()
+	if s.closed.Load() {
 		return ErrStoreClosed
 	}
-	reader := s.reader
-	s.mu.RUnlock()
 
-	return reader.ScanPrefix(prefix, fn)
+	return s.reader.ScanPrefix(prefix, fn)
 }
 
 // ScanPrefixWithStats is like ScanPrefix but also returns scan statistics.
 // The progress callback (if non-nil) is called periodically during the scan.
 func (s *Store) ScanPrefixWithStats(prefix []byte, fn func(key []byte, value Value) bool, progress ScanProgress) (ScanStats, error) {
-	s.mu.RLock()
-	if s.closed {
-		s.mu.RUnlock()
+	if s.closed.Load() {
 		return ScanStats{}, ErrStoreClosed
 	}
-	reader := s.reader
-	s.mu.RUnlock()
 
-	return reader.ScanPrefixWithStats(prefix, fn, progress)
+	return s.reader.ScanPrefixWithStats(prefix, fn, progress)
 }
 
 // ScanRange iterates over all keys in the range [start, end) in sorted order.
 // The callback receives the key and value bytes directly (zero-copy).
 // Return false from the callback to stop iteration.
 func (s *Store) ScanRange(start, end []byte, fn func(key []byte, value Value) bool) error {
-	s.mu.RLock()
-	if s.closed {
-		s.mu.RUnlock()
+	if s.closed.Load() {
 		return ErrStoreClosed
 	}
-	reader := s.reader
-	s.mu.RUnlock()
 
-	return reader.ScanRange(start, end, fn)
+	return s.reader.ScanRange(start, end, fn)
 }
 
 // Stats returns store statistics.

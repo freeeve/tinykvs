@@ -31,4 +31,3 @@ tinykvs-bench-arm64
 tinykvs-bench
 coverage.html
 coverage.out
-testdata/
