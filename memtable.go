@@ -120,13 +120,22 @@ func (m *memtable) Get(key []byte) (Entry, bool) {
 	return Entry{}, false
 }
 
-// Iterator returns an iterator over all entries in sorted order.
-// The caller must call Close() when done.
+// Iterator returns a lock-free iterator over all entries in sorted order.
+// It takes a snapshot of the skiplist state under a brief lock, then iterates
+// without holding any lock. This allows writers to proceed during iteration.
+//
+// Note: Entries added after Iterator() is called may or may not be visible.
+// This is safe because memtable nodes are never deleted (only tombstoned).
 func (m *memtable) Iterator() *memtableIterator {
 	m.mu.RLock()
+	head := m.head
+	height := m.height
+	m.mu.RUnlock()
+
 	return &memtableIterator{
-		mt:      m,
-		current: m.head,
+		head:    head,
+		height:  height,
+		current: head,
 	}
 }
 
@@ -155,8 +164,10 @@ func (m *memtable) randomHeight() int {
 }
 
 // memtableIterator iterates over memtable entries in sorted order.
+// It operates on a snapshot of the skiplist and does not hold any locks during iteration.
 type memtableIterator struct {
-	mt      *memtable
+	head    *skiplistNode
+	height  int
 	current *skiplistNode
 }
 
@@ -197,26 +208,22 @@ func (it *memtableIterator) Value() Value {
 
 // Valid returns true if the iterator is positioned at a valid entry.
 func (it *memtableIterator) Valid() bool {
-	return it.current != nil && it.current != it.mt.head
+	return it.current != nil && it.current != it.head
 }
 
 // Seek positions the iterator at the first entry with key >= target.
 func (it *memtableIterator) Seek(target []byte) bool {
-	it.mt.mu.RLock()
-	defer it.mt.mu.RUnlock()
-
-	x := it.mt.head
-	for i := it.mt.height - 1; i >= 0; i-- {
+	x := it.head
+	for i := it.height - 1; i >= 0; i-- {
 		for x.forward[i] != nil && CompareKeys(x.forward[i].entry.Key, target) < 0 {
 			x = x.forward[i]
 		}
 	}
-
 	it.current = x.forward[0]
 	return it.current != nil
 }
 
-// Close releases resources held by the iterator.
+// Close is a no-op for lock-free iterators.
 func (it *memtableIterator) Close() {
-	it.mt.mu.RUnlock()
+	// No-op: lock-free iterator doesn't hold any locks
 }
