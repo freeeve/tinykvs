@@ -139,6 +139,49 @@ func findTableForKey(tables []*SSTable, key []byte) int {
 	return -1
 }
 
+// findTableForPrefix finds the first SSTable that may contain keys with the given prefix (for L1+).
+// Returns the index of the first matching table, or -1 if no table could contain the prefix.
+func findTableForPrefix(tables []*SSTable, prefix []byte) int {
+	if len(tables) == 0 {
+		return -1
+	}
+
+	// Binary search to find the first table where prefix might exist
+	lo, hi := 0, len(tables)-1
+	result := -1
+
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		maxKey := tables[mid].MaxKey()
+
+		// If prefix <= maxKey (prefix-wise), this table or an earlier one might contain matches
+		prefixBeforeOrAtMax := true
+		if len(maxKey) >= len(prefix) {
+			for i := 0; i < len(prefix); i++ {
+				if prefix[i] < maxKey[i] {
+					break
+				} else if prefix[i] > maxKey[i] {
+					prefixBeforeOrAtMax = false
+					break
+				}
+			}
+		}
+
+		if prefixBeforeOrAtMax {
+			// This table might contain matches, but check if there's an earlier one
+			if hasKeyInRange(prefix, tables[mid].MinKey(), maxKey) {
+				result = mid
+			}
+			hi = mid - 1
+		} else {
+			// Prefix is after this table's maxKey, look right
+			lo = mid + 1
+		}
+	}
+
+	return result
+}
+
 // Setmemtable updates the active memtable.
 func (r *reader) Setmemtable(mt *memtable) {
 	r.mu.Lock()
@@ -226,15 +269,24 @@ func (r *reader) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool
 	for level := 0; level < len(levels); level++ {
 		tables := levels[level]
 		if level == 0 {
+			// L0: tables may overlap, check all
 			for i := len(tables) - 1; i >= 0; i-- {
 				scanner.addSSTable(tables[i], baseIdx)
 				baseIdx++
 			}
 		} else {
-			for _, t := range tables {
-				if hasKeyInRange(prefix, t.MinKey(), t.MaxKey()) {
-					scanner.addSSTable(t, baseIdx)
-					baseIdx++
+			// L1+: tables are sorted and non-overlapping
+			// Binary search to find starting table, then check subsequent tables
+			startIdx := findTableForPrefix(tables, prefix)
+			if startIdx >= 0 {
+				for i := startIdx; i < len(tables); i++ {
+					if hasKeyInRange(prefix, tables[i].MinKey(), tables[i].MaxKey()) {
+						scanner.addSSTable(tables[i], baseIdx)
+						baseIdx++
+					} else {
+						// Tables are sorted, no more matches possible
+						break
+					}
 				}
 			}
 		}
@@ -306,15 +358,24 @@ func (r *reader) ScanPrefixWithStats(prefix []byte, fn func(key []byte, value Va
 	for level := 0; level < len(levels); level++ {
 		tables := levels[level]
 		if level == 0 {
+			// L0: tables may overlap, check all
 			for i := len(tables) - 1; i >= 0; i-- {
 				scanner.addSSTable(tables[i], baseIdx)
 				baseIdx++
 			}
 		} else {
-			for _, t := range tables {
-				if hasKeyInRange(prefix, t.MinKey(), t.MaxKey()) {
-					scanner.addSSTable(t, baseIdx)
-					baseIdx++
+			// L1+: tables are sorted and non-overlapping
+			// Binary search to find starting table, then check subsequent tables
+			startIdx := findTableForPrefix(tables, prefix)
+			if startIdx >= 0 {
+				for i := startIdx; i < len(tables); i++ {
+					if hasKeyInRange(prefix, tables[i].MinKey(), tables[i].MaxKey()) {
+						scanner.addSSTable(tables[i], baseIdx)
+						baseIdx++
+					} else {
+						// Tables are sorted, no more matches possible
+						break
+					}
 				}
 			}
 		}
