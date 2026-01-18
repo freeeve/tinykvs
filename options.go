@@ -125,6 +125,7 @@ func DefaultOptions(dir string) Options {
 		BloomFPRate:         0.01,             // 1% false positive
 		CompactionStyle:     CompactionStyleLeveled,
 		L0CompactionTrigger: 4,
+		L1MaxSize:           1024 * 1024 * 1024, // 1GB (L2=10GB, L3=100GB, L4=1TB with 10x multiplier)
 		MaxLevels:           7,
 		LevelSizeMultiplier: 10,
 		WALSyncMode:         WALSyncPerBatch,

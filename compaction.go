@@ -308,10 +308,10 @@ func (w *writer) levelSize(tables []*SSTable) int64 {
 }
 
 func (w *writer) maxLevelSize(level int) int64 {
-	// L1: configurable (default 10MB), each subsequent level LevelSizeMultiplier larger
+	// L1: configurable (default 1GB), each subsequent level LevelSizeMultiplier larger
 	base := w.store.opts.L1MaxSize
 	if base <= 0 {
-		base = 10 * 1024 * 1024 // 10MB default
+		base = 1024 * 1024 * 1024 // 1GB fallback
 	}
 	for i := 1; i < level; i++ {
 		base *= int64(w.store.opts.LevelSizeMultiplier)
