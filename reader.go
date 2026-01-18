@@ -389,6 +389,12 @@ func copyValue(v Value) Value {
 			Length:      v.Pointer.Length,
 		}
 	}
+	if v.Record != nil {
+		result.Record = make(map[string]any, len(v.Record))
+		for k, val := range v.Record {
+			result.Record[k] = val
+		}
+	}
 	return result
 }
 

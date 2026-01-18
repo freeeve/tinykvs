@@ -2,6 +2,7 @@ package tinykvs
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 )
@@ -525,4 +526,181 @@ func TestStoreFlushTrigger(t *testing.T) {
 			t.Errorf("Get(%s) after flush: %v", key, err)
 		}
 	}
+}
+
+// TestSync verifies that Sync() persists WAL data without creating SSTables.
+func TestSync(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write data and sync (but don't flush)
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Write some data
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("sync-key%03d", i)
+		if err := store.PutString([]byte(key), fmt.Sprintf("value%03d", i)); err != nil {
+			t.Fatalf("Put failed: %v", err)
+		}
+	}
+
+	// Sync (should persist to WAL but not create SSTables)
+	if err := store.Sync(); err != nil {
+		t.Fatalf("Sync failed: %v", err)
+	}
+
+	// Check stats - data should be in memtable, not L0
+	stats := store.Stats()
+	if stats.MemtableCount != 100 {
+		t.Errorf("memtable count = %d, want 100", stats.MemtableCount)
+	}
+	if len(stats.Levels) > 0 && stats.Levels[0].NumTables > 0 {
+		t.Errorf("L0 has %d tables after Sync, want 0", stats.Levels[0].NumTables)
+	}
+
+	// Close without explicit flush
+	store.Close()
+
+	// Reopen - data should be recovered from WAL
+	store, err = Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer store.Close()
+
+	// Verify all data recovered
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("sync-key%03d", i)
+		expected := fmt.Sprintf("value%03d", i)
+		val, err := store.GetString([]byte(key))
+		if err != nil {
+			t.Errorf("Get(%s) after recovery failed: %v", key, err)
+			continue
+		}
+		if val != expected {
+			t.Errorf("Get(%s) = %q, want %q", key, val, expected)
+		}
+	}
+}
+
+// TestScanPrefixWithStats verifies that scan statistics are tracked correctly.
+func TestScanPrefixWithStats(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 4 * 1024 // Small memtable to force flushes
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Insert data with a prefix
+	for i := 0; i < 500; i++ {
+		key := fmt.Sprintf("stats:%05d", i)
+		if err := store.PutString([]byte(key), fmt.Sprintf("value%05d", i)); err != nil {
+			t.Fatalf("Put failed: %v", err)
+		}
+	}
+
+	// Flush to create SSTables
+	if err := store.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	// Add some more data to memtable
+	for i := 500; i < 600; i++ {
+		key := fmt.Sprintf("stats:%05d", i)
+		if err := store.PutString([]byte(key), fmt.Sprintf("value%05d", i)); err != nil {
+			t.Fatalf("Put failed: %v", err)
+		}
+	}
+
+	// Scan with stats
+	var count int
+	var progressCalls int
+	stats, err := store.ScanPrefixWithStats([]byte("stats:"), func(key []byte, value Value) bool {
+		count++
+		return true
+	}, func(s ScanStats) bool {
+		progressCalls++
+		return true
+	})
+
+	if err != nil {
+		t.Fatalf("ScanPrefixWithStats failed: %v", err)
+	}
+
+	if count != 600 {
+		t.Errorf("scanned %d keys, want 600", count)
+	}
+
+	// Stats should show blocks loaded (from SSTables) and keys examined
+	if stats.KeysExamined < int64(count) {
+		t.Errorf("KeysExamined = %d, want >= %d", stats.KeysExamined, count)
+	}
+
+	t.Logf("Stats: BlocksLoaded=%d, KeysExamined=%d, ProgressCalls=%d",
+		stats.BlocksLoaded, stats.KeysExamined, progressCalls)
+}
+
+// TestLoadSSTablesWithoutManifest tests the migration path when no manifest exists.
+func TestLoadSSTablesWithoutManifest(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a store with some data and flush to create SSTables
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("migrate:%05d", i)
+		if err := store.PutString([]byte(key), fmt.Sprintf("value%05d", i)); err != nil {
+			t.Fatalf("Put failed: %v", err)
+		}
+	}
+
+	if err := store.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	store.Close()
+
+	// Delete the manifest file to simulate migration from old format
+	manifestPath := dir + "/MANIFEST"
+	if err := os.Remove(manifestPath); err != nil {
+		t.Fatalf("Failed to remove manifest: %v", err)
+	}
+
+	// Reopen - should load SSTables by scanning directory
+	store, err = Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Reopen without manifest failed: %v", err)
+	}
+	defer store.Close()
+
+	// Verify data is still accessible
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("migrate:%05d", i)
+		expected := fmt.Sprintf("value%05d", i)
+		val, err := store.GetString([]byte(key))
+		if err != nil {
+			t.Errorf("Get(%s) failed: %v", key, err)
+			continue
+		}
+		if val != expected {
+			t.Errorf("Get(%s) = %q, want %q", key, val, expected)
+		}
+	}
+
+	// Verify manifest was recreated
+	if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
+		t.Error("Manifest was not recreated after migration")
+	}
+
+	stats := store.Stats()
+	t.Logf("After migration: L0=%d tables", stats.Levels[0].NumTables)
 }
