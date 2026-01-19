@@ -319,12 +319,13 @@ func runPrefixScans(dir string, opts tinykvs.Options, numRecords int) {
 
 	// Scan with LIMIT to show lazy loading benefit
 	numLimitScans := 1000
-	limit := 10
+	limit := 100
 	totalLimitKeys := 0
 	scanStart = time.Now()
 	for i := 0; i < numLimitScans; i++ {
-		// Use a broad prefix that would match many keys
-		prefix := fmt.Sprintf("key%06d", rand.Intn(numRecords/1000)*1000)[:9]
+		// Use a prefix that matches ~10000 keys (take first 11 chars of a random key)
+		idx := rand.Intn(numRecords)
+		prefix := fmt.Sprintf("key%012d", idx)[:11]
 		count := 0
 		store.ScanPrefix([]byte(prefix), func(key []byte, value tinykvs.Value) bool {
 			count++
@@ -339,6 +340,6 @@ func runPrefixScans(dir string, opts tinykvs.Options, numRecords int) {
 	runtime.ReadMemStats(&m)
 	storeStats = store.Stats()
 	fmt.Printf("LIMIT %d scans: %d scans in %v (%.0f scans/s, avg %.1f keys/scan) | Heap: %dMB | Sys: %dMB | Idx: %dMB\n",
-		limit, numLimitScans, scanDuration, limitRate, avgLimitKeys,
+		limit, numLimitScans, scanDuration.Truncate(time.Millisecond), limitRate, avgLimitKeys,
 		m.HeapAlloc/1024/1024, m.Sys/1024/1024, storeStats.IndexMemory/1024/1024)
 }

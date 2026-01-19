@@ -217,6 +217,7 @@ func HighPerformanceOptions(dir string) Options  // Max throughput
 | Index | Sparse (per block) | Low memory footprint |
 | Compaction | Leveled | Read-optimized |
 | Concurrency | RWMutex | Simple, read-optimized |
+| L1+ Scans | Lazy loading | Only load tables when needed for LIMIT queries |
 
 ### SSTable Format
 
@@ -278,16 +279,20 @@ Block cache impact (random reads, 100K keys):
 
 1 billion record benchmark with `GOMEMLIMIT=700MiB`:
 
-**zstd compression (default)**
+**zstd compression (default), 100M records**
 
 | Operation | Throughput |
 |-----------|------------|
-| Sequential write | 190K ops/sec |
-| Random read (no cache) | 1,400 ops/sec |
-| Full scan | 1.1M keys/sec |
-| Random prefix scan | 1,200 scans/sec |
+| Sequential write | 579K ops/sec |
+| Random read (no cache) | 16K ops/sec |
+| Random read (64MB cache) | 16K ops/sec |
+| Full scan | 1.4M keys/sec |
+| Random prefix scan | 15K scans/sec |
+| Prefix scan with LIMIT 100 | 7K scans/sec |
 
-Write time: 1h 28m for 1B records
+Prefix scans with LIMIT benefit from lazy loading: L1+ tables are sorted and non-overlapping, so only the tables actually needed are loaded.
+
+Write time: ~3 min for 100M records, ~1.5h for 1B records
 
 Memory usage during benchmark:
 - Heap: 50-200 MB
