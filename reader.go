@@ -9,8 +9,12 @@ import (
 
 // ScanStats tracks statistics during scan operations.
 type ScanStats struct {
-	BlocksLoaded int64 // Number of SSTable blocks loaded from disk or cache
-	KeysExamined int64 // Total keys examined (including duplicates and tombstones)
+	BlocksLoaded   int64 // Number of SSTable blocks accessed (disk + cache)
+	BlocksCacheHit int64 // Number of blocks served from cache
+	BlocksDiskRead int64 // Number of blocks read from disk
+	KeysExamined   int64 // Total keys examined (including duplicates and tombstones)
+	TablesChecked  int64 // Number of SSTables checked for prefix
+	TablesAdded    int64 // Number of SSTables added to scanner (had matching entries)
 }
 
 // ScanProgress is called periodically during scan operations to report progress.
@@ -266,30 +270,37 @@ func (r *reader) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool
 	}
 
 	baseIdx := len(immutables) + 1
+
+	// Collect L1+ tables for lazy loading (sorted, non-overlapping)
+	var sortedTables []*SSTable
+
 	for level := 0; level < len(levels); level++ {
 		tables := levels[level]
 		if level == 0 {
-			// L0: tables may overlap, check all
+			// L0: tables may overlap, must add all to heap
 			for i := len(tables) - 1; i >= 0; i-- {
 				scanner.addSSTable(tables[i], baseIdx)
 				baseIdx++
 			}
 		} else {
 			// L1+: tables are sorted and non-overlapping
-			// Binary search to find starting table, then check subsequent tables
+			// Collect matching tables for lazy loading
 			startIdx := findTableForPrefix(tables, prefix)
 			if startIdx >= 0 {
 				for i := startIdx; i < len(tables); i++ {
 					if hasKeyInRange(prefix, tables[i].MinKey(), tables[i].MaxKey()) {
-						scanner.addSSTable(tables[i], baseIdx)
-						baseIdx++
+						sortedTables = append(sortedTables, tables[i])
 					} else {
-						// Tables are sorted, no more matches possible
 						break
 					}
 				}
 			}
 		}
+	}
+
+	// Queue L1+ tables for lazy loading (only first is added to heap)
+	if len(sortedTables) > 0 {
+		scanner.queueSortedTables(sortedTables, baseIdx)
 	}
 
 	scanner.init()
@@ -355,30 +366,37 @@ func (r *reader) ScanPrefixWithStats(prefix []byte, fn func(key []byte, value Va
 	}
 
 	baseIdx := len(immutables) + 1
+
+	// Collect L1+ tables for lazy loading (sorted, non-overlapping)
+	var sortedTables []*SSTable
+
 	for level := 0; level < len(levels); level++ {
 		tables := levels[level]
 		if level == 0 {
-			// L0: tables may overlap, check all
+			// L0: tables may overlap, must add all to heap
 			for i := len(tables) - 1; i >= 0; i-- {
 				scanner.addSSTable(tables[i], baseIdx)
 				baseIdx++
 			}
 		} else {
 			// L1+: tables are sorted and non-overlapping
-			// Binary search to find starting table, then check subsequent tables
+			// Collect matching tables for lazy loading
 			startIdx := findTableForPrefix(tables, prefix)
 			if startIdx >= 0 {
 				for i := startIdx; i < len(tables); i++ {
 					if hasKeyInRange(prefix, tables[i].MinKey(), tables[i].MaxKey()) {
-						scanner.addSSTable(tables[i], baseIdx)
-						baseIdx++
+						sortedTables = append(sortedTables, tables[i])
 					} else {
-						// Tables are sorted, no more matches possible
 						break
 					}
 				}
 			}
 		}
+	}
+
+	// Queue L1+ tables for lazy loading (only first is added to heap)
+	if len(sortedTables) > 0 {
+		scanner.queueSortedTables(sortedTables, baseIdx)
 	}
 
 	scanner.init()
@@ -544,6 +562,12 @@ type prefixScanner struct {
 	heap    prefixHeap
 	current Entry
 	stats   ScanStats // Tracks blocks loaded and keys examined
+
+	// Lazy loading for L1+ tables (sorted, non-overlapping)
+	// Only one L1+ table per level needs to be in the heap at a time
+	pendingTables []*SSTable // Tables waiting to be added (sorted by minKey)
+	pendingIdx    int        // Next table to add from pendingTables
+	basePriority  int        // Priority for pending tables
 }
 
 type prefixHeapEntry struct {
@@ -628,6 +652,56 @@ func newPrefixScanner(prefix []byte, cache *lruCache, verify bool) *prefixScanne
 	}
 }
 
+// queueSortedTables queues L1+ tables for lazy loading.
+// Tables must be sorted by minKey and non-overlapping.
+// Only the first table is added to the heap immediately; others are loaded on demand.
+func (s *prefixScanner) queueSortedTables(tables []*SSTable, basePriority int) {
+	if len(tables) == 0 {
+		return
+	}
+
+	s.pendingTables = tables
+	s.pendingIdx = 0
+	s.basePriority = basePriority
+
+	// Add only the first table immediately
+	s.addNextPendingTable()
+}
+
+// addNextPendingTable adds the next pending L1+ table to the heap.
+func (s *prefixScanner) addNextPendingTable() {
+	for s.pendingIdx < len(s.pendingTables) {
+		sst := s.pendingTables[s.pendingIdx]
+		s.pendingIdx++
+
+		// Check if this table could have matching keys
+		if !hasKeyInRange(s.prefix, sst.MinKey(), sst.MaxKey()) {
+			continue
+		}
+
+		atomic.AddInt64(&s.stats.TablesChecked, 1)
+
+		src := &sstablePrefixSource{
+			sst:    sst,
+			prefix: s.prefix,
+			cache:  s.cache,
+			verify: s.verify,
+			stats:  &s.stats,
+		}
+		src.seekToPrefix()
+		if src.valid {
+			atomic.AddInt64(&s.stats.TablesAdded, 1)
+			s.heap.push(prefixHeapEntry{
+				entry:    src.entry(),
+				priority: s.basePriority,
+				source:   src,
+			})
+			return // Only add one table at a time
+		}
+		src.close()
+	}
+}
+
 func (s *prefixScanner) addmemtable(mt *memtable, priority int) {
 	src := &memtablePrefixSource{mt: mt, prefix: s.prefix}
 	src.seekToPrefix()
@@ -644,6 +718,8 @@ func (s *prefixScanner) addmemtable(mt *memtable, priority int) {
 }
 
 func (s *prefixScanner) addSSTable(sst *SSTable, priority int) {
+	atomic.AddInt64(&s.stats.TablesChecked, 1)
+
 	src := &sstablePrefixSource{
 		sst:    sst,
 		prefix: s.prefix,
@@ -653,6 +729,7 @@ func (s *prefixScanner) addSSTable(sst *SSTable, priority int) {
 	}
 	src.seekToPrefix()
 	if src.valid {
+		atomic.AddInt64(&s.stats.TablesAdded, 1)
 		entry := src.entry()
 		// Debug: ALWAYS log initial entry for debugging
 		if len(s.prefix) > 0 && !hasPrefix(entry.Key, s.prefix) {
@@ -714,6 +791,12 @@ func (s *prefixScanner) next() bool {
 	} else {
 		// Source exhausted, close it to release any held locks
 		he.source.close()
+
+		// If this was a L1+ table source, try to add the next pending table
+		// This implements lazy loading - we only add L1+ tables as needed
+		if s.pendingIdx < len(s.pendingTables) {
+			s.addNextPendingTable()
+		}
 	}
 
 	return true
@@ -816,7 +899,8 @@ func (s *sstablePrefixSource) seekToPrefix() {
 		}
 	}
 
-	// Not found in this block - keep scanning subsequent blocks
+	// Not found in this block - check next block's first key via index
+	// before loading to avoid unnecessary block loads
 	for {
 		// Release old block and clear it
 		if s.block != nil && !s.fromCache {
@@ -826,6 +910,18 @@ func (s *sstablePrefixSource) seekToPrefix() {
 		s.blockIdx++
 
 		if s.blockIdx >= len(s.sst.Index.Entries) {
+			s.valid = false
+			return
+		}
+
+		// Optimization: check if this block could contain matching keys
+		// The sparse index stores the first key of each block
+		blockFirstKey := s.sst.Index.Entries[s.blockIdx].Key
+
+		// If this block's first key > prefix AND doesn't start with prefix,
+		// then no keys with this prefix can exist in this or later blocks
+		// (blocks are sorted, so all subsequent first keys will be even larger)
+		if CompareKeys(blockFirstKey, s.prefix) > 0 && !hasPrefix(blockFirstKey, s.prefix) {
 			s.valid = false
 			return
 		}
@@ -874,6 +970,7 @@ func (s *sstablePrefixSource) loadBlock() error {
 			s.fromCache = true
 			if s.stats != nil {
 				atomic.AddInt64(&s.stats.BlocksLoaded, 1)
+				atomic.AddInt64(&s.stats.BlocksCacheHit, 1)
 			}
 			return nil
 		}
@@ -899,6 +996,7 @@ func (s *sstablePrefixSource) loadBlock() error {
 	s.block = block
 	if s.stats != nil {
 		atomic.AddInt64(&s.stats.BlocksLoaded, 1)
+		atomic.AddInt64(&s.stats.BlocksDiskRead, 1)
 	}
 	return nil
 }
@@ -1366,6 +1464,7 @@ func (s *sstableRangeSource) loadBlock() error {
 			s.fromCache = true
 			if s.stats != nil {
 				atomic.AddInt64(&s.stats.BlocksLoaded, 1)
+				atomic.AddInt64(&s.stats.BlocksCacheHit, 1)
 			}
 			return nil
 		}
@@ -1391,6 +1490,7 @@ func (s *sstableRangeSource) loadBlock() error {
 	s.block = block
 	if s.stats != nil {
 		atomic.AddInt64(&s.stats.BlocksLoaded, 1)
+		atomic.AddInt64(&s.stats.BlocksDiskRead, 1)
 	}
 	return nil
 }

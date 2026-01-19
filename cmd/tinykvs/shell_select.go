@@ -296,7 +296,7 @@ func (s *Shell) handleSelect(stmt *sqlparser.Select, orderBy []SortOrder) {
 
 	// Track progress for slow queries
 	var scanned int64
-	var blocksLoaded int64
+	var scanStats tinykvs.ScanStats
 	var matchCount int
 	var lastProgress time.Time
 	hasValueFilters := len(valueFilters) > 0
@@ -320,12 +320,12 @@ func (s *Shell) handleSelect(stmt *sqlparser.Select, orderBy []SortOrder) {
 		if atomic.LoadInt32(&interrupted) != 0 {
 			return false
 		}
-		blocksLoaded = stats.BlocksLoaded
+		scanStats = stats
 		if time.Since(lastProgress) > time.Second {
 			elapsed := time.Since(startTime)
 			rate := int64(float64(stats.KeysExamined) / elapsed.Seconds())
 			fmt.Fprintf(os.Stderr, "\rScanned %s keys (%s blocks) in %s (%s keys/sec)...    ",
-				formatIntCommas(stats.KeysExamined), formatIntCommas(blocksLoaded),
+				formatIntCommas(stats.KeysExamined), formatIntCommas(stats.BlocksLoaded),
 				formatDuration(elapsed), formatIntCommas(rate))
 			lastProgress = time.Now()
 		}
@@ -344,7 +344,7 @@ func (s *Shell) handleSelect(stmt *sqlparser.Select, orderBy []SortOrder) {
 			elapsed := time.Since(startTime)
 			rate := int64(float64(scanned) / elapsed.Seconds())
 			fmt.Fprintf(os.Stderr, "\rScanned %s keys (%s blocks) in %s (%s keys/sec), found %d matches...    ",
-				formatIntCommas(scanned), formatIntCommas(blocksLoaded),
+				formatIntCommas(scanned), formatIntCommas(scanStats.BlocksLoaded),
 				formatDuration(elapsed), formatIntCommas(rate), matchCount)
 			lastProgress = time.Now()
 		}
@@ -405,15 +405,11 @@ func (s *Shell) handleSelect(stmt *sqlparser.Select, orderBy []SortOrder) {
 		}
 		safeProcessRow([]byte(keyEquals), val)
 	} else if keyPrefix != "" {
-		var stats tinykvs.ScanStats
-		stats, err = s.store.ScanPrefixWithStats([]byte(keyPrefix), safeProcessRow, progressCallback)
-		blocksLoaded = stats.BlocksLoaded
+		scanStats, err = s.store.ScanPrefixWithStats([]byte(keyPrefix), safeProcessRow, progressCallback)
 	} else if keyStart != "" && keyEnd != "" {
 		err = s.store.ScanRange([]byte(keyStart), []byte(keyEnd), safeProcessRow)
 	} else {
-		var stats tinykvs.ScanStats
-		stats, err = s.store.ScanPrefixWithStats(nil, safeProcessRow, progressCallback)
-		blocksLoaded = stats.BlocksLoaded
+		scanStats, err = s.store.ScanPrefixWithStats(nil, safeProcessRow, progressCallback)
 	}
 
 	// Clear progress line
@@ -457,16 +453,27 @@ func (s *Shell) handleSelect(stmt *sqlparser.Select, orderBy []SortOrder) {
 	}
 
 	// Show stats
-	if scanned > 0 || blocksLoaded > 0 {
+	if scanned > 0 || scanStats.BlocksLoaded > 0 {
 		rate := float64(scanned) / elapsed.Seconds()
 		if wasInterrupted {
 			fmt.Printf("(%d rows) - interrupted, scanned %s keys (%s blocks) in %s (%s keys/sec)\n",
 				matchCount, formatIntCommas(scanned),
-				formatIntCommas(blocksLoaded), formatDuration(elapsed), formatIntCommas(int64(rate)))
+				formatIntCommas(scanStats.BlocksLoaded), formatDuration(elapsed), formatIntCommas(int64(rate)))
 		} else {
-			fmt.Printf("(%d rows) scanned %s keys, %s blocks, %s\n",
+			// Show detailed stats: tables checked/added, blocks (cache/disk)
+			blockDetails := fmt.Sprintf("%d blocks", scanStats.BlocksLoaded)
+			if scanStats.BlocksCacheHit > 0 || scanStats.BlocksDiskRead > 0 {
+				blockDetails = fmt.Sprintf("%d blocks (%d cache, %d disk)",
+					scanStats.BlocksLoaded, scanStats.BlocksCacheHit, scanStats.BlocksDiskRead)
+			}
+			tableDetails := ""
+			if scanStats.TablesChecked > 0 {
+				tableDetails = fmt.Sprintf(", %d/%d tables",
+					scanStats.TablesAdded, scanStats.TablesChecked)
+			}
+			fmt.Printf("(%d rows) scanned %s keys, %s%s, %s\n",
 				matchCount, formatIntCommas(scanned),
-				formatIntCommas(blocksLoaded), formatDuration(elapsed))
+				blockDetails, tableDetails, formatDuration(elapsed))
 		}
 	} else {
 		fmt.Printf("(%d rows)\n", matchCount)

@@ -163,6 +163,13 @@ func (s *Shell) handleCommand(cmd string) bool {
 		fmt.Println("Table: kv (k TEXT, v TEXT)")
 		fmt.Println("  - k: the key (string or hex with x'...')")
 		fmt.Println("  - v: the value")
+	case "\\explain":
+		if len(parts) < 2 {
+			fmt.Println("Usage: \\explain <prefix>")
+			fmt.Println("  Shows which SSTables contain keys with the given prefix")
+			return true
+		}
+		s.explainPrefix(parts[1])
 	case "\\export":
 		if len(parts) < 2 {
 			fmt.Println("Usage: \\export <filename.csv>")
@@ -214,6 +221,7 @@ func (s *Shell) printHelp() {
 Shell Commands:
   \help, \h, \?      Show this help
   \stats             Show store statistics
+  \explain <prefix>  Show which SSTables contain a prefix
   \compact           Run compaction
   \flush             Flush memtable to disk
   \tables            Show table schema
@@ -257,6 +265,79 @@ func (s *Shell) printStats() {
 		}
 	}
 	fmt.Printf("Total: %d keys, %s\n", totalKeys, formatBytes(totalSize))
+}
+
+func (s *Shell) explainPrefix(prefixStr string) {
+	// Parse prefix (handle hex format)
+	var prefix []byte
+	if strings.HasPrefix(prefixStr, "0x") || strings.HasPrefix(prefixStr, "0X") {
+		// Hex format
+		hexStr := prefixStr[2:]
+		prefix = make([]byte, len(hexStr)/2)
+		for i := 0; i < len(prefix); i++ {
+			fmt.Sscanf(hexStr[i*2:i*2+2], "%02x", &prefix[i])
+		}
+	} else if strings.HasPrefix(prefixStr, "x'") && strings.HasSuffix(prefixStr, "'") {
+		// SQL hex format x'...'
+		hexStr := prefixStr[2 : len(prefixStr)-1]
+		prefix = make([]byte, len(hexStr)/2)
+		for i := 0; i < len(prefix); i++ {
+			fmt.Sscanf(hexStr[i*2:i*2+2], "%02x", &prefix[i])
+		}
+	} else {
+		prefix = []byte(prefixStr)
+	}
+
+	tables := s.store.ExplainPrefix(prefix)
+
+	if len(tables) == 0 {
+		fmt.Printf("No tables have prefix %x in their key range\n", prefix)
+		return
+	}
+
+	// Group by level
+	levelTables := make(map[int][]tinykvs.PrefixTableInfo)
+	for _, t := range tables {
+		levelTables[t.Level] = append(levelTables[t.Level], t)
+	}
+
+	fmt.Printf("Tables with prefix %x in range:\n", prefix)
+	fmt.Println()
+
+	var totalInRange, totalWithMatch int
+	for level := 0; level < 7; level++ {
+		lt := levelTables[level]
+		if len(lt) == 0 {
+			continue
+		}
+
+		matchCount := 0
+		for _, t := range lt {
+			if t.HasMatch {
+				matchCount++
+			}
+		}
+		totalInRange += len(lt)
+		totalWithMatch += matchCount
+
+		fmt.Printf("L%d: %d tables in range, %d with matching keys\n", level, len(lt), matchCount)
+
+		// Show details for tables with matches (limit to 10)
+		shown := 0
+		for _, t := range lt {
+			if t.HasMatch && shown < 10 {
+				fmt.Printf("  [%d] minKey=%x maxKey=%x firstMatch=%x (%d keys)\n",
+					t.TableID, t.MinKey, t.MaxKey, t.FirstMatch, t.NumKeys)
+				shown++
+			}
+		}
+		if matchCount > 10 {
+			fmt.Printf("  ... and %d more tables with matches\n", matchCount-10)
+		}
+	}
+
+	fmt.Println()
+	fmt.Printf("Summary: %d tables in range, %d with actual matches\n", totalInRange, totalWithMatch)
 }
 
 func cacheHitRate(cs tinykvs.CacheStats) float64 {

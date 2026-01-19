@@ -372,6 +372,91 @@ func (s *Store) FindKey(key []byte) *KeyLocation {
 	return nil
 }
 
+// PrefixTableInfo describes an SSTable's relationship to a prefix.
+type PrefixTableInfo struct {
+	Level      int
+	TableID    uint32
+	MinKey     []byte
+	MaxKey     []byte
+	NumKeys    uint64
+	InRange    bool // Prefix is within [MinKey, MaxKey]
+	HasMatch   bool // Table actually contains keys with this prefix
+	FirstMatch []byte // First matching key (if HasMatch)
+}
+
+// ExplainPrefix returns information about which tables contain a given prefix.
+func (s *Store) ExplainPrefix(prefix []byte) []PrefixTableInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var results []PrefixTableInfo
+
+	for level, tables := range s.levels {
+		for _, sst := range tables {
+			info := PrefixTableInfo{
+				Level:   level,
+				TableID: sst.ID,
+				MinKey:  sst.MinKey(),
+				MaxKey:  sst.MaxKey(),
+				NumKeys: sst.Footer.NumKeys,
+			}
+
+			// Check if prefix is in range
+			info.InRange = hasKeyInRange(prefix, info.MinKey, info.MaxKey)
+
+			if info.InRange {
+				// Try to find an actual matching key using same logic as seekToPrefix
+				sst.ensureIndex()
+				blockIdx := sst.Index.Search(prefix)
+				if blockIdx < 0 {
+					// Prefix is before all keys - check if minKey has prefix
+					if hasPrefix(sst.Index.MinKey, prefix) {
+						blockIdx = 0
+					}
+				}
+
+				// Search through blocks (same as seekToPrefix forward scanning)
+				for blockIdx >= 0 && blockIdx < len(sst.Index.Entries) && !info.HasMatch {
+					ie := sst.Index.Entries[blockIdx]
+
+					// Check if this block could contain matching keys
+					blockFirstKey := ie.Key
+					if CompareKeys(blockFirstKey, prefix) > 0 && !hasPrefix(blockFirstKey, prefix) {
+						break // No keys with this prefix in this or later blocks
+					}
+
+					// Load block and check for match
+					blockData := make([]byte, ie.BlockSize)
+					if _, err := sst.file.ReadAt(blockData, int64(ie.BlockOffset)); err == nil {
+						if block, err := DecodeBlock(blockData, false); err == nil {
+							foundEntry := false
+							for _, entry := range block.Entries {
+								if CompareKeys(entry.Key, prefix) >= 0 {
+									foundEntry = true
+									if hasPrefix(entry.Key, prefix) {
+										info.HasMatch = true
+										info.FirstMatch = make([]byte, len(entry.Key))
+										copy(info.FirstMatch, entry.Key)
+									}
+									break
+								}
+							}
+							block.Release()
+							if foundEntry && !info.HasMatch {
+								break // Found entry >= prefix but no match
+							}
+						}
+					}
+					blockIdx++
+				}
+				results = append(results, info)
+			}
+		}
+	}
+
+	return results
+}
+
 // Errors
 var (
 	ErrStoreClosed     = errors.New("store is closed")
