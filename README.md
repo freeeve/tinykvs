@@ -217,6 +217,7 @@ func HighPerformanceOptions(dir string) Options  // Max throughput
 | Index | Sparse (per block) | Low memory footprint |
 | Compaction | Leveled | Read-optimized |
 | Concurrency | RWMutex | Simple, read-optimized |
+| L1+ Scans | Lazy loading | Only load tables when needed for LIMIT queries |
 
 ### SSTable Format
 
@@ -286,6 +287,9 @@ Block cache impact (random reads, 100K keys):
 | Random read (no cache) | 1,400 ops/sec |
 | Full scan | 1.1M keys/sec |
 | Random prefix scan | 1,200 scans/sec |
+| Prefix scan with LIMIT 10 | 3,000+ scans/sec |
+
+Prefix scans with LIMIT benefit from lazy loading: L1+ tables are sorted and non-overlapping, so only the tables actually needed are loaded.
 
 Write time: 1h 28m for 1B records
 
