@@ -41,7 +41,7 @@ func (w *writer) compactionLoop() {
 
 	for {
 		select {
-		case <-w.ctx.Done():
+		case <-w.done:
 			return
 		case task := <-w.compactCh:
 			w.runCompaction(task)

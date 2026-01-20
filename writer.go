@@ -1,7 +1,6 @@
 package tinykvs
 
 import (
-	"context"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -27,9 +26,10 @@ type writer struct {
 	compactMu sync.Mutex
 	compactCh chan compactionTask
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	// Shutdown coordination
+	done      chan struct{}
+	closeOnce sync.Once
+	wg        sync.WaitGroup
 }
 
 type compactionTask struct {
@@ -42,8 +42,6 @@ const maxImmutableMemtables = 2
 
 // newWriter creates a new writer.
 func newWriter(store *Store, memtable *memtable, wal *wal, reader *reader) *writer {
-	ctx, cancel := context.WithCancel(context.Background())
-
 	w := &writer{
 		store:     store,
 		memtable:  memtable,
@@ -51,8 +49,7 @@ func newWriter(store *Store, memtable *memtable, wal *wal, reader *reader) *writ
 		reader:    reader,
 		flushCh:   make(chan struct{}, 1),
 		compactCh: make(chan compactionTask, 10),
-		ctx:       ctx,
-		cancel:    cancel,
+		done:      make(chan struct{}),
 	}
 	w.flushCond = sync.NewCond(&w.flushMu)
 
@@ -68,7 +65,7 @@ func (w *writer) Start() {
 
 // Stop stops background goroutines.
 func (w *writer) Stop() {
-	w.cancel()
+	w.closeOnce.Do(func() { close(w.done) })
 	w.wg.Wait()
 }
 
@@ -329,7 +326,7 @@ func (w *writer) flushLoop() {
 
 	for {
 		select {
-		case <-w.ctx.Done():
+		case <-w.done:
 			return
 		case <-w.flushCh:
 			w.flushImmutables()
