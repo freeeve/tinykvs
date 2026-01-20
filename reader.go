@@ -176,7 +176,6 @@ func findTableForPrefix(tables []*SSTable, prefix []byte) int {
 		return -1
 	}
 
-	// Binary search to find the first table where prefix might exist
 	lo, hi := 0, len(tables)-1
 	result := -1
 
@@ -184,32 +183,33 @@ func findTableForPrefix(tables []*SSTable, prefix []byte) int {
 		mid := (lo + hi) / 2
 		maxKey := tables[mid].MaxKey()
 
-		// If prefix <= maxKey (prefix-wise), this table or an earlier one might contain matches
-		prefixBeforeOrAtMax := true
-		if len(maxKey) >= len(prefix) {
-			for i := 0; i < len(prefix); i++ {
-				if prefix[i] < maxKey[i] {
-					break
-				} else if prefix[i] > maxKey[i] {
-					prefixBeforeOrAtMax = false
-					break
-				}
-			}
-		}
-
-		if prefixBeforeOrAtMax {
-			// This table might contain matches, but check if there's an earlier one
+		if isPrefixBeforeOrAt(prefix, maxKey) {
 			if hasKeyInRange(prefix, tables[mid].MinKey(), maxKey) {
 				result = mid
 			}
 			hi = mid - 1
 		} else {
-			// Prefix is after this table's maxKey, look right
 			lo = mid + 1
 		}
 	}
 
 	return result
+}
+
+// isPrefixBeforeOrAt returns true if prefix is lexicographically <= maxKey (prefix-wise comparison).
+func isPrefixBeforeOrAt(prefix, maxKey []byte) bool {
+	if len(maxKey) < len(prefix) {
+		return true
+	}
+	for i := 0; i < len(prefix); i++ {
+		if prefix[i] < maxKey[i] {
+			return true
+		}
+		if prefix[i] > maxKey[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Setmemtable updates the active memtable.
@@ -371,38 +371,48 @@ func (r *reader) scanPrefixLoop(scanner *prefixScanner, prefix []byte, fn func(k
 
 	for scanner.next() {
 		entry := scanner.entry()
-
 		progressCount++
-		if progress != nil && progressCount%10000 == 0 {
-			if !progress(scanner.stats) {
-				break
-			}
-		}
 
-		if lastKey != nil && CompareKeys(entry.Key, lastKey) == 0 {
+		if shouldStopProgress(progress, progressCount, scanner.stats) {
+			break
+		}
+		if isDuplicateKey(entry.Key, lastKey) {
 			continue
 		}
-
-		lastKey = make([]byte, len(entry.Key))
-		copy(lastKey, entry.Key)
+		lastKey = copyBytes(entry.Key)
 
 		if entry.Value.IsTombstone() {
 			continue
 		}
-
 		if !hasPrefix(entry.Key, prefix) {
 			break
 		}
-
-		keyCopy := make([]byte, len(entry.Key))
-		copy(keyCopy, entry.Key)
-
-		if !fn(keyCopy, copyValue(entry.Value)) {
+		if !fn(copyBytes(entry.Key), copyValue(entry.Value)) {
 			break
 		}
 	}
 
 	return scanner.stats, nil
+}
+
+// shouldStopProgress checks if progress callback indicates we should stop.
+func shouldStopProgress(progress ScanProgress, count int64, stats ScanStats) bool {
+	if progress == nil || count%10000 != 0 {
+		return false
+	}
+	return !progress(stats)
+}
+
+// isDuplicateKey returns true if key matches lastKey.
+func isDuplicateKey(key, lastKey []byte) bool {
+	return lastKey != nil && CompareKeys(key, lastKey) == 0
+}
+
+// copyBytes creates a copy of a byte slice.
+func copyBytes(b []byte) []byte {
+	result := make([]byte, len(b))
+	copy(result, b)
+	return result
 }
 
 // copyValue creates a deep copy of a Value.
@@ -901,40 +911,49 @@ func (s *sstablePrefixSource) canSkipRemainingBlocks(blockFirstKey []byte) bool 
 // searchNextBlocks continues searching subsequent blocks for prefix matches.
 func (s *sstablePrefixSource) searchNextBlocks() {
 	for {
-		if s.block != nil && !s.fromCache {
-			s.block.Release()
-		}
-		s.block = nil
+		s.releaseCurrentBlock()
 		s.blockIdx++
 
 		if s.blockIdx >= len(s.sst.Index.Entries) {
 			s.valid = false
 			return
 		}
-
-		blockFirstKey := s.sst.Index.Entries[s.blockIdx].Key
-		if s.canSkipRemainingBlocks(blockFirstKey) {
+		if s.canSkipRemainingBlocks(s.sst.Index.Entries[s.blockIdx].Key) {
 			s.valid = false
 			return
 		}
-
 		if err := s.loadBlock(); err != nil {
 			s.valid = false
 			return
 		}
-
-		if len(s.block.Entries) == 0 {
-			continue
-		}
-
-		for s.entryIdx = 0; s.entryIdx < len(s.block.Entries); s.entryIdx++ {
-			key := s.block.Entries[s.entryIdx].Key
-			if CompareKeys(key, s.prefix) >= 0 {
-				s.valid = hasPrefix(key, s.prefix)
-				return
-			}
+		if s.searchBlockForPrefixMatch() {
+			return
 		}
 	}
+}
+
+// releaseCurrentBlock releases the current block if owned.
+func (s *sstablePrefixSource) releaseCurrentBlock() {
+	if s.block != nil && !s.fromCache {
+		s.block.Release()
+	}
+	s.block = nil
+}
+
+// searchBlockForPrefixMatch searches entries in the current block for a prefix match.
+// Returns true if search should stop (found match or past prefix range).
+func (s *sstablePrefixSource) searchBlockForPrefixMatch() bool {
+	if len(s.block.Entries) == 0 {
+		return false
+	}
+	for s.entryIdx = 0; s.entryIdx < len(s.block.Entries); s.entryIdx++ {
+		key := s.block.Entries[s.entryIdx].Key
+		if CompareKeys(key, s.prefix) >= 0 {
+			s.valid = hasPrefix(key, s.prefix)
+			return true
+		}
+	}
+	return false
 }
 
 func (s *sstablePrefixSource) loadBlock() error {
