@@ -10,7 +10,6 @@ import (
 )
 
 func (s *Shell) handleInsert(stmt *sqlparser.Insert) {
-	// Extract values from INSERT
 	rows, ok := stmt.Rows.(sqlparser.Values)
 	if !ok || len(rows) == 0 {
 		fmt.Println("Error: Invalid INSERT syntax")
@@ -19,61 +18,94 @@ func (s *Shell) handleInsert(stmt *sqlparser.Insert) {
 
 	inserted := 0
 	for _, row := range rows {
-		if len(row) < 2 {
-			fmt.Println("Error: INSERT requires (key, value)")
-			continue
+		if s.insertRow(row) {
+			inserted++
 		}
-
-		key := extractValue(row[0])
-		value, hexBytes, isHex := extractValueAndType(row[1])
-
-		if key == "" {
-			fmt.Println("Error: key cannot be empty")
-			continue
-		}
-
-		// Try msgpack first if it's hex data that looks like a msgpack map
-		if isHex && isMsgpackMap(hexBytes) {
-			if record, err := tinykvs.DecodeMsgpack(hexBytes); err == nil {
-				if err := s.store.PutMap([]byte(key), record); err != nil {
-					fmt.Printf("Error: %v\n", err)
-					continue
-				}
-				inserted++
-				continue
-			}
-			// Fall through to store as bytes if msgpack decode fails
-		}
-
-		// Detect JSON and store as record
-		if strings.HasPrefix(value, "{") && strings.HasSuffix(value, "}") {
-			var record map[string]any
-			if err := json.Unmarshal([]byte(value), &record); err == nil {
-				if err := s.store.PutMap([]byte(key), record); err != nil {
-					fmt.Printf("Error: %v\n", err)
-					continue
-				}
-				inserted++
-				continue
-			}
-		}
-
-		// Store hex data as bytes, strings as strings
-		if isHex {
-			if err := s.store.PutBytes([]byte(key), hexBytes); err != nil {
-				fmt.Printf("Error: %v\n", err)
-				continue
-			}
-		} else {
-			if err := s.store.PutString([]byte(key), value); err != nil {
-				fmt.Printf("Error: %v\n", err)
-				continue
-			}
-		}
-		inserted++
 	}
 
 	fmt.Printf("INSERT %d\n", inserted)
+}
+
+// insertRow processes a single INSERT row and returns true on success.
+func (s *Shell) insertRow(row sqlparser.ValTuple) bool {
+	if len(row) < 2 {
+		fmt.Println("Error: INSERT requires (key, value)")
+		return false
+	}
+
+	key := extractValue(row[0])
+	if key == "" {
+		fmt.Println("Error: key cannot be empty")
+		return false
+	}
+
+	value, hexBytes, isHex := extractValueAndType(row[1])
+	return s.storeInsertValue(key, value, hexBytes, isHex)
+}
+
+// storeInsertValue stores a value, trying msgpack, JSON, bytes, or string in order.
+func (s *Shell) storeInsertValue(key, value string, hexBytes []byte, isHex bool) bool {
+	keyBytes := []byte(key)
+
+	// Try msgpack first if it's hex data that looks like a msgpack map
+	if isHex && isMsgpackMap(hexBytes) {
+		if ok := s.tryStoreMsgpack(keyBytes, hexBytes); ok {
+			return true
+		}
+		// Fall through to store as bytes if msgpack decode fails
+	}
+
+	// Detect JSON and store as record
+	if ok := s.tryStoreJSON(keyBytes, value); ok {
+		return true
+	}
+
+	// Store hex data as bytes, strings as strings
+	return s.storeRawValue(keyBytes, value, hexBytes, isHex)
+}
+
+// tryStoreMsgpack attempts to decode and store msgpack data.
+func (s *Shell) tryStoreMsgpack(key, hexBytes []byte) bool {
+	record, err := tinykvs.DecodeMsgpack(hexBytes)
+	if err != nil {
+		return false
+	}
+	if err := s.store.PutMap(key, record); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return false
+	}
+	return true
+}
+
+// tryStoreJSON attempts to parse and store JSON data.
+func (s *Shell) tryStoreJSON(key []byte, value string) bool {
+	if !strings.HasPrefix(value, "{") || !strings.HasSuffix(value, "}") {
+		return false
+	}
+	var record map[string]any
+	if err := json.Unmarshal([]byte(value), &record); err != nil {
+		return false
+	}
+	if err := s.store.PutMap(key, record); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return false
+	}
+	return true
+}
+
+// storeRawValue stores a value as either bytes or string.
+func (s *Shell) storeRawValue(key []byte, value string, hexBytes []byte, isHex bool) bool {
+	var err error
+	if isHex {
+		err = s.store.PutBytes(key, hexBytes)
+	} else {
+		err = s.store.PutString(key, value)
+	}
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return false
+	}
+	return true
 }
 
 func (s *Shell) handleUpdate(stmt *sqlparser.Update) {

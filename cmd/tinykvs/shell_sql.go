@@ -262,44 +262,73 @@ func extractValue(expr sqlparser.Expr) string {
 func extractValueForLike(expr sqlparser.Expr, operator string) (string, bool) {
 	switch v := expr.(type) {
 	case *sqlparser.SQLVal:
-		switch v.Type {
-		case sqlparser.StrVal:
-			s := string(v.Val)
-			if operator == "like" {
-				// Support '$$HEX$$14%' from preprocessed STARTS WITH x'14'
-				if strings.HasPrefix(s, "$$HEX$$") {
-					hexPart := s[7:] // skip $$HEX$$
-					if strings.HasSuffix(hexPart, "%") {
-						hexPart = hexPart[:len(hexPart)-1]
-						decoded, err := hex.DecodeString(hexPart)
-						if err != nil {
-							return s, false
-						}
-						return string(decoded), true
-					}
-				}
-				// Support '0x14%' or '0X14%' syntax for hex prefix matching
-				if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
-					hexPart := s[2:]
-					if strings.HasSuffix(hexPart, "%") {
-						hexPart = hexPart[:len(hexPart)-1]
-						decoded, err := hex.DecodeString(hexPart)
-						if err != nil {
-							return s, false
-						}
-						return string(decoded), true
-					}
-				}
-			}
-			return s, false
-		case sqlparser.HexVal:
-			decoded, _ := hexDecode(string(v.Val))
-			return string(decoded), false
-		case sqlparser.IntVal:
-			return string(v.Val), false
-		}
+		return extractSQLValForLike(v, operator)
 	}
 	return "", false
+}
+
+// extractSQLValForLike handles SQLVal extraction with hex LIKE pattern support.
+func extractSQLValForLike(v *sqlparser.SQLVal, operator string) (string, bool) {
+	switch v.Type {
+	case sqlparser.StrVal:
+		return extractStrValForLike(string(v.Val), operator)
+	case sqlparser.HexVal:
+		decoded, _ := hexDecode(string(v.Val))
+		return string(decoded), false
+	case sqlparser.IntVal:
+		return string(v.Val), false
+	}
+	return "", false
+}
+
+// extractStrValForLike handles string value extraction with hex LIKE pattern support.
+func extractStrValForLike(s string, operator string) (string, bool) {
+	if operator != "like" {
+		return s, false
+	}
+	// Support '$$HEX$$14%' from preprocessed STARTS WITH x'14'
+	if decoded, ok := tryDecodeHexMarkerPattern(s); ok {
+		return decoded, true
+	}
+	// Support '0x14%' or '0X14%' syntax for hex prefix matching
+	if decoded, ok := tryDecodeHexPrefixPattern(s); ok {
+		return decoded, true
+	}
+	return s, false
+}
+
+// tryDecodeHexMarkerPattern decodes '$$HEX$$<hex>%' pattern from STARTS WITH preprocessing.
+func tryDecodeHexMarkerPattern(s string) (string, bool) {
+	if !strings.HasPrefix(s, "$$HEX$$") {
+		return "", false
+	}
+	hexPart := s[7:] // skip $$HEX$$
+	if !strings.HasSuffix(hexPart, "%") {
+		return "", false
+	}
+	hexPart = hexPart[:len(hexPart)-1]
+	decoded, err := hex.DecodeString(hexPart)
+	if err != nil {
+		return "", false
+	}
+	return string(decoded), true
+}
+
+// tryDecodeHexPrefixPattern decodes '0x<hex>%' pattern for hex prefix matching.
+func tryDecodeHexPrefixPattern(s string) (string, bool) {
+	if !strings.HasPrefix(s, "0x") && !strings.HasPrefix(s, "0X") {
+		return "", false
+	}
+	hexPart := s[2:]
+	if !strings.HasSuffix(hexPart, "%") {
+		return "", false
+	}
+	hexPart = hexPart[:len(hexPart)-1]
+	decoded, err := hex.DecodeString(hexPart)
+	if err != nil {
+		return "", false
+	}
+	return string(decoded), true
 }
 
 func hexDecode(s string) ([]byte, error) {

@@ -782,67 +782,95 @@ func formatValue(val tinykvs.Value) string {
 func (s *Shell) parseWhere(expr sqlparser.Expr, keyEquals, keyPrefix, keyStart, keyEnd *string, valueFilters *[]*valueFilter) {
 	switch e := expr.(type) {
 	case *sqlparser.ComparisonExpr:
-		if col, ok := e.Left.(*sqlparser.ColName); ok {
-			qualifier := strings.ToLower(col.Qualifier.Name.String())
-			colName := strings.ToLower(col.Name.String())
-
-			// Check if this is a key filter (k = ..., k LIKE ..., etc.)
-			isKeyFilter := (colName == "k" && qualifier == "") ||
-				(colName == "k" && qualifier == "kv")
-
-			if isKeyFilter {
-				// Key filter
-				val, isHexPrefix := extractValueForLike(e.Right, e.Operator)
-				switch e.Operator {
-				case "=":
-					*keyEquals = val
-				case "like":
-					if isHexPrefix {
-						*keyPrefix = val
-					} else if strings.HasSuffix(val, "%") && !strings.Contains(val[:len(val)-1], "%") {
-						*keyPrefix = val[:len(val)-1]
-					} else {
-						fmt.Println("Warning: LIKE only supports prefix matching (e.g., 'prefix%' or x'14%')")
-					}
-				case ">=":
-					*keyStart = val
-				case "<=":
-					*keyEnd = val
-				}
-			} else {
-				// Value field filter: v.field, v.a.b, or just field (assume v.)
-				var fieldName string
-				if qualifier == "v" {
-					// v.ttl → field is "ttl"
-					fieldName = colName
-				} else if qualifier != "" && qualifier != "kv" {
-					// Nested: parsed as ttl.sub → field is "ttl.sub"
-					// Or v.address.city parsed as address.city
-					fieldName = qualifier + "." + colName
-				} else {
-					// No qualifier, assume it's a value field
-					// e.g., just "ttl" means v.ttl
-					fieldName = colName
-				}
-
-				val := extractValue(e.Right)
-				*valueFilters = append(*valueFilters, &valueFilter{
-					field:    fieldName,
-					operator: e.Operator,
-					value:    val,
-				})
-			}
-		}
+		s.parseComparisonExpr(e, keyEquals, keyPrefix, keyStart, keyEnd, valueFilters)
 	case *sqlparser.RangeCond:
-		// BETWEEN
-		if col, ok := e.Left.(*sqlparser.ColName); ok {
-			if strings.ToLower(col.Name.String()) == "k" {
-				*keyStart = extractValue(e.From)
-				*keyEnd = extractValue(e.To)
-			}
-		}
+		parseRangeCond(e, keyStart, keyEnd)
 	case *sqlparser.AndExpr:
 		s.parseWhere(e.Left, keyEquals, keyPrefix, keyStart, keyEnd, valueFilters)
 		s.parseWhere(e.Right, keyEquals, keyPrefix, keyStart, keyEnd, valueFilters)
+	}
+}
+
+// parseComparisonExpr handles a WHERE comparison expression.
+func (s *Shell) parseComparisonExpr(e *sqlparser.ComparisonExpr, keyEquals, keyPrefix, keyStart, keyEnd *string, valueFilters *[]*valueFilter) {
+	col, ok := e.Left.(*sqlparser.ColName)
+	if !ok {
+		return
+	}
+
+	qualifier := strings.ToLower(col.Qualifier.Name.String())
+	colName := strings.ToLower(col.Name.String())
+
+	if isKeyColumn(colName, qualifier) {
+		parseKeyFilter(e, keyEquals, keyPrefix, keyStart, keyEnd)
+	} else {
+		parseValueFieldFilter(e, qualifier, colName, valueFilters)
+	}
+}
+
+// isKeyColumn returns true if the column represents the key (k).
+func isKeyColumn(colName, qualifier string) bool {
+	return (colName == "k" && qualifier == "") || (colName == "k" && qualifier == "kv")
+}
+
+// parseKeyFilter handles key-based WHERE conditions.
+func parseKeyFilter(e *sqlparser.ComparisonExpr, keyEquals, keyPrefix, keyStart, keyEnd *string) {
+	val, isHexPrefix := extractValueForLike(e.Right, e.Operator)
+	switch e.Operator {
+	case "=":
+		*keyEquals = val
+	case "like":
+		parseKeyLikeFilter(val, isHexPrefix, keyPrefix)
+	case ">=":
+		*keyStart = val
+	case "<=":
+		*keyEnd = val
+	}
+}
+
+// parseKeyLikeFilter handles LIKE conditions on keys.
+func parseKeyLikeFilter(val string, isHexPrefix bool, keyPrefix *string) {
+	if isHexPrefix {
+		*keyPrefix = val
+		return
+	}
+	if strings.HasSuffix(val, "%") && !strings.Contains(val[:len(val)-1], "%") {
+		*keyPrefix = val[:len(val)-1]
+		return
+	}
+	fmt.Println("Warning: LIKE only supports prefix matching (e.g., 'prefix%' or x'14%')")
+}
+
+// parseValueFieldFilter handles value field WHERE conditions.
+func parseValueFieldFilter(e *sqlparser.ComparisonExpr, qualifier, colName string, valueFilters *[]*valueFilter) {
+	fieldName := resolveFieldName(qualifier, colName)
+	val := extractValue(e.Right)
+	*valueFilters = append(*valueFilters, &valueFilter{
+		field:    fieldName,
+		operator: e.Operator,
+		value:    val,
+	})
+}
+
+// resolveFieldName determines the field name from qualifier and column name.
+func resolveFieldName(qualifier, colName string) string {
+	if qualifier == "v" {
+		return colName
+	}
+	if qualifier != "" && qualifier != "kv" {
+		return qualifier + "." + colName
+	}
+	return colName
+}
+
+// parseRangeCond handles BETWEEN conditions.
+func parseRangeCond(e *sqlparser.RangeCond, keyStart, keyEnd *string) {
+	col, ok := e.Left.(*sqlparser.ColName)
+	if !ok {
+		return
+	}
+	if strings.ToLower(col.Name.String()) == "k" {
+		*keyStart = extractValue(e.From)
+		*keyEnd = extractValue(e.To)
 	}
 }

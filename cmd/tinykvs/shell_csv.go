@@ -75,6 +75,21 @@ func (s *Shell) exportCSV(filename string) {
 	fmt.Printf("\rExported %d keys to %s\n", count, filename)
 }
 
+// csvFormat represents the detected CSV format type.
+type csvFormat int
+
+const (
+	csvFormatOld    csvFormat = iota // "key,type,value" (hex-encoded)
+	csvFormatSimple                  // "key,value" (string key, string/JSON value)
+	csvFormatRecord                  // "key,field1,field2,..." with optional type hints
+)
+
+// fieldSpec describes a field in record format CSV.
+type fieldSpec struct {
+	name     string
+	typeHint string // "", "string", "int", "float", "bool", "json"
+}
+
 func (s *Shell) importCSV(filename string) {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -85,44 +100,45 @@ func (s *Shell) importCSV(filename string) {
 
 	reader := csv.NewReader(bufio.NewReader(file))
 
-	// Read header to detect format
 	header, err := reader.Read()
 	if err != nil {
 		fmt.Printf("Error reading header: %v\n", err)
 		return
 	}
 
-	var count int64
-	var errors int64
+	format, fieldSpecs := detectCSVFormat(header)
+	count, errors := s.importCSVRecords(reader, header, format, fieldSpecs)
 
-	// Detect format based on header
-	// Old format: "key,type,value" (hex-encoded)
-	// Simple format: "key,value" (key is string, value is string/JSON)
-	// Record format: "key,field1,field2,..." (first col is key, rest are fields)
-	//   - supports type hints: "field:type" where type is string/int/float/bool/json
-	isOldFormat := len(header) == 3 && header[0] == "key" && header[1] == "type" && header[2] == "value"
-	isSimpleFormat := len(header) == 2
+	fmt.Printf("\rImported %d keys (%d errors)\n", count, errors)
+}
 
-	// Parse field names and type hints for record format
-	type fieldSpec struct {
-		name     string
-		typeHint string // "", "string", "int", "float", "bool", "json"
+// detectCSVFormat determines the format from the header row.
+func detectCSVFormat(header []string) (csvFormat, []fieldSpec) {
+	if len(header) == 3 && header[0] == "key" && header[1] == "type" && header[2] == "value" {
+		return csvFormatOld, nil
 	}
-	var fieldSpecs []fieldSpec
-	if !isOldFormat && !isSimpleFormat {
-		for i := 1; i < len(header); i++ {
-			spec := fieldSpec{}
-			if idx := strings.LastIndex(header[i], ":"); idx != -1 {
-				spec.name = header[i][:idx]
-				spec.typeHint = strings.ToLower(header[i][idx+1:])
-			} else {
-				spec.name = header[i]
-				spec.typeHint = "" // auto-detect
-			}
-			fieldSpecs = append(fieldSpecs, spec)
+	if len(header) == 2 {
+		return csvFormatSimple, nil
+	}
+	return csvFormatRecord, parseFieldSpecs(header)
+}
+
+// parseFieldSpecs extracts field names and type hints from header columns.
+func parseFieldSpecs(header []string) []fieldSpec {
+	specs := make([]fieldSpec, 0, len(header)-1)
+	for i := 1; i < len(header); i++ {
+		spec := fieldSpec{name: header[i]}
+		if idx := strings.LastIndex(header[i], ":"); idx != -1 {
+			spec.name = header[i][:idx]
+			spec.typeHint = strings.ToLower(header[i][idx+1:])
 		}
+		specs = append(specs, spec)
 	}
+	return specs
+}
 
+// importCSVRecords reads and imports all CSV records.
+func (s *Shell) importCSVRecords(reader *csv.Reader, header []string, format csvFormat, fieldSpecs []fieldSpec) (count, errors int64) {
 	for {
 		record, err := reader.Read()
 		if err == io.EOF {
@@ -133,45 +149,10 @@ func (s *Shell) importCSV(filename string) {
 			continue
 		}
 
-		var key []byte
-		var val tinykvs.Value
-
-		if isOldFormat {
-			// Old format: hex key, type, hex/json value
-			if len(record) != 3 {
-				errors++
-				continue
-			}
-			key, err = hex.DecodeString(record[0])
-			if err != nil {
-				errors++
-				continue
-			}
-			val, err = parseTypedValue(record[1], record[2])
-			if err != nil {
-				errors++
-				continue
-			}
-		} else if isSimpleFormat {
-			// Simple format: string key, string/JSON value
-			if len(record) != 2 {
-				errors++
-				continue
-			}
-			key = []byte(record[0])
-			val = parseAutoValue(record[1])
-		} else {
-			// Record format: first column is key, rest are fields with optional type hints
-			if len(record) != len(header) {
-				errors++
-				continue
-			}
-			key = []byte(record[0])
-			fields := make(map[string]any)
-			for i, spec := range fieldSpecs {
-				fields[spec.name] = parseFieldValueWithHint(record[i+1], spec.typeHint)
-			}
-			val = tinykvs.RecordValue(fields)
+		key, val, ok := parseCSVRecord(record, header, format, fieldSpecs)
+		if !ok {
+			errors++
+			continue
 		}
 
 		if err := s.store.Put(key, val); err != nil {
@@ -184,8 +165,55 @@ func (s *Shell) importCSV(filename string) {
 			fmt.Printf("\rImported %d keys...", count)
 		}
 	}
+	return count, errors
+}
 
-	fmt.Printf("\rImported %d keys (%d errors)\n", count, errors)
+// parseCSVRecord parses a single CSV record based on format.
+func parseCSVRecord(record, header []string, format csvFormat, fieldSpecs []fieldSpec) ([]byte, tinykvs.Value, bool) {
+	switch format {
+	case csvFormatOld:
+		return parseOldFormatRecord(record)
+	case csvFormatSimple:
+		return parseSimpleFormatRecord(record)
+	default:
+		return parseRecordFormatRecord(record, header, fieldSpecs)
+	}
+}
+
+// parseOldFormatRecord parses hex key, type, hex/json value format.
+func parseOldFormatRecord(record []string) ([]byte, tinykvs.Value, bool) {
+	if len(record) != 3 {
+		return nil, tinykvs.Value{}, false
+	}
+	key, err := hex.DecodeString(record[0])
+	if err != nil {
+		return nil, tinykvs.Value{}, false
+	}
+	val, err := parseTypedValue(record[1], record[2])
+	if err != nil {
+		return nil, tinykvs.Value{}, false
+	}
+	return key, val, true
+}
+
+// parseSimpleFormatRecord parses string key, string/JSON value format.
+func parseSimpleFormatRecord(record []string) ([]byte, tinykvs.Value, bool) {
+	if len(record) != 2 {
+		return nil, tinykvs.Value{}, false
+	}
+	return []byte(record[0]), parseAutoValue(record[1]), true
+}
+
+// parseRecordFormatRecord parses key + typed fields format.
+func parseRecordFormatRecord(record, header []string, fieldSpecs []fieldSpec) ([]byte, tinykvs.Value, bool) {
+	if len(record) != len(header) {
+		return nil, tinykvs.Value{}, false
+	}
+	fields := make(map[string]any, len(fieldSpecs))
+	for i, spec := range fieldSpecs {
+		fields[spec.name] = parseFieldValueWithHint(record[i+1], spec.typeHint)
+	}
+	return []byte(record[0]), tinykvs.RecordValue(fields), true
 }
 
 // parseTypedValue parses a value in the old export format (type + hex/json encoded value)
