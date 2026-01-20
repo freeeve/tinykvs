@@ -78,42 +78,12 @@ func Open(path string, opts Options) (*Store, error) {
 	}
 	s.wal = wal
 
-	// Try to open manifest for fast loading
+	// Load SSTables using manifest (fast) or directory scan (fallback)
 	manifestPath := filepath.Join(path, "MANIFEST")
-	manifest, err := OpenManifest(manifestPath)
-	if err != nil && !os.IsNotExist(err) {
+	if err := s.initializeSSTables(manifestPath); err != nil {
 		wal.Close()
 		s.releaseLock()
 		return nil, err
-	}
-
-	if manifest != nil && len(manifest.Tables()) > 0 {
-		// Load SSTables from manifest (fast path - lazy loading)
-		s.manifest = manifest
-		if err := s.loadSSTablesFromManifest(); err != nil {
-			manifest.Close()
-			wal.Close()
-			s.releaseLock()
-			return nil, err
-		}
-	} else {
-		// No manifest or empty - scan directory (migration/fallback path)
-		if manifest != nil {
-			manifest.Close()
-		}
-		if err := s.loadSSTables(); err != nil {
-			wal.Close()
-			s.releaseLock()
-			return nil, err
-		}
-		// Create manifest from loaded SSTables
-		manifest, err = s.createManifestFromSSTables(manifestPath)
-		if err != nil {
-			wal.Close()
-			s.releaseLock()
-			return nil, err
-		}
-		s.manifest = manifest
 	}
 
 	// Initialize reader
@@ -507,6 +477,35 @@ func (s *Store) recover() error {
 	// Set writer sequence to max recovered
 	s.writer.SetSequence(maxSeq)
 
+	return nil
+}
+
+// initializeSSTables loads SSTables using manifest (fast) or directory scan (fallback).
+func (s *Store) initializeSSTables(manifestPath string) error {
+	manifest, err := OpenManifest(manifestPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	if manifest != nil && len(manifest.Tables()) > 0 {
+		s.manifest = manifest
+		return s.loadSSTablesFromManifest()
+	}
+
+	// No manifest or empty - scan directory (migration/fallback path)
+	if manifest != nil {
+		manifest.Close()
+	}
+	if err := s.loadSSTables(); err != nil {
+		return err
+	}
+
+	// Create manifest from loaded SSTables
+	manifest, err = s.createManifestFromSSTables(manifestPath)
+	if err != nil {
+		return err
+	}
+	s.manifest = manifest
 	return nil
 }
 
