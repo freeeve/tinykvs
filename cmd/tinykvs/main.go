@@ -259,55 +259,79 @@ func parseCLIKey(key, keyHex string) ([]byte, error) {
 
 // parseValue parses the value from put flags.
 func (pf *putFlags) parseValue() (tinykvs.Value, error) {
-	var val tinykvs.Value
 	var zero tinykvs.Value
-	count := 0
+	var results []tinykvs.Value
 
-	if pf.value != "" {
-		val = tinykvs.StringValue(pf.value)
-		count++
+	if v, ok := pf.tryParseString(); ok {
+		results = append(results, v)
 	}
-	if pf.valueHex != "" {
-		if count > 0 {
-			return zero, fmt.Errorf("Error: only one value flag allowed")
-		}
-		bytes, err := hex.DecodeString(pf.valueHex)
-		if err != nil {
-			return zero, fmt.Errorf("Error decoding hex value: %v", err)
-		}
-		val = tinykvs.BytesValue(bytes)
-		count++
+	if v, ok, err := pf.tryParseHex(); err != nil {
+		return zero, err
+	} else if ok {
+		results = append(results, v)
 	}
-	if pf.valueInt != 0 || containsFlag(pf.args, "-value-int") {
-		if count > 0 {
-			return zero, fmt.Errorf("Error: only one value flag allowed")
-		}
-		val = tinykvs.Int64Value(pf.valueInt)
-		count++
+	if v, ok := pf.tryParseInt(); ok {
+		results = append(results, v)
 	}
-	if pf.valueFloat != 0 || containsFlag(pf.args, "-value-float") {
-		if count > 0 {
-			return zero, fmt.Errorf("Error: only one value flag allowed")
-		}
-		val = tinykvs.Float64Value(pf.valueFloat)
-		count++
+	if v, ok := pf.tryParseFloat(); ok {
+		results = append(results, v)
 	}
-	if pf.valueBool != "" {
-		if count > 0 {
-			return zero, fmt.Errorf("Error: only one value flag allowed")
-		}
-		boolVal, err := parseBoolValue(pf.valueBool)
-		if err != nil {
-			return zero, err
-		}
-		val = boolVal
-		count++
+	if v, ok, err := pf.tryParseBool(); err != nil {
+		return zero, err
+	} else if ok {
+		results = append(results, v)
 	}
 
-	if count == 0 {
+	if len(results) == 0 {
 		return zero, fmt.Errorf("Error: a value flag is required (-value, -value-hex, -value-int, -value-float, -value-bool)")
 	}
-	return val, nil
+	if len(results) > 1 {
+		return zero, fmt.Errorf("Error: only one value flag allowed")
+	}
+	return results[0], nil
+}
+
+func (pf *putFlags) tryParseString() (tinykvs.Value, bool) {
+	if pf.value != "" {
+		return tinykvs.StringValue(pf.value), true
+	}
+	return tinykvs.Value{}, false
+}
+
+func (pf *putFlags) tryParseHex() (tinykvs.Value, bool, error) {
+	if pf.valueHex != "" {
+		bytes, err := hex.DecodeString(pf.valueHex)
+		if err != nil {
+			return tinykvs.Value{}, false, fmt.Errorf("Error decoding hex value: %v", err)
+		}
+		return tinykvs.BytesValue(bytes), true, nil
+	}
+	return tinykvs.Value{}, false, nil
+}
+
+func (pf *putFlags) tryParseInt() (tinykvs.Value, bool) {
+	if pf.valueInt != 0 || containsFlag(pf.args, "-value-int") {
+		return tinykvs.Int64Value(pf.valueInt), true
+	}
+	return tinykvs.Value{}, false
+}
+
+func (pf *putFlags) tryParseFloat() (tinykvs.Value, bool) {
+	if pf.valueFloat != 0 || containsFlag(pf.args, "-value-float") {
+		return tinykvs.Float64Value(pf.valueFloat), true
+	}
+	return tinykvs.Value{}, false
+}
+
+func (pf *putFlags) tryParseBool() (tinykvs.Value, bool, error) {
+	if pf.valueBool != "" {
+		v, err := parseBoolValue(pf.valueBool)
+		if err != nil {
+			return tinykvs.Value{}, false, err
+		}
+		return v, true, nil
+	}
+	return tinykvs.Value{}, false, nil
 }
 
 // parseBoolValue parses a boolean value from string.
