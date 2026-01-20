@@ -179,93 +179,42 @@ func cmdGet(args []string) {
 	printValue(keyBytes, val)
 }
 
+// putFlags holds parsed flags for the put command.
+type putFlags struct {
+	key, keyHex                string
+	value, valueHex, valueBool string
+	valueInt                   int64
+	valueFloat                 float64
+	flush                      bool
+	args                       []string // original args for flag detection
+}
+
 func cmdPut(args []string) {
 	fs := flag.NewFlagSet("put", flag.ExitOnError)
 	dir := fs.String("dir", "", "Path to store directory (required)")
-	key := fs.String("key", "", "Key (string)")
-	keyHex := fs.String("key-hex", "", "Key (hex encoded)")
-	value := fs.String("value", "", "Value (string)")
-	valueHex := fs.String("value-hex", "", "Value (hex encoded)")
-	valueInt := fs.Int64("value-int", 0, "Value (int64)")
-	valueFloat := fs.Float64("value-float", 0, "Value (float64)")
-	valueBool := fs.String("value-bool", "", "Value (bool: true/false)")
-	flush := fs.Bool("flush", false, "Flush after put")
+	pf := &putFlags{args: args}
+	fs.StringVar(&pf.key, "key", "", "Key (string)")
+	fs.StringVar(&pf.keyHex, "key-hex", "", "Key (hex encoded)")
+	fs.StringVar(&pf.value, "value", "", "Value (string)")
+	fs.StringVar(&pf.valueHex, "value-hex", "", "Value (hex encoded)")
+	fs.Int64Var(&pf.valueInt, "value-int", 0, "Value (int64)")
+	fs.Float64Var(&pf.valueFloat, "value-float", 0, "Value (float64)")
+	fs.StringVar(&pf.valueBool, "value-bool", "", "Value (bool: true/false)")
+	fs.BoolVar(&pf.flush, "flush", false, "Flush after put")
 	fs.Parse(args)
 
 	storeDir := requireDir(*dir)
 
-	var keyBytes []byte
-	if *keyHex != "" {
-		var err error
-		keyBytes, err = hex.DecodeString(*keyHex)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error decoding hex key: %v\n", err)
-			os.Exit(1)
-		}
-	} else if *key != "" {
-		keyBytes = []byte(*key)
-	} else {
-		fmt.Fprintln(os.Stderr, "Error: -key or -key-hex is required")
+	keyBytes, err := parseCLIKey(pf.key, pf.keyHex)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		fs.Usage()
 		os.Exit(1)
 	}
 
-	// Determine value type
-	var val tinykvs.Value
-	valueSet := false
-
-	if *value != "" {
-		val = tinykvs.StringValue(*value)
-		valueSet = true
-	}
-	if *valueHex != "" {
-		if valueSet {
-			fmt.Fprintln(os.Stderr, "Error: only one value flag allowed")
-			os.Exit(1)
-		}
-		bytes, err := hex.DecodeString(*valueHex)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error decoding hex value: %v\n", err)
-			os.Exit(1)
-		}
-		val = tinykvs.BytesValue(bytes)
-		valueSet = true
-	}
-	if fs.Lookup("value-int").Value.String() != "0" || containsFlag(args, "-value-int") {
-		if valueSet {
-			fmt.Fprintln(os.Stderr, "Error: only one value flag allowed")
-			os.Exit(1)
-		}
-		val = tinykvs.Int64Value(*valueInt)
-		valueSet = true
-	}
-	if fs.Lookup("value-float").Value.String() != "0" || containsFlag(args, "-value-float") {
-		if valueSet {
-			fmt.Fprintln(os.Stderr, "Error: only one value flag allowed")
-			os.Exit(1)
-		}
-		val = tinykvs.Float64Value(*valueFloat)
-		valueSet = true
-	}
-	if *valueBool != "" {
-		if valueSet {
-			fmt.Fprintln(os.Stderr, "Error: only one value flag allowed")
-			os.Exit(1)
-		}
-		switch strings.ToLower(*valueBool) {
-		case "true", "1", "yes":
-			val = tinykvs.BoolValue(true)
-		case "false", "0", "no":
-			val = tinykvs.BoolValue(false)
-		default:
-			fmt.Fprintf(os.Stderr, "Error: invalid bool value: %s\n", *valueBool)
-			os.Exit(1)
-		}
-		valueSet = true
-	}
-
-	if !valueSet {
-		fmt.Fprintln(os.Stderr, "Error: a value flag is required (-value, -value-hex, -value-int, -value-float, -value-bool)")
+	val, err := pf.parseValue()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		fs.Usage()
 		os.Exit(1)
 	}
@@ -283,7 +232,7 @@ func cmdPut(args []string) {
 		os.Exit(1)
 	}
 
-	if *flush {
+	if pf.flush {
 		if err := store.Flush(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error flushing: %v\n", err)
 			os.Exit(1)
@@ -291,6 +240,87 @@ func cmdPut(args []string) {
 	}
 
 	fmt.Printf("OK\n")
+}
+
+// parseCLIKey parses key from either string or hex flag.
+func parseCLIKey(key, keyHex string) ([]byte, error) {
+	if keyHex != "" {
+		keyBytes, err := hex.DecodeString(keyHex)
+		if err != nil {
+			return nil, fmt.Errorf("Error decoding hex key: %v", err)
+		}
+		return keyBytes, nil
+	}
+	if key != "" {
+		return []byte(key), nil
+	}
+	return nil, fmt.Errorf("Error: -key or -key-hex is required")
+}
+
+// parseValue parses the value from put flags.
+func (pf *putFlags) parseValue() (tinykvs.Value, error) {
+	var val tinykvs.Value
+	var zero tinykvs.Value
+	count := 0
+
+	if pf.value != "" {
+		val = tinykvs.StringValue(pf.value)
+		count++
+	}
+	if pf.valueHex != "" {
+		if count > 0 {
+			return zero, fmt.Errorf("Error: only one value flag allowed")
+		}
+		bytes, err := hex.DecodeString(pf.valueHex)
+		if err != nil {
+			return zero, fmt.Errorf("Error decoding hex value: %v", err)
+		}
+		val = tinykvs.BytesValue(bytes)
+		count++
+	}
+	if pf.valueInt != 0 || containsFlag(pf.args, "-value-int") {
+		if count > 0 {
+			return zero, fmt.Errorf("Error: only one value flag allowed")
+		}
+		val = tinykvs.Int64Value(pf.valueInt)
+		count++
+	}
+	if pf.valueFloat != 0 || containsFlag(pf.args, "-value-float") {
+		if count > 0 {
+			return zero, fmt.Errorf("Error: only one value flag allowed")
+		}
+		val = tinykvs.Float64Value(pf.valueFloat)
+		count++
+	}
+	if pf.valueBool != "" {
+		if count > 0 {
+			return zero, fmt.Errorf("Error: only one value flag allowed")
+		}
+		boolVal, err := parseBoolValue(pf.valueBool)
+		if err != nil {
+			return zero, err
+		}
+		val = boolVal
+		count++
+	}
+
+	if count == 0 {
+		return zero, fmt.Errorf("Error: a value flag is required (-value, -value-hex, -value-int, -value-float, -value-bool)")
+	}
+	return val, nil
+}
+
+// parseBoolValue parses a boolean value from string.
+func parseBoolValue(s string) (tinykvs.Value, error) {
+	var zero tinykvs.Value
+	switch strings.ToLower(s) {
+	case "true", "1", "yes":
+		return tinykvs.BoolValue(true), nil
+	case "false", "0", "no":
+		return tinykvs.BoolValue(false), nil
+	default:
+		return zero, fmt.Errorf("Error: invalid bool value: %s", s)
+	}
 }
 
 func containsFlag(args []string, flag string) bool {
