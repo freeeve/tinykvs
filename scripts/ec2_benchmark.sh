@@ -33,16 +33,21 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 log() {
-    echo -e "${GREEN}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1"
+    local msg=$1
+    echo -e "${GREEN}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $msg"
+    return 0
 }
 
 error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    local msg=$1
+    echo -e "${RED}[ERROR]${NC} $msg" >&2
     exit 1
 }
 
 warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+    local msg=$1
+    echo -e "${YELLOW}[WARN]${NC} $msg"
+    return 0
 }
 
 # Get latest Amazon Linux 2023 ARM AMI
@@ -56,10 +61,11 @@ get_ami_id() {
         --output text \
         --region "$REGION")
 
-    if [ -z "$AMI_ID" ] || [ "$AMI_ID" == "None" ]; then
+    if [[ -z "$AMI_ID" ]] || [[ "$AMI_ID" == "None" ]]; then
         error "Could not find AMI"
     fi
     log "Using AMI: $AMI_ID"
+    return 0
 }
 
 # Create security group if needed
@@ -73,7 +79,7 @@ create_security_group() {
         --output text \
         --region "$REGION" 2>/dev/null || echo "None")
 
-    if [ "$SG_ID" == "None" ] || [ -z "$SG_ID" ]; then
+    if [[ "$SG_ID" == "None" ]] || [[ -z "$SG_ID" ]]; then
         log "Creating security group..."
         SG_ID=$(aws ec2 create-security-group \
             --group-name "$SG_NAME" \
@@ -91,6 +97,7 @@ create_security_group() {
     fi
 
     log "Using security group: $SG_ID"
+    return 0
 }
 
 # Build benchmark binary for ARM64
@@ -101,7 +108,7 @@ build_benchmark() {
     # Cross-compile for ARM64 Linux
     GOOS=linux GOARCH=arm64 go build -o "$BENCH_BINARY" ./cmd/tinykvs-bench
 
-    if [ ! -f "$BENCH_BINARY" ]; then
+    if [[ ! -f "$BENCH_BINARY" ]]; then
         error "Failed to build benchmark binary"
     fi
 
@@ -109,6 +116,7 @@ build_benchmark() {
     chmod +x "$BENCH_BINARY"
 
     echo "$BENCH_BINARY"
+    return 0
 }
 
 # Upload files to S3
@@ -127,6 +135,7 @@ upload_to_s3() {
         --region "$REGION" || error "Failed to upload benchmark script"
     
     log "Files uploaded successfully"
+    return 0
 }
 
 # Create benchmark script file
@@ -243,6 +252,7 @@ BENCHMARK_SCRIPT
 
     chmod +x "$script_file"
     echo "$script_file"
+    return 0
 }
 
 # Create user data script for instance initialization
@@ -294,6 +304,7 @@ fi
 # Signal ready
 touch /home/ec2-user/ready
 USERDATA
+    return 0
 }
 
 # Main function - updated to build and upload before launching
@@ -305,7 +316,7 @@ main() {
     log "Region: $REGION"
     echo ""
 
-    if [ -z "$KEY_NAME" ]; then
+    if [[ -z "$KEY_NAME" ]]; then
         warn "No SSH key specified. You'll need to connect via Session Manager or specify a key."
         warn "Usage: $0 <num_records> <key_name> [compression]"
     fi
@@ -328,6 +339,7 @@ main() {
     launch_instance
     run_benchmark
     cleanup
+    return 0
 }
 
 # Check for existing instance
@@ -339,7 +351,7 @@ check_existing_instance() {
         --output text \
         --region "$REGION" 2>/dev/null || echo "None")
     
-    if [ "$EXISTING_ID" != "None" ] && [ -n "$EXISTING_ID" ]; then
+    if [[ "$EXISTING_ID" != "None" ]] && [[ -n "$EXISTING_ID" ]]; then
         log "Found existing instance: $EXISTING_ID"
         
         # Get its state
@@ -349,7 +361,7 @@ check_existing_instance() {
             --output text \
             --region "$REGION")
         
-        if [ "$STATE" == "running" ]; then
+        if [[ "$STATE" == "running" ]]; then
             log "Instance is already running, reusing it"
             INSTANCE_ID="$EXISTING_ID"
             
@@ -363,7 +375,7 @@ check_existing_instance() {
             echo "$INSTANCE_ID" > /tmp/tinykvs_instance_id
             echo "$PUBLIC_IP" > /tmp/tinykvs_instance_ip
             return 0
-        elif [ "$STATE" == "stopped" ]; then
+        elif [[ "$STATE" == "stopped" ]]; then
             log "Instance is stopped, starting it..."
             aws ec2 start-instances --instance-ids "$EXISTING_ID" --region "$REGION"
             aws ec2 wait instance-running --instance-ids "$EXISTING_ID" --region "$REGION"
@@ -395,7 +407,7 @@ launch_instance() {
     USER_DATA=$(create_user_data | base64)
 
     KEY_OPTION=""
-    if [ -n "$KEY_NAME" ]; then
+    if [[ -n "$KEY_NAME" ]]; then
         KEY_OPTION="--key-name $KEY_NAME"
     fi
 
@@ -428,6 +440,7 @@ launch_instance() {
 
     echo "$INSTANCE_ID" > /tmp/tinykvs_instance_id
     echo "$PUBLIC_IP" > /tmp/tinykvs_instance_ip
+    return 0
 }
 
 # Wait for initialization and run benchmark
@@ -438,7 +451,7 @@ run_benchmark() {
     log "Waiting for instance initialization (this may take a few minutes)..."
 
     # Wait for cloud-init to complete or files to be ready
-    if [ -n "$KEY_NAME" ]; then
+    if [[ -n "$KEY_NAME" ]]; then
         for i in {1..60}; do
             if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
                 -i ~/.ssh/${KEY_NAME}.pem ec2-user@$PUBLIC_IP \
@@ -502,11 +515,12 @@ run_benchmark() {
         log "Monitor progress with: aws ssm get-command-invocation --command-id $BENCH_CMD_ID --instance-id $INSTANCE_ID"
         log "Or check logs on instance: tail -f /home/ec2-user/bench.log"
     fi
+    return 0
 }
 
 # Cleanup
 cleanup() {
-    if [ -f /tmp/tinykvs_instance_id ]; then
+    if [[ -f /tmp/tinykvs_instance_id ]]; then
         INSTANCE_ID=$(cat /tmp/tinykvs_instance_id)
         read -p "Terminate instance $INSTANCE_ID? (y/n) " -n 1 -r
         echo
@@ -517,6 +531,7 @@ cleanup() {
             log "Instance terminated"
         fi
     fi
+    return 0
 }
 
 # Handle termination
