@@ -6,8 +6,8 @@ github.com/blastrain/vitess-sqlparser v0.0.0-20201030050434-a139afbb1aba h1:hBK2
 github.com/blastrain/vitess-sqlparser v0.0.0-20201030050434-a139afbb1aba/go.mod h1:FGQp+RNQwVmLzDq6HBrYCww9qJQyNwH9Qji/quTQII4=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/freeeve/msgpck v0.1.1 h1:BL/+HAZ4qEscH97U2o37PsF9PAfx0XZMKPkQg1y37qk=
-github.com/freeeve/msgpck v0.1.1/go.mod h1:FDfQEr9CXD3ydaYHTfbeV6eAfdsXp/Zzctp86UqGtvo=
+github.com/freeeve/msgpck v0.1.3 h1:UNAJhrhDDkztZlBlW215vXcNqJoIxVNUXER8v+AsAYo=
+github.com/freeeve/msgpck v0.1.3/go.mod h1:5z7KFctIOZV6bZIleuGOCOZxR9cX6Jc7ndqrDdTJDL8=
 github.com/golang/snappy v1.0.0 h1:Oy607GVXHs7RtbggtPBnr2RmDArIsAefDwvrdWvRhGs=
 github.com/golang/snappy v1.0.0/go.mod h1:/XxbfmMg8lxefKM7IXC3fBNl/7bRcc72aCRzEWrmP2Q=
 github.com/juju/errors v0.0.0-20170703010042-c7d06af17c68 h1:d2hBkTvi7B89+OXY8+bBBshPlc+7JYacGrG/dFak8SQ=
