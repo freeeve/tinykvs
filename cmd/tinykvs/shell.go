@@ -42,51 +42,71 @@ func (s *Shell) Run() {
 	defer s.line.Close()
 
 	s.line.SetCtrlCAborts(true)
-
-	// Load history
-	if s.historyFile != "" {
-		if f, err := os.Open(s.historyFile); err == nil {
-			s.line.ReadHistory(f)
-			f.Close()
-		}
-	}
+	s.loadHistory()
 
 	fmt.Println("TinyKVS Shell " + versionString())
 	fmt.Println("Type \\help for help, \\q to quit")
 	fmt.Println()
 
+	s.runLoop()
+	s.saveHistory()
+}
+
+// loadHistory loads shell history from file.
+func (s *Shell) loadHistory() {
+	if s.historyFile == "" {
+		return
+	}
+	f, err := os.Open(s.historyFile)
+	if err != nil {
+		return
+	}
+	s.line.ReadHistory(f)
+	f.Close()
+}
+
+// saveHistory saves shell history to file.
+func (s *Shell) saveHistory() {
+	if s.historyFile == "" {
+		return
+	}
+	f, err := os.Create(s.historyFile)
+	if err != nil {
+		return
+	}
+	s.line.WriteHistory(f)
+	f.Close()
+}
+
+// runLoop processes user input until exit.
+func (s *Shell) runLoop() {
 	for {
 		input, err := s.line.Prompt(s.prompt)
 		if err != nil {
-			if err == liner.ErrPromptAborted {
-				fmt.Println("^C")
-				continue
+			if !s.handlePromptError(err) {
+				break
 			}
-			// Ctrl+D (EOF) or other error - exit gracefully
-			fmt.Println()
-			break
+			continue
 		}
-
 		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
 		}
-
-		// Add to history
 		s.line.AppendHistory(input)
-
 		if !s.execute(input) {
 			break
 		}
 	}
+}
 
-	// Save history
-	if s.historyFile != "" {
-		if f, err := os.Create(s.historyFile); err == nil {
-			s.line.WriteHistory(f)
-			f.Close()
-		}
+// handlePromptError handles liner prompt errors. Returns true to continue.
+func (s *Shell) handlePromptError(err error) bool {
+	if err == liner.ErrPromptAborted {
+		fmt.Println("^C")
+		return true
 	}
+	fmt.Println()
+	return false
 }
 
 // execute runs a command. Returns false to exit.

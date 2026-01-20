@@ -77,63 +77,73 @@ func (w *wal) Append(entry walEntry) error {
 
 // appendUnlocked is the internal unlocked version of Append.
 func (w *wal) appendUnlocked(entry walEntry) error {
-	// Encode entry
 	data := w.encodeEntry(entry)
-
-	// Write potentially across multiple blocks
 	remaining := data
 	isFirst := true
 
 	for len(remaining) > 0 {
-		availableInBlock := walBlockSize - w.blockPos - walHeaderSize
-
-		if availableInBlock <= 0 {
-			// Flush current block
-			if err := w.flushBlock(); err != nil {
-				return err
-			}
-			availableInBlock = walBlockSize - walHeaderSize
+		availableInBlock, err := w.ensureBlockSpace()
+		if err != nil {
+			return err
 		}
 
-		var recordType uint8
-		var fragment []byte
+		fragment, recordType := w.prepareFragment(remaining, availableInBlock, isFirst)
+		w.writeRecord(fragment, recordType)
 
-		if len(remaining) <= availableInBlock {
-			// Fits in current block
-			fragment = remaining
-			remaining = nil
-			if isFirst {
-				recordType = walRecordFull
-			} else {
-				recordType = walRecordLast
-			}
-		} else {
-			// Need to fragment
-			fragment = remaining[:availableInBlock]
-			remaining = remaining[availableInBlock:]
-			if isFirst {
-				recordType = walRecordFirst
-			} else {
-				recordType = walRecordMiddle
-			}
-		}
-
+		remaining = remaining[len(fragment):]
 		isFirst = false
-
-		// Write header: CRC(4) + Length(2) + Type(1)
-		checksum := crc32.ChecksumIEEE(fragment)
-		binary.LittleEndian.PutUint32(w.block[w.blockPos:], checksum)
-		binary.LittleEndian.PutUint16(w.block[w.blockPos+4:], uint16(len(fragment)))
-		w.block[w.blockPos+6] = recordType
-		copy(w.block[w.blockPos+walHeaderSize:], fragment)
-
-		w.blockPos += walHeaderSize + len(fragment)
 	}
 
 	if w.syncMode == WALSyncPerWrite {
 		return w.sync()
 	}
 	return nil
+}
+
+// ensureBlockSpace ensures there's space in the current block, flushing if needed.
+func (w *wal) ensureBlockSpace() (int, error) {
+	availableInBlock := walBlockSize - w.blockPos - walHeaderSize
+	if availableInBlock <= 0 {
+		if err := w.flushBlock(); err != nil {
+			return 0, err
+		}
+		availableInBlock = walBlockSize - walHeaderSize
+	}
+	return availableInBlock, nil
+}
+
+// prepareFragment determines what portion of data to write and its record type.
+func (w *wal) prepareFragment(remaining []byte, availableInBlock int, isFirst bool) ([]byte, uint8) {
+	if len(remaining) <= availableInBlock {
+		return remaining, w.getFullOrLastType(isFirst)
+	}
+	return remaining[:availableInBlock], w.getFirstOrMiddleType(isFirst)
+}
+
+// getFullOrLastType returns the record type for a complete or final fragment.
+func (w *wal) getFullOrLastType(isFirst bool) uint8 {
+	if isFirst {
+		return walRecordFull
+	}
+	return walRecordLast
+}
+
+// getFirstOrMiddleType returns the record type for a fragmented record.
+func (w *wal) getFirstOrMiddleType(isFirst bool) uint8 {
+	if isFirst {
+		return walRecordFirst
+	}
+	return walRecordMiddle
+}
+
+// writeRecord writes a record header and data to the current block.
+func (w *wal) writeRecord(fragment []byte, recordType uint8) {
+	checksum := crc32.ChecksumIEEE(fragment)
+	binary.LittleEndian.PutUint32(w.block[w.blockPos:], checksum)
+	binary.LittleEndian.PutUint16(w.block[w.blockPos+4:], uint16(len(fragment)))
+	w.block[w.blockPos+6] = recordType
+	copy(w.block[w.blockPos+walHeaderSize:], fragment)
+	w.blockPos += walHeaderSize + len(fragment)
 }
 
 // Sync forces wal data to disk.

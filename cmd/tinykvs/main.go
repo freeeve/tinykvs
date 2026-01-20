@@ -564,8 +564,26 @@ func cmdRepair(args []string) {
 	fs.Parse(args)
 
 	storeDir := requireDir(*dir)
+	validIDs := loadValidTableIDs(storeDir)
 
-	// Read manifest to get valid table IDs
+	orphans, orphanSize := findOrphanFiles(storeDir, validIDs)
+	if len(orphans) == 0 {
+		fmt.Println("No orphan files found")
+		return
+	}
+
+	fmt.Printf("Found %d orphan files (%.2f GB)\n", len(orphans), float64(orphanSize)/1e9)
+
+	if *dryRun {
+		printDryRunOrphans(orphans)
+		return
+	}
+
+	deleteOrphanFiles(storeDir, orphans)
+}
+
+// loadValidTableIDs reads the manifest and returns a set of valid table IDs.
+func loadValidTableIDs(storeDir string) map[uint32]bool {
 	manifestPath := filepath.Join(storeDir, "MANIFEST")
 	manifest, err := tinykvs.OpenManifest(manifestPath)
 	if err != nil {
@@ -575,13 +593,15 @@ func cmdRepair(args []string) {
 	tables := manifest.Tables()
 	manifest.Close()
 
-	// Build set of valid IDs
 	validIDs := make(map[uint32]bool)
 	for _, meta := range tables {
 		validIDs[meta.ID] = true
 	}
+	return validIDs
+}
 
-	// Find orphan files
+// findOrphanFiles returns SST files not in the valid ID set.
+func findOrphanFiles(storeDir string, validIDs map[uint32]bool) ([]string, int64) {
 	entries, err := os.ReadDir(storeDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading directory: %v\n", err)
@@ -591,37 +611,41 @@ func cmdRepair(args []string) {
 	var orphans []string
 	var orphanSize int64
 	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".sst") {
-			continue
-		}
-		name := strings.TrimSuffix(e.Name(), ".sst")
-		id, err := parseUint32(name)
-		if err != nil {
-			continue
-		}
-		if !validIDs[id] {
-			info, _ := e.Info()
-			orphans = append(orphans, e.Name())
-			orphanSize += info.Size()
+		if name, size, isOrphan := checkOrphanFile(e, validIDs); isOrphan {
+			orphans = append(orphans, name)
+			orphanSize += size
 		}
 	}
+	return orphans, orphanSize
+}
 
-	if len(orphans) == 0 {
-		fmt.Println("No orphan files found")
-		return
+// checkOrphanFile checks if a dir entry is an orphan SST file.
+func checkOrphanFile(e os.DirEntry, validIDs map[uint32]bool) (string, int64, bool) {
+	if !strings.HasSuffix(e.Name(), ".sst") {
+		return "", 0, false
 	}
-
-	fmt.Printf("Found %d orphan files (%.2f GB)\n", len(orphans), float64(orphanSize)/1e9)
-
-	if *dryRun {
-		fmt.Println("\nOrphan files (dry run - not deleting):")
-		for _, name := range orphans {
-			fmt.Printf("  %s\n", name)
-		}
-		return
+	name := strings.TrimSuffix(e.Name(), ".sst")
+	id, err := parseUint32(name)
+	if err != nil {
+		return "", 0, false
 	}
+	if validIDs[id] {
+		return "", 0, false
+	}
+	info, _ := e.Info()
+	return e.Name(), info.Size(), true
+}
 
-	// Delete orphans
+// printDryRunOrphans prints orphan files without deleting.
+func printDryRunOrphans(orphans []string) {
+	fmt.Println("\nOrphan files (dry run - not deleting):")
+	for _, name := range orphans {
+		fmt.Printf("  %s\n", name)
+	}
+}
+
+// deleteOrphanFiles deletes the given orphan files.
+func deleteOrphanFiles(storeDir string, orphans []string) {
 	var deleted int
 	var deletedSize int64
 	for _, name := range orphans {
@@ -635,7 +659,6 @@ func cmdRepair(args []string) {
 		deletedSize += info.Size()
 		fmt.Printf("Deleted: %s\n", name)
 	}
-
 	fmt.Printf("\nDeleted %d files, recovered %.2f GB\n", deleted, float64(deletedSize)/1e9)
 }
 
