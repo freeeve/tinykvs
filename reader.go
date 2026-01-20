@@ -51,8 +51,6 @@ func newReader(memtable *memtable, levels [][]*SSTable, cache *lruCache, opts Op
 
 // Get looks up a key, checking memtable first, then SSTables.
 func (r *reader) Get(key []byte) (Value, error) {
-	// Snapshot state under brief lock to minimize blocking.
-	// Deep copy slices to avoid race with concurrent modifications.
 	r.mu.RLock()
 	memtable := r.memtable
 	immutables := copyImmutables(r.immutables)
@@ -61,61 +59,85 @@ func (r *reader) Get(key []byte) (Value, error) {
 	verify := r.opts.VerifyChecksums
 	r.mu.RUnlock()
 
-	// 1. Check active memtable
-	if entry, found := memtable.Get(key); found {
-		if entry.Value.IsTombstone() {
-			return Value{}, ErrKeyNotFound
-		}
-		return entry.Value, nil
+	if val, found, err := getFromMemtables(key, memtable, immutables); found || err != nil {
+		return val, err
 	}
 
-	// 2. Check immutable memtables (newest first)
+	return getFromSSTables(key, levels, cache, verify)
+}
+
+// getFromMemtables checks the active memtable and immutables for a key.
+func getFromMemtables(key []byte, memtable *memtable, immutables []*memtable) (Value, bool, error) {
+	if entry, found := memtable.Get(key); found {
+		if entry.Value.IsTombstone() {
+			return Value{}, true, ErrKeyNotFound
+		}
+		return entry.Value, true, nil
+	}
+
 	for i := len(immutables) - 1; i >= 0; i-- {
 		if entry, found := immutables[i].Get(key); found {
 			if entry.Value.IsTombstone() {
-				return Value{}, ErrKeyNotFound
+				return Value{}, true, ErrKeyNotFound
 			}
-			return entry.Value, nil
+			return entry.Value, true, nil
 		}
 	}
 
-	// 3. Check SSTables level by level (L0 to Lmax)
+	return Value{}, false, nil
+}
+
+// getFromSSTables searches SSTables level by level for a key.
+func getFromSSTables(key []byte, levels [][]*SSTable, cache *lruCache, verify bool) (Value, error) {
 	for level := 0; level < len(levels); level++ {
 		tables := levels[level]
-
 		if level == 0 {
-			// L0: Check all tables (newest first, may have overlapping keys)
-			for i := len(tables) - 1; i >= 0; i-- {
-				entry, found, err := tables[i].Get(key, cache, verify)
-				if err != nil {
-					return Value{}, err
-				}
-				if found {
-					if entry.Value.IsTombstone() {
-						return Value{}, ErrKeyNotFound
-					}
-					return entry.Value, nil
-				}
+			if val, found, err := getFromL0(key, tables, cache, verify); found || err != nil {
+				return val, err
 			}
 		} else {
-			// L1+: Tables are sorted and non-overlapping, binary search
-			idx := findTableForKey(tables, key)
-			if idx >= 0 {
-				entry, found, err := tables[idx].Get(key, cache, verify)
-				if err != nil {
-					return Value{}, err
-				}
-				if found {
-					if entry.Value.IsTombstone() {
-						return Value{}, ErrKeyNotFound
-					}
-					return entry.Value, nil
-				}
+			if val, found, err := getFromSortedLevel(key, tables, cache, verify); found || err != nil {
+				return val, err
 			}
 		}
 	}
-
 	return Value{}, ErrKeyNotFound
+}
+
+// getFromL0 checks all L0 tables (newest first, may have overlapping keys).
+func getFromL0(key []byte, tables []*SSTable, cache *lruCache, verify bool) (Value, bool, error) {
+	for i := len(tables) - 1; i >= 0; i-- {
+		entry, found, err := tables[i].Get(key, cache, verify)
+		if err != nil {
+			return Value{}, false, err
+		}
+		if found {
+			if entry.Value.IsTombstone() {
+				return Value{}, true, ErrKeyNotFound
+			}
+			return entry.Value, true, nil
+		}
+	}
+	return Value{}, false, nil
+}
+
+// getFromSortedLevel checks a sorted level (L1+) using binary search.
+func getFromSortedLevel(key []byte, tables []*SSTable, cache *lruCache, verify bool) (Value, bool, error) {
+	idx := findTableForKey(tables, key)
+	if idx < 0 {
+		return Value{}, false, nil
+	}
+	entry, found, err := tables[idx].Get(key, cache, verify)
+	if err != nil {
+		return Value{}, false, err
+	}
+	if found {
+		if entry.Value.IsTombstone() {
+			return Value{}, true, ErrKeyNotFound
+		}
+		return entry.Value, true, nil
+	}
+	return Value{}, false, nil
 }
 
 // findTableForKey finds the SSTable that may contain the key (for L1+).
