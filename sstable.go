@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 )
 
 // SSTable magic number and version
@@ -60,6 +61,10 @@ type SSTable struct {
 	bloomErr  error
 	minKey    []byte // Cached from manifest for lazy loading
 	maxKey    []byte
+
+	// Reference counting for safe concurrent access during compaction
+	refs             atomic.Int32
+	markedForRemoval atomic.Bool
 }
 
 // OpenSSTable opens an existing SSTable file (eagerly loads index and bloom filter).
@@ -136,7 +141,7 @@ func OpenSSTable(id uint32, path string) (*SSTable, error) {
 		return nil, err
 	}
 
-	return &SSTable{
+	sst := &SSTable{
 		ID:          id,
 		Path:        path,
 		Level:       meta.Level,
@@ -148,7 +153,9 @@ func OpenSSTable(id uint32, path string) (*SSTable, error) {
 		fileSize:    fileSize,
 		minKey:      index.MinKey,
 		maxKey:      index.MaxKey,
-	}, nil
+	}
+	sst.refs.Store(1)
+	return sst, nil
 }
 
 // OpenSSTableFromManifest opens an SSTable using metadata from the manifest.
@@ -167,7 +174,7 @@ func OpenSSTableFromManifest(meta *TableMeta, dir string) (*SSTable, error) {
 		return nil, err
 	}
 
-	return &SSTable{
+	sst := &SSTable{
 		ID:    meta.ID,
 		Path:  path,
 		Level: meta.Level,
@@ -184,7 +191,9 @@ func OpenSSTableFromManifest(meta *TableMeta, dir string) (*SSTable, error) {
 		minKey:   meta.MinKey,
 		maxKey:   meta.MaxKey,
 		// Index and BloomFilter are nil - will be loaded lazily
-	}, nil
+	}
+	sst.refs.Store(1)
+	return sst, nil
 }
 
 // SSTablePath returns the path for an SSTable with the given ID.
@@ -348,7 +357,37 @@ func (sst *SSTable) MaxKey() []byte {
 
 // Close closes the SSTable file.
 func (sst *SSTable) Close() error {
+	if sst.file == nil {
+		return nil
+	}
 	return sst.file.Close()
+}
+
+// IncRef increments the reference count.
+// Call this before using the SSTable in a goroutine that may outlive the current scope.
+func (sst *SSTable) IncRef() {
+	sst.refs.Add(1)
+}
+
+// DecRef decrements the reference count.
+// If the count reaches zero and the table is marked for removal, the file is closed and removed.
+func (sst *SSTable) DecRef() {
+	if sst.refs.Add(-1) == 0 && sst.markedForRemoval.Load() {
+		if sst.file != nil {
+			sst.file.Close()
+			sst.file = nil
+		}
+		// Remove the file from disk
+		os.Remove(sst.Path)
+	}
+}
+
+// MarkForRemoval marks this SSTable for removal after compaction.
+// The file will be closed when all references are released.
+func (sst *SSTable) MarkForRemoval() {
+	sst.markedForRemoval.Store(true)
+	// Decrement the initial reference (from creation)
+	sst.DecRef()
 }
 
 // Size returns the file size in bytes.

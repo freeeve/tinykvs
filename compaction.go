@@ -2,8 +2,6 @@ package tinykvs
 
 import (
 	"fmt"
-	"log"
-	"os"
 	"path/filepath"
 	"time"
 )
@@ -135,15 +133,13 @@ func reverseTables(tables []*SSTable) []*SSTable {
 	return reversed
 }
 
-// removeCompactedTables closes and removes files for compacted tables.
+// removeCompactedTables marks compacted tables for removal.
+// The files will be closed and deleted when all readers release their references.
 func (w *writer) removeCompactedTables(tableSets ...[]*SSTable) {
 	for _, tables := range tableSets {
 		for _, t := range tables {
 			w.store.cache.RemoveByFileID(t.ID)
-			t.Close()
-			if err := os.Remove(t.Path); err != nil {
-				log.Printf("[compaction] Warning: failed to remove file %s: %v", t.Path, err)
-			}
+			t.MarkForRemoval()
 		}
 	}
 }
@@ -185,14 +181,12 @@ func (w *writer) compactLevelToNext(level int) {
 	// Update reader
 	w.reader.SetLevels(w.store.getLevels())
 
-	// Remove old files
+	// Mark old tables for removal (will be deleted when all readers release refs)
 	w.store.cache.RemoveByFileID(table.ID)
-	table.Close()
-	os.Remove(table.Path)
+	table.MarkForRemoval()
 	for _, t := range nextLevelTables {
 		w.store.cache.RemoveByFileID(t.ID)
-		t.Close()
-		os.Remove(t.Path)
+		t.MarkForRemoval()
 	}
 }
 

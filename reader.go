@@ -63,6 +63,10 @@ func (r *reader) Get(key []byte) (Value, error) {
 		return val, err
 	}
 
+	// Increment refs on all SSTables we're about to use
+	incRefLevels(levels)
+	defer decRefLevels(levels)
+
 	return getFromSSTables(key, levels, cache, verify)
 }
 
@@ -299,7 +303,11 @@ func (r *reader) setupPrefixScanner(prefix []byte) *prefixScanner {
 	verify := r.opts.VerifyChecksums
 	r.mu.RUnlock()
 
+	// Increment refs on all SSTables to prevent them from being closed during scan
+	incRefLevels(levels)
+
 	scanner := newPrefixScanner(prefix, cache, verify)
+	scanner.refTables = levels // Store for cleanup
 
 	scanner.addmemtable(memtable, 0)
 
@@ -434,6 +442,24 @@ func copyImmutables(immutables []*memtable) []*memtable {
 	return result
 }
 
+// incRefLevels increments reference counts on all SSTables in the levels.
+func incRefLevels(levels [][]*SSTable) {
+	for _, level := range levels {
+		for _, sst := range level {
+			sst.IncRef()
+		}
+	}
+}
+
+// decRefLevels decrements reference counts on all SSTables in the levels.
+func decRefLevels(levels [][]*SSTable) {
+	for _, level := range levels {
+		for _, sst := range level {
+			sst.DecRef()
+		}
+	}
+}
+
 // hasPrefix returns true if key starts with prefix.
 func hasPrefix(key, prefix []byte) bool {
 	if len(key) < len(prefix) {
@@ -506,6 +532,9 @@ type prefixScanner struct {
 	pendingTables []*SSTable // Tables waiting to be added (sorted by minKey)
 	pendingIdx    int        // Next table to add from pendingTables
 	basePriority  int        // Priority for pending tables
+
+	// Reference counting: all SSTables we hold refs on
+	refTables [][]*SSTable
 }
 
 type prefixHeapEntry struct {
@@ -748,6 +777,8 @@ func (s *prefixScanner) close() {
 	for _, he := range s.heap {
 		he.source.close()
 	}
+	// Decrement refs on all SSTables we were holding
+	decRefLevels(s.refTables)
 }
 
 // memtablePrefixSource wraps a memtable iterator for prefix scanning.
@@ -1028,7 +1059,11 @@ func (r *reader) ScanRange(start, end []byte, fn func(key []byte, value Value) b
 	verify := r.opts.VerifyChecksums
 	r.mu.RUnlock()
 
+	// Increment refs on all SSTables to prevent them from being closed during scan
+	incRefLevels(levels)
+
 	scanner := r.setupRangeScanner(start, end, memtable, immutables, levels, cache, verify)
+	scanner.refTables = levels // Store for cleanup
 	defer scanner.close()
 
 	return runRangeScan(scanner, end, fn)
@@ -1131,6 +1166,9 @@ type rangeScanner struct {
 	heap    rangeHeap
 	current Entry
 	stats   ScanStats
+
+	// Reference counting: all SSTables we hold refs on
+	refTables [][]*SSTable
 }
 
 type rangeHeapEntry struct {
@@ -1285,6 +1323,8 @@ func (s *rangeScanner) close() {
 	for _, he := range s.heap {
 		he.source.close()
 	}
+	// Decrement refs on all SSTables we were holding
+	decRefLevels(s.refTables)
 }
 
 // memtableRangeSource wraps a memtable iterator for range scanning.
