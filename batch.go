@@ -72,7 +72,6 @@ func (b *Batch) PutJson(key []byte, data any) error {
 	return nil
 }
 
-
 // Len returns the number of operations in the batch.
 func (b *Batch) Len() int {
 	return len(b.ops)
