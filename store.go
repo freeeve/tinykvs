@@ -770,107 +770,103 @@ func (s *Store) replaceTablesAfterCompaction(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Remove old L0 tables
-	if compactedLevel == 0 {
-		newL0 := make([]*SSTable, 0, len(s.levels[0]))
-		for _, t := range s.levels[0] {
-			found := false
-			for _, old := range oldL0Tables {
-				if t.ID == old.ID {
-					found = true
-					break
-				}
-			}
-			if !found {
-				newL0 = append(newL0, t)
-			}
-		}
-		s.levels[0] = newL0
-	} else {
-		// Remove the compacted table from its level
-		newLevel := make([]*SSTable, 0, len(s.levels[compactedLevel]))
-		for _, t := range s.levels[compactedLevel] {
-			found := false
-			for _, old := range oldL0Tables { // oldL0Tables contains the single table for non-L0 compaction
-				if t.ID == old.ID {
-					found = true
-					break
-				}
-			}
-			if !found {
-				newLevel = append(newLevel, t)
-			}
-		}
-		s.levels[compactedLevel] = newLevel
-	}
+	// Remove old tables from compacted level
+	s.levels[compactedLevel] = filterOutTables(s.levels[compactedLevel], oldL0Tables)
 
-	// Target level is always compactedLevel+1 for L0, or compactedLevel+1 for others
+	// Determine and ensure target level exists
+	targetLevel := s.getTargetLevel(compactedLevel)
+
+	// Update target level: remove old tables, add new ones, sort
+	s.levels[targetLevel] = s.buildNewTargetLevel(targetLevel, oldL1Tables, newTables)
+
+	// Update manifest
+	s.updateManifestAfterCompaction(targetLevel, newTables, oldL0Tables, oldL1Tables)
+}
+
+// filterOutTables returns tables from source excluding any with IDs matching exclusions.
+func filterOutTables(source, exclusions []*SSTable) []*SSTable {
+	result := make([]*SSTable, 0, len(source))
+	for _, t := range source {
+		if !tableInSlice(t.ID, exclusions) {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+// tableInSlice returns true if a table with the given ID exists in the slice.
+func tableInSlice(id uint32, tables []*SSTable) bool {
+	for _, t := range tables {
+		if t.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// getTargetLevel returns the target level for compaction and ensures it exists.
+func (s *Store) getTargetLevel(compactedLevel int) int {
 	targetLevel := 1
 	if compactedLevel > 0 {
 		targetLevel = compactedLevel + 1
 	}
-
-	// Ensure target level exists
 	for len(s.levels) <= targetLevel {
 		s.levels = append(s.levels, nil)
 	}
+	return targetLevel
+}
 
-	// Remove old target level tables
-	newTargetLevel := make([]*SSTable, 0, len(s.levels[targetLevel]))
-	for _, t := range s.levels[targetLevel] {
-		found := false
-		for _, old := range oldL1Tables {
-			if t.ID == old.ID {
-				found = true
-				break
-			}
-		}
-		if !found {
-			newTargetLevel = append(newTargetLevel, t)
-		}
-	}
-
-	// Add new tables
-	newTargetLevel = append(newTargetLevel, newTables...)
-
-	// Sort by min key
-	sort.Slice(newTargetLevel, func(i, j int) bool {
-		return CompareKeys(newTargetLevel[i].MinKey(), newTargetLevel[j].MinKey()) < 0
+// buildNewTargetLevel creates the new target level by filtering, adding, and sorting tables.
+func (s *Store) buildNewTargetLevel(targetLevel int, oldTables, newTables []*SSTable) []*SSTable {
+	result := filterOutTables(s.levels[targetLevel], oldTables)
+	result = append(result, newTables...)
+	sort.Slice(result, func(i, j int) bool {
+		return CompareKeys(result[i].MinKey(), result[j].MinKey()) < 0
 	})
+	return result
+}
 
-	s.levels[targetLevel] = newTargetLevel
+// updateManifestAfterCompaction updates the manifest with new and deleted tables.
+func (s *Store) updateManifestAfterCompaction(targetLevel int, newTables, oldL0Tables, oldL1Tables []*SSTable) {
+	if s.manifest == nil {
+		return
+	}
 
-	// Update manifest
-	if s.manifest != nil {
-		// Add new tables
-		for _, sst := range newTables {
-			meta := &TableMeta{
-				ID:          sst.ID,
-				Level:       targetLevel,
-				MinKey:      sst.MinKey(),
-				MaxKey:      sst.MaxKey(),
-				NumKeys:     sst.Footer.NumKeys,
-				FileSize:    int64(sst.Footer.FileSize),
-				IndexOffset: sst.Footer.IndexOffset,
-				IndexSize:   sst.Footer.IndexSize,
-				BloomOffset: sst.Footer.BloomOffset,
-				BloomSize:   sst.Footer.BloomSize,
-			}
-			s.manifest.AddTable(meta)
-		}
+	for _, sst := range newTables {
+		s.manifest.AddTable(sstableToMeta(sst, targetLevel))
+	}
 
-		// Delete old tables
-		var deleteIDs []uint32
-		for _, t := range oldL0Tables {
-			deleteIDs = append(deleteIDs, t.ID)
-		}
-		for _, t := range oldL1Tables {
-			deleteIDs = append(deleteIDs, t.ID)
-		}
-		if len(deleteIDs) > 0 {
-			s.manifest.DeleteTables(deleteIDs)
+	deleteIDs := collectTableIDs(oldL0Tables, oldL1Tables)
+	if len(deleteIDs) > 0 {
+		s.manifest.DeleteTables(deleteIDs)
+	}
+}
+
+// sstableToMeta creates a TableMeta from an SSTable.
+func sstableToMeta(sst *SSTable, level int) *TableMeta {
+	return &TableMeta{
+		ID:          sst.ID,
+		Level:       level,
+		MinKey:      sst.MinKey(),
+		MaxKey:      sst.MaxKey(),
+		NumKeys:     sst.Footer.NumKeys,
+		FileSize:    int64(sst.Footer.FileSize),
+		IndexOffset: sst.Footer.IndexOffset,
+		IndexSize:   sst.Footer.IndexSize,
+		BloomOffset: sst.Footer.BloomOffset,
+		BloomSize:   sst.Footer.BloomSize,
+	}
+}
+
+// collectTableIDs returns all table IDs from the given slices.
+func collectTableIDs(tableSets ...[]*SSTable) []uint32 {
+	var ids []uint32
+	for _, tables := range tableSets {
+		for _, t := range tables {
+			ids = append(ids, t.ID)
 		}
 	}
+	return ids
 }
 
 // releaseLock releases the exclusive lock file.
