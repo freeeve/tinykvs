@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/freeeve/msgpck"
-	vmihailenco "github.com/vmihailenco/msgpack/v5"
 )
 
 type SmallStruct struct {
@@ -31,7 +30,7 @@ var (
 		Tags:     []string{"admin", "user", "premium"},
 		Metadata: map[string]string{"role": "manager", "dept": "engineering"},
 	}
-	smallMap = map[string]any{"name": "Alice", "age": 30}
+	smallMap  = map[string]any{"name": "Alice", "age": 30}
 	mediumMap = map[string]any{
 		"id": int64(12345), "name": "Bob Smith", "email": "bob@example.com",
 		"age": 42, "active": true, "score": 98.6,
@@ -40,42 +39,14 @@ var (
 	}
 )
 
-// Vmihailenco benchmarks
-func BenchmarkVmihailenco_SmallMap_Marshal(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		vmihailenco.Marshal(smallMap)
-	}
-}
-func BenchmarkVmihailenco_SmallMap_Unmarshal(b *testing.B) {
-	data, _ := vmihailenco.Marshal(smallMap)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		var m map[string]any
-		vmihailenco.Unmarshal(data, &m)
-	}
-}
-func BenchmarkVmihailenco_MediumMap_Marshal(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		vmihailenco.Marshal(mediumMap)
-	}
-}
-func BenchmarkVmihailenco_MediumMap_Unmarshal(b *testing.B) {
-	data, _ := vmihailenco.Marshal(mediumMap)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		var m map[string]any
-		vmihailenco.Unmarshal(data, &m)
-	}
-}
-
-// msgpck benchmarks
+// Map benchmarks
 func BenchmarkMsgpck_SmallMap_Marshal(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		msgpck.Marshal(smallMap)
 	}
 }
 func BenchmarkMsgpck_SmallMap_Unmarshal(b *testing.B) {
-	data, _ := vmihailenco.Marshal(smallMap)
+	data, _ := msgpck.MarshalCopy(smallMap)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		msgpck.Unmarshal(data)
@@ -87,7 +58,7 @@ func BenchmarkMsgpck_MediumMap_Marshal(b *testing.B) {
 	}
 }
 func BenchmarkMsgpck_MediumMap_Unmarshal(b *testing.B) {
-	data, _ := vmihailenco.Marshal(mediumMap)
+	data, _ := msgpck.MarshalCopy(mediumMap)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		msgpck.Unmarshal(data)
@@ -107,40 +78,13 @@ func BenchmarkMsgpck_MediumMap_MarshalCopy(b *testing.B) {
 }
 
 // Struct serialization benchmarks
-func BenchmarkVmihailenco_SmallStruct_Marshal(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		vmihailenco.Marshal(smallStruct)
-	}
-}
-func BenchmarkVmihailenco_SmallStruct_Unmarshal(b *testing.B) {
-	data, _ := vmihailenco.Marshal(smallStruct)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		var s SmallStruct
-		vmihailenco.Unmarshal(data, &s)
-	}
-}
-func BenchmarkVmihailenco_MediumStruct_Marshal(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		vmihailenco.Marshal(mediumStruct)
-	}
-}
-func BenchmarkVmihailenco_MediumStruct_Unmarshal(b *testing.B) {
-	data, _ := vmihailenco.Marshal(mediumStruct)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		var s MediumStruct
-		vmihailenco.Unmarshal(data, &s)
-	}
-}
-
 func BenchmarkMsgpck_SmallStruct_Marshal(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		msgpck.Marshal(smallStruct)
 	}
 }
 func BenchmarkMsgpck_SmallStruct_Unmarshal(b *testing.B) {
-	data, _ := vmihailenco.Marshal(smallStruct) // use vmihailenco to encode for compat
+	data, _ := msgpck.MarshalCopy(smallStruct)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		var s SmallStruct
@@ -153,7 +97,7 @@ func BenchmarkMsgpck_MediumStruct_Marshal(b *testing.B) {
 	}
 }
 func BenchmarkMsgpck_MediumStruct_Unmarshal(b *testing.B) {
-	data, _ := vmihailenco.Marshal(mediumStruct)
+	data, _ := msgpck.MarshalCopy(mediumStruct)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		var s MediumStruct
@@ -170,7 +114,7 @@ var smallStructDecZC = msgpck.GetStructDecoder[SmallStruct](true)
 var mediumStructDecZC = msgpck.GetStructDecoder[MediumStruct](true)
 
 func BenchmarkMsgpck_SmallStruct_PreReg(b *testing.B) {
-	data, _ := vmihailenco.Marshal(smallStruct)
+	data, _ := msgpck.MarshalCopy(smallStruct)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		var s SmallStruct
@@ -179,7 +123,7 @@ func BenchmarkMsgpck_SmallStruct_PreReg(b *testing.B) {
 }
 
 func BenchmarkMsgpck_MediumStruct_PreReg(b *testing.B) {
-	data, _ := vmihailenco.Marshal(mediumStruct)
+	data, _ := msgpck.MarshalCopy(mediumStruct)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		var s MediumStruct
@@ -188,7 +132,7 @@ func BenchmarkMsgpck_MediumStruct_PreReg(b *testing.B) {
 }
 
 func BenchmarkMsgpck_SmallStruct_ZeroCopy(b *testing.B) {
-	data, _ := vmihailenco.Marshal(smallStruct)
+	data, _ := msgpck.MarshalCopy(smallStruct)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		var s SmallStruct
@@ -197,7 +141,7 @@ func BenchmarkMsgpck_SmallStruct_ZeroCopy(b *testing.B) {
 }
 
 func BenchmarkMsgpck_MediumStruct_ZeroCopy(b *testing.B) {
-	data, _ := vmihailenco.Marshal(mediumStruct)
+	data, _ := msgpck.MarshalCopy(mediumStruct)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		var s MediumStruct
@@ -235,7 +179,7 @@ func BenchmarkMsgpck_MediumStruct_EncPreRegCopy(b *testing.B) {
 
 // Typed map decoding benchmarks
 func BenchmarkMsgpck_SmallMap_TypedUnmarshal(b *testing.B) {
-	data, _ := vmihailenco.Marshal(smallMap)
+	data, _ := msgpck.MarshalCopy(smallMap)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		msgpck.UnmarshalMapStringAny(data, false)
@@ -243,7 +187,7 @@ func BenchmarkMsgpck_SmallMap_TypedUnmarshal(b *testing.B) {
 }
 
 func BenchmarkMsgpck_SmallMap_ZeroCopy(b *testing.B) {
-	data, _ := vmihailenco.Marshal(smallMap)
+	data, _ := msgpck.MarshalCopy(smallMap)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		msgpck.UnmarshalMapStringAny(data, true)
@@ -251,7 +195,7 @@ func BenchmarkMsgpck_SmallMap_ZeroCopy(b *testing.B) {
 }
 
 func BenchmarkMsgpck_MediumMap_TypedUnmarshal(b *testing.B) {
-	data, _ := vmihailenco.Marshal(mediumMap)
+	data, _ := msgpck.MarshalCopy(mediumMap)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		msgpck.UnmarshalMapStringAny(data, false)
@@ -259,7 +203,7 @@ func BenchmarkMsgpck_MediumMap_TypedUnmarshal(b *testing.B) {
 }
 
 func BenchmarkMsgpck_MediumMap_ZeroCopy(b *testing.B) {
-	data, _ := vmihailenco.Marshal(mediumMap)
+	data, _ := msgpck.MarshalCopy(mediumMap)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		msgpck.UnmarshalMapStringAny(data, true)
@@ -274,17 +218,8 @@ var stringMap = map[string]string{
 	"dept":  "engineering",
 }
 
-func BenchmarkVmihailenco_StringMap_Unmarshal(b *testing.B) {
-	data, _ := vmihailenco.Marshal(stringMap)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		var m map[string]string
-		vmihailenco.Unmarshal(data, &m)
-	}
-}
-
 func BenchmarkMsgpck_StringMap_Unmarshal(b *testing.B) {
-	data, _ := vmihailenco.Marshal(stringMap)
+	data, _ := msgpck.MarshalCopy(stringMap)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		msgpck.UnmarshalMapStringString(data, false)
@@ -292,7 +227,7 @@ func BenchmarkMsgpck_StringMap_Unmarshal(b *testing.B) {
 }
 
 func BenchmarkMsgpck_StringMap_ZeroCopy(b *testing.B) {
-	data, _ := vmihailenco.Marshal(stringMap)
+	data, _ := msgpck.MarshalCopy(stringMap)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		msgpck.UnmarshalMapStringString(data, true)
@@ -301,7 +236,7 @@ func BenchmarkMsgpck_StringMap_ZeroCopy(b *testing.B) {
 
 // Callback-based API benchmarks (safe zero-copy)
 func BenchmarkMsgpck_SmallStruct_Callback(b *testing.B) {
-	data, _ := vmihailenco.Marshal(smallStruct)
+	data, _ := msgpck.MarshalCopy(smallStruct)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		msgpck.DecodeStructFunc(data, func(s *SmallStruct) error {
@@ -312,7 +247,7 @@ func BenchmarkMsgpck_SmallStruct_Callback(b *testing.B) {
 }
 
 func BenchmarkMsgpck_MediumStruct_Callback(b *testing.B) {
-	data, _ := vmihailenco.Marshal(mediumStruct)
+	data, _ := msgpck.MarshalCopy(mediumStruct)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		msgpck.DecodeStructFunc(data, func(s *MediumStruct) error {
@@ -323,7 +258,7 @@ func BenchmarkMsgpck_MediumStruct_Callback(b *testing.B) {
 }
 
 func BenchmarkMsgpck_SmallMap_Callback(b *testing.B) {
-	data, _ := vmihailenco.Marshal(smallMap)
+	data, _ := msgpck.MarshalCopy(smallMap)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		msgpck.DecodeMapFunc(data, func(m map[string]any) error {
@@ -334,7 +269,7 @@ func BenchmarkMsgpck_SmallMap_Callback(b *testing.B) {
 }
 
 func BenchmarkMsgpck_StringMap_Callback(b *testing.B) {
-	data, _ := vmihailenco.Marshal(stringMap)
+	data, _ := msgpck.MarshalCopy(stringMap)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		msgpck.DecodeStringMapFunc(data, func(m map[string]string) error {

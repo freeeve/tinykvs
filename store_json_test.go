@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/freeeve/msgpck"
 )
 
 func TestStoreRecords(t *testing.T) {
@@ -276,7 +276,7 @@ func TestStorePutGetNestedStruct(t *testing.T) {
 // getStructFromValue decodes a Value directly into a struct (for testing raw msgpack access)
 func getStructFromValue(val Value, dest any) error {
 	if val.Type == ValueTypeMsgpack {
-		return msgpack.Unmarshal(val.Bytes, dest)
+		return msgpck.UnmarshalStruct(val.Bytes, dest)
 	}
 	return fmt.Errorf("expected msgpack, got type %d", val.Type)
 }

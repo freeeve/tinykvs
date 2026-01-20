@@ -1,11 +1,8 @@
 package tinykvs
 
 import (
-	"bytes"
 	"fmt"
 	"testing"
-
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 type benchUser struct {
@@ -542,73 +539,5 @@ func BenchmarkScanPrefixRaw(b *testing.B) {
 			count++
 			return true
 		})
-	}
-}
-
-// BenchmarkBatchEncodeStructsOldWay simulates the old way without shared buffer
-func BenchmarkBatchEncodeStructsOldWay(b *testing.B) {
-	user := benchUser{
-		Name:    "Alice Smith",
-		Email:   "alice@example.com",
-		Age:     30,
-		Active:  true,
-		Balance: 1234.56,
-	}
-
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		batch := NewBatch()
-		for j := 0; j < 100; j++ {
-			key := fmt.Sprintf("user:%08d:%04d", i, j)
-			// Old way: marshal directly
-			data, _ := msgpack.Marshal(user)
-			batch.Put([]byte(key), MsgpackValue(data))
-		}
-	}
-}
-
-// BenchmarkDecodeStructOldWay simulates decoding without pooled decoder
-func BenchmarkDecodeStructOldWay(b *testing.B) {
-	user := benchUser{
-		Name:    "Alice Smith",
-		Email:   "alice@example.com",
-		Age:     30,
-		Active:  true,
-		Balance: 1234.56,
-	}
-	data, _ := msgpack.Marshal(user)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		var dest benchUser
-		// Old way: Unmarshal directly (creates new decoder each time)
-		msgpack.Unmarshal(data, &dest)
-	}
-}
-
-// BenchmarkDecodeStructPooled tests decoding with pooled decoder
-func BenchmarkDecodeStructPooled(b *testing.B) {
-	user := benchUser{
-		Name:    "Alice Smith",
-		Email:   "alice@example.com",
-		Age:     30,
-		Active:  true,
-		Balance: 1234.56,
-	}
-	data, _ := msgpack.Marshal(user)
-	r := bytes.NewReader(nil)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		var dest benchUser
-		// New way: pooled decoder with reusable reader
-		r.Reset(data)
-		dec := msgpack.GetDecoder()
-		dec.Reset(r)
-		dec.Decode(&dest)
-		msgpack.PutDecoder(dec)
 	}
 }
