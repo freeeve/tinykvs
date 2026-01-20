@@ -783,16 +783,24 @@ func cmdImport(args []string) {
 	}
 	defer store.Close()
 
+	count, errors := importCSVRecordsToStore(file, store)
+
+	if err := store.Flush(); err != nil {
+		fmt.Fprintf(os.Stderr, "\nError flushing: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stderr, "\rImported %d keys (%d errors)\n", count, errors)
+}
+
+// importCSVRecordsToStore reads CSV records and imports them to the store.
+func importCSVRecordsToStore(file *os.File, store *tinykvs.Store) (count, errors int64) {
 	reader := csv.NewReader(bufio.NewReader(file))
 
-	// Skip header
 	if _, err := reader.Read(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading header: %v\n", err)
 		os.Exit(1)
 	}
-
-	var count int64
-	var errors int64
 
 	for {
 		record, err := reader.Read()
@@ -803,79 +811,36 @@ func cmdImport(args []string) {
 			errors++
 			continue
 		}
-		if len(record) != 3 {
+
+		if importSingleRecord(store, record) {
+			count++
+			if count%100000 == 0 {
+				fmt.Fprintf(os.Stderr, "\rImported %d keys...", count)
+			}
+		} else {
 			errors++
-			continue
-		}
-
-		keyBytes, err := hex.DecodeString(record[0])
-		if err != nil {
-			errors++
-			continue
-		}
-
-		typeName := record[1]
-		valueStr := record[2]
-
-		var val tinykvs.Value
-		switch typeName {
-		case "int64":
-			v, err := strconv.ParseInt(valueStr, 10, 64)
-			if err != nil {
-				errors++
-				continue
-			}
-			val = tinykvs.Int64Value(v)
-		case "float64":
-			v, err := strconv.ParseFloat(valueStr, 64)
-			if err != nil {
-				errors++
-				continue
-			}
-			val = tinykvs.Float64Value(v)
-		case "bool":
-			v, err := strconv.ParseBool(valueStr)
-			if err != nil {
-				errors++
-				continue
-			}
-			val = tinykvs.BoolValue(v)
-		case "string":
-			bytes, err := hex.DecodeString(valueStr)
-			if err != nil {
-				errors++
-				continue
-			}
-			val = tinykvs.StringValue(string(bytes))
-		case "bytes":
-			bytes, err := hex.DecodeString(valueStr)
-			if err != nil {
-				errors++
-				continue
-			}
-			val = tinykvs.BytesValue(bytes)
-		default:
-			errors++
-			continue
-		}
-
-		if err := store.Put(keyBytes, val); err != nil {
-			errors++
-			continue
-		}
-		count++
-
-		if count%100000 == 0 {
-			fmt.Fprintf(os.Stderr, "\rImported %d keys...", count)
 		}
 	}
+	return count, errors
+}
 
-	if err := store.Flush(); err != nil {
-		fmt.Fprintf(os.Stderr, "\nError flushing: %v\n", err)
-		os.Exit(1)
+// importSingleRecord parses and stores a single CSV record.
+func importSingleRecord(store *tinykvs.Store, record []string) bool {
+	if len(record) != 3 {
+		return false
 	}
 
-	fmt.Fprintf(os.Stderr, "\rImported %d keys (%d errors)\n", count, errors)
+	keyBytes, err := hex.DecodeString(record[0])
+	if err != nil {
+		return false
+	}
+
+	val, err := parseTypedValue(record[1], record[2])
+	if err != nil {
+		return false
+	}
+
+	return store.Put(keyBytes, val) == nil
 }
 
 func cmdShell(args []string) {
