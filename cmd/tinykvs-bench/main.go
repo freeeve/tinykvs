@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -12,6 +14,107 @@ import (
 
 	"github.com/freeeve/tinykvs"
 )
+
+// Realistic data generators
+var (
+	firstNames = []string{
+		"James", "Mary", "John", "Patricia", "Robert", "Jennifer", "Michael", "Linda", "William", "Elizabeth",
+		"David", "Barbara", "Richard", "Susan", "Joseph", "Jessica", "Thomas", "Sarah", "Charles", "Karen",
+		"Christopher", "Nancy", "Daniel", "Lisa", "Matthew", "Betty", "Anthony", "Margaret", "Mark", "Sandra",
+		"Donald", "Ashley", "Steven", "Kimberly", "Paul", "Emily", "Andrew", "Donna", "Joshua", "Michelle",
+		"Kenneth", "Dorothy", "Kevin", "Carol", "Brian", "Amanda", "George", "Melissa", "Timothy", "Deborah",
+		"Ronald", "Stephanie", "Edward", "Rebecca", "Jason", "Sharon", "Jeffrey", "Laura", "Ryan", "Cynthia",
+		"Jacob", "Kathleen", "Gary", "Amy", "Nicholas", "Angela", "Eric", "Shirley", "Jonathan", "Anna",
+		"Stephen", "Brenda", "Larry", "Pamela", "Justin", "Emma", "Scott", "Nicole", "Brandon", "Helen",
+		"Benjamin", "Samantha", "Samuel", "Katherine", "Raymond", "Christine", "Gregory", "Debra", "Frank", "Rachel",
+		"Alexander", "Carolyn", "Patrick", "Janet", "Jack", "Catherine", "Dennis", "Maria", "Jerry", "Heather",
+	}
+	lastNames = []string{
+		"Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez",
+		"Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Thomas", "Taylor", "Moore", "Jackson", "Martin",
+		"Lee", "Perez", "Thompson", "White", "Harris", "Sanchez", "Clark", "Ramirez", "Lewis", "Robinson",
+		"Walker", "Young", "Allen", "King", "Wright", "Scott", "Torres", "Nguyen", "Hill", "Flores",
+		"Green", "Adams", "Nelson", "Baker", "Hall", "Rivera", "Campbell", "Mitchell", "Carter", "Roberts",
+		"Gomez", "Phillips", "Evans", "Turner", "Diaz", "Parker", "Cruz", "Edwards", "Collins", "Reyes",
+		"Stewart", "Morris", "Morales", "Murphy", "Cook", "Rogers", "Gutierrez", "Ortiz", "Morgan", "Cooper",
+		"Peterson", "Bailey", "Reed", "Kelly", "Howard", "Ramos", "Kim", "Cox", "Ward", "Richardson",
+		"Watson", "Brooks", "Chavez", "Wood", "James", "Bennett", "Gray", "Mendoza", "Ruiz", "Hughes",
+		"Price", "Alvarez", "Castillo", "Sanders", "Patel", "Myers", "Long", "Ross", "Foster", "Jimenez",
+	}
+	domains = []string{"gmail.com", "yahoo.com", "outlook.com", "icloud.com", "proton.me", "hotmail.com", "aol.com", "mail.com"}
+	// Top 100 US cities with their states
+	cityStates = []struct{ city, state string }{
+		{"New York", "NY"}, {"Los Angeles", "CA"}, {"Chicago", "IL"}, {"Houston", "TX"}, {"Phoenix", "AZ"},
+		{"Philadelphia", "PA"}, {"San Antonio", "TX"}, {"San Diego", "CA"}, {"Dallas", "TX"}, {"San Jose", "CA"},
+		{"Austin", "TX"}, {"Jacksonville", "FL"}, {"Fort Worth", "TX"}, {"Columbus", "OH"}, {"Charlotte", "NC"},
+		{"San Francisco", "CA"}, {"Indianapolis", "IN"}, {"Seattle", "WA"}, {"Denver", "CO"}, {"Washington", "DC"},
+		{"Boston", "MA"}, {"El Paso", "TX"}, {"Nashville", "TN"}, {"Detroit", "MI"}, {"Oklahoma City", "OK"},
+		{"Portland", "OR"}, {"Las Vegas", "NV"}, {"Memphis", "TN"}, {"Louisville", "KY"}, {"Baltimore", "MD"},
+		{"Milwaukee", "WI"}, {"Albuquerque", "NM"}, {"Tucson", "AZ"}, {"Fresno", "CA"}, {"Sacramento", "CA"},
+		{"Mesa", "AZ"}, {"Kansas City", "MO"}, {"Atlanta", "GA"}, {"Long Beach", "CA"}, {"Colorado Springs", "CO"},
+		{"Raleigh", "NC"}, {"Miami", "FL"}, {"Virginia Beach", "VA"}, {"Omaha", "NE"}, {"Oakland", "CA"},
+		{"Minneapolis", "MN"}, {"Tulsa", "OK"}, {"Arlington", "TX"}, {"New Orleans", "LA"}, {"Wichita", "KS"},
+		{"Cleveland", "OH"}, {"Tampa", "FL"}, {"Bakersfield", "CA"}, {"Aurora", "CO"}, {"Honolulu", "HI"},
+		{"Anaheim", "CA"}, {"Santa Ana", "CA"}, {"Corpus Christi", "TX"}, {"Riverside", "CA"}, {"Lexington", "KY"},
+		{"St. Louis", "MO"}, {"Stockton", "CA"}, {"Pittsburgh", "PA"}, {"Saint Paul", "MN"}, {"Anchorage", "AK"},
+		{"Cincinnati", "OH"}, {"Henderson", "NV"}, {"Greensboro", "NC"}, {"Plano", "TX"}, {"Newark", "NJ"},
+		{"Lincoln", "NE"}, {"Toledo", "OH"}, {"Orlando", "FL"}, {"Chula Vista", "CA"}, {"Irvine", "CA"},
+		{"Fort Wayne", "IN"}, {"Jersey City", "NJ"}, {"Durham", "NC"}, {"St. Petersburg", "FL"}, {"Laredo", "TX"},
+		{"Buffalo", "NY"}, {"Madison", "WI"}, {"Lubbock", "TX"}, {"Chandler", "AZ"}, {"Scottsdale", "AZ"},
+		{"Glendale", "AZ"}, {"Reno", "NV"}, {"Norfolk", "VA"}, {"Winston-Salem", "NC"}, {"North Las Vegas", "NV"},
+		{"Gilbert", "AZ"}, {"Irving", "TX"}, {"Hialeah", "FL"}, {"Garland", "TX"}, {"Fremont", "CA"},
+		{"Boise", "ID"}, {"Richmond", "VA"}, {"Baton Rouge", "LA"}, {"Spokane", "WA"}, {"Des Moines", "IA"},
+	}
+)
+
+func generateUserID(i int) string {
+	// Create a hash-based ID that looks like a UUID
+	h := md5.Sum([]byte(fmt.Sprintf("user-%d-salt", i)))
+	return hex.EncodeToString(h[:])[:24]
+}
+
+var streetTypes = []string{"St", "Ave", "Blvd", "Dr", "Ln", "Rd", "Way", "Ct", "Pl", "Cir"}
+var streetNames = []string{"Main", "Oak", "Maple", "Cedar", "Pine", "Elm", "Washington", "Lake", "Hill", "Park", "River", "Church", "High", "Union", "Market", "Spring", "School", "North", "South", "West"}
+
+func generateUser(rng *rand.Rand, i int) (string, string) {
+	userID := generateUserID(i)
+	key := fmt.Sprintf("user:%s", userID)
+
+	firstName := firstNames[rng.Intn(len(firstNames))]
+	lastName := lastNames[rng.Intn(len(lastNames))]
+	loc := cityStates[rng.Intn(len(cityStates))]
+	age := 18 + rng.Intn(62)
+	balance := rng.Float64() * 10000
+	streetNum := 100 + rng.Intn(9900)
+	streetName := streetNames[rng.Intn(len(streetNames))]
+	streetType := streetTypes[rng.Intn(len(streetTypes))]
+	zip := 10000 + rng.Intn(90000)
+
+	// Generate 3-7 lucky numbers
+	numLucky := 3 + rng.Intn(5)
+	luckyNums := make([]int, numLucky)
+	for j := 0; j < numLucky; j++ {
+		luckyNums[j] = 1 + rng.Intn(99)
+	}
+	luckyStr := fmt.Sprintf("%v", luckyNums)
+	luckyStr = luckyStr[1 : len(luckyStr)-1] // remove [ ]
+	luckyStr = "[" + luckyStr + "]"
+
+	value := fmt.Sprintf(`{"id":"%s","name":"%s %s","email":"%s.%s@%s","age":%d,"balance":%.2f,"active":%v,"created":%d,"lucky_numbers":%s,"address":{"street":"%d %s %s","city":"%s","state":"%s","zip":"%05d"}}`,
+		userID,
+		firstName, lastName,
+		firstName, lastName, domains[rng.Intn(len(domains))],
+		age,
+		balance,
+		rng.Intn(2) == 1,
+		1700000000+i,
+		luckyStr,
+		streetNum, streetName, streetType,
+		loc.city, loc.state,
+		zip,
+	)
+	return key, value
+}
 
 func main() {
 	numRecords := flag.Int("records", 100_000_000, "Number of records to write")
@@ -128,10 +231,10 @@ func runWrite(dir string, opts tinykvs.Options, numRecords int) {
 	batchSize := 1_000_000
 	writeStart := time.Now()
 	lastReport := writeStart
+	rng := rand.New(rand.NewSource(42)) // Deterministic for reproducibility
 
 	for i := 0; i < numRecords; i++ {
-		key := fmt.Sprintf("key%012d", i)
-		value := fmt.Sprintf("val%012d", i)
+		key, value := generateUser(rng, i)
 		if err := store.PutString([]byte(key), value); err != nil {
 			fmt.Fprintf(os.Stderr, "Put failed at %d: %v\n", i, err)
 			os.Exit(1)
@@ -244,7 +347,7 @@ func runReads(dir string, opts tinykvs.Options, numRecords, numReads int) {
 		found := 0
 		for i := 0; i < numReads; i++ {
 			idx := rand.Intn(numRecords)
-			key := fmt.Sprintf("key%012d", idx)
+			key := fmt.Sprintf("user:%s", generateUserID(idx))
 			if _, err := store.Get([]byte(key)); err == nil {
 				found++
 			}
@@ -275,7 +378,7 @@ func runPrefixScans(dir string, opts tinykvs.Options, numRecords int) {
 	// Full scan of all keys
 	scanStart := time.Now()
 	count := 0
-	err = store.ScanPrefix([]byte("key"), func(key []byte, value tinykvs.Value) bool {
+	err = store.ScanPrefix([]byte("user:"), func(key []byte, value tinykvs.Value) bool {
 		count++
 		return true
 	})
@@ -295,13 +398,13 @@ func runPrefixScans(dir string, opts tinykvs.Options, numRecords int) {
 		m.HeapAlloc/1024/1024, m.Sys/1024/1024, storeStats.IndexMemory/1024/1024)
 
 	// Scan 1000 random prefixes to measure per-prefix overhead
+	// Use 2-char hex prefix (matches ~1/256 of keys)
 	numPrefixScans := 1000
 	totalKeys := 0
 	scanStart = time.Now()
 	for i := 0; i < numPrefixScans; i++ {
-		// Pick a random key and use first 15 chars as prefix (matches ~10 keys)
-		idx := rand.Intn(numRecords)
-		prefix := fmt.Sprintf("key%012d", idx)[:15]
+		// Pick a random 2-char hex prefix
+		prefix := fmt.Sprintf("user:%02x", rand.Intn(256))
 		store.ScanPrefix([]byte(prefix), func(key []byte, value tinykvs.Value) bool {
 			totalKeys++
 			return true
@@ -318,14 +421,13 @@ func runPrefixScans(dir string, opts tinykvs.Options, numRecords int) {
 		m.HeapAlloc/1024/1024, m.Sys/1024/1024, storeStats.IndexMemory/1024/1024)
 
 	// Scan with LIMIT to show lazy loading benefit
+	// Use 1-char hex prefix (matches ~1/16 of keys) but stop at limit
 	numLimitScans := 1000
 	limit := 100
 	totalLimitKeys := 0
 	scanStart = time.Now()
 	for i := 0; i < numLimitScans; i++ {
-		// Use a prefix that matches ~10000 keys (take first 11 chars of a random key)
-		idx := rand.Intn(numRecords)
-		prefix := fmt.Sprintf("key%012d", idx)[:11]
+		prefix := fmt.Sprintf("user:%x", rand.Intn(16))
 		count := 0
 		store.ScanPrefix([]byte(prefix), func(key []byte, value tinykvs.Value) bool {
 			count++
