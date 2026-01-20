@@ -271,10 +271,7 @@ func mapToStruct(m map[string]any, dest any) error {
 
 // setFieldValue sets a struct field from an any value.
 func setFieldValue(fv reflect.Value, val any) error {
-	if val == nil {
-		return nil
-	}
-	if !fv.CanSet() {
+	if val == nil || !fv.CanSet() {
 		return nil
 	}
 
@@ -289,68 +286,85 @@ func setFieldValue(fv reflect.Value, val any) error {
 
 	// Handle slice
 	if fv.Kind() == reflect.Slice && rv.Kind() == reflect.Slice {
-		slice := reflect.MakeSlice(fv.Type(), rv.Len(), rv.Len())
-		for i := 0; i < rv.Len(); i++ {
-			elem := slice.Index(i)
-			if err := setFieldValue(elem, rv.Index(i).Interface()); err != nil {
-				return err
-			}
-		}
-		fv.Set(slice)
+		return setSliceField(fv, rv)
+	}
+
+	// Try direct assignment or conversion
+	if tryAssignOrConvert(fv, rv) {
 		return nil
 	}
 
-	// Try direct assignment
+	// Handle numeric types from JSON-like sources
+	setNumericOrPrimitive(fv, val)
+	return nil
+}
+
+// setSliceField sets a slice field by recursively setting each element.
+func setSliceField(fv, rv reflect.Value) error {
+	slice := reflect.MakeSlice(fv.Type(), rv.Len(), rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		elem := slice.Index(i)
+		if err := setFieldValue(elem, rv.Index(i).Interface()); err != nil {
+			return err
+		}
+	}
+	fv.Set(slice)
+	return nil
+}
+
+// tryAssignOrConvert attempts direct assignment or type conversion.
+func tryAssignOrConvert(fv, rv reflect.Value) bool {
 	if rv.Type().AssignableTo(fv.Type()) {
 		fv.Set(rv)
-		return nil
+		return true
 	}
-
-	// Try conversion for numeric types
 	if rv.Type().ConvertibleTo(fv.Type()) {
 		fv.Set(rv.Convert(fv.Type()))
-		return nil
+		return true
 	}
+	return false
+}
 
-	// Handle int64/float64 from JSON-like sources
+// setNumericOrPrimitive sets numeric or primitive field values from JSON-like sources.
+func setNumericOrPrimitive(fv reflect.Value, val any) {
 	switch fv.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		switch v := val.(type) {
-		case float64:
-			fv.SetInt(int64(v))
-			return nil
-		case int64:
-			fv.SetInt(v)
-			return nil
-		case int:
-			fv.SetInt(int64(v))
-			return nil
-		}
+		setIntField(fv, val)
 	case reflect.Float32, reflect.Float64:
-		switch v := val.(type) {
-		case float64:
-			fv.SetFloat(v)
-			return nil
-		case int64:
-			fv.SetFloat(float64(v))
-			return nil
-		case int:
-			fv.SetFloat(float64(v))
-			return nil
-		}
+		setFloatField(fv, val)
 	case reflect.Bool:
 		if b, ok := val.(bool); ok {
 			fv.SetBool(b)
-			return nil
 		}
 	case reflect.String:
 		if s, ok := val.(string); ok {
 			fv.SetString(s)
-			return nil
 		}
 	}
+}
 
-	return nil // Skip incompatible types silently
+// setIntField sets an integer field from various numeric types.
+func setIntField(fv reflect.Value, val any) {
+	switch v := val.(type) {
+	case float64:
+		fv.SetInt(int64(v))
+	case int64:
+		fv.SetInt(v)
+	case int:
+		fv.SetInt(int64(v))
+	}
+}
+
+// setFloatField sets a float field from various numeric types.
+func setFloatField(fv reflect.Value, val any) {
+	switch v := val.(type) {
+	case float64:
+		fv.SetFloat(v)
+	case int64:
+		fv.SetFloat(float64(v))
+	case int:
+		fv.SetFloat(float64(v))
+	}
 }
 
 // ScanPrefixMaps scans keys with the given prefix and decodes each value as a map.
