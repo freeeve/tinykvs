@@ -8,6 +8,11 @@ import (
 	"github.com/freeeve/msgpck"
 )
 
+// Error format strings for type mismatches.
+const (
+	errExpectedMsgpackOrRecord = "expected msgpack or record, got %d"
+	errExpectedMsgpack         = "expected msgpack, got %d"
+)
 
 // PutInt64 stores an int64 value.
 func (s *Store) PutInt64(key []byte, value int64) error {
@@ -42,7 +47,6 @@ func (s *Store) PutMap(key []byte, fields map[string]any) error {
 	}
 	return s.Put(key, MsgpackValue(data))
 }
-
 
 // PutJson stores a record as a JSON string.
 // Use this when you want human-readable storage instead of binary msgpack.
@@ -133,7 +137,7 @@ func (s *Store) GetMap(key []byte) (map[string]any, error) {
 		// Backward compatibility
 		return val.Record, nil
 	default:
-		return nil, fmt.Errorf("expected msgpack or record, got %d", val.Type)
+		return nil, fmt.Errorf(errExpectedMsgpackOrRecord, val.Type)
 	}
 }
 
@@ -449,7 +453,7 @@ func decodeAsMap(val Value) (map[string]any, error) {
 	case ValueTypeRecord:
 		return val.Record, nil
 	default:
-		return nil, fmt.Errorf("expected msgpack or record, got %d", val.Type)
+		return nil, fmt.Errorf(errExpectedMsgpackOrRecord, val.Type)
 	}
 }
 
@@ -461,7 +465,7 @@ func decodeAsStruct(val Value, dest any) error {
 	case ValueTypeRecord:
 		return mapToStruct(val.Record, dest)
 	default:
-		return fmt.Errorf("expected msgpack or record, got %d", val.Type)
+		return fmt.Errorf(errExpectedMsgpackOrRecord, val.Type)
 	}
 }
 
@@ -496,7 +500,7 @@ func GetStruct[T any](s *Store, key []byte) (*T, error) {
 		return nil, err
 	}
 	if val.Type != ValueTypeMsgpack {
-		return nil, fmt.Errorf("expected msgpack, got %d", val.Type)
+		return nil, fmt.Errorf(errExpectedMsgpack, val.Type)
 	}
 	dec := msgpck.GetStructDecoder[T](false)
 	var dest T
@@ -514,7 +518,7 @@ func GetStructInto[T any](s *Store, key []byte, dest *T) error {
 		return err
 	}
 	if val.Type != ValueTypeMsgpack {
-		return fmt.Errorf("expected msgpack, got %d", val.Type)
+		return fmt.Errorf(errExpectedMsgpack, val.Type)
 	}
 	dec := msgpck.GetStructDecoder[T](false)
 	return dec.Decode(val.Bytes, dest)
@@ -536,7 +540,7 @@ func (s *Store) GetMapZeroCopy(key []byte, fn func(m map[string]any) error) erro
 	case ValueTypeRecord:
 		return fn(val.Record)
 	default:
-		return fmt.Errorf("expected msgpack or record, got %d", val.Type)
+		return fmt.Errorf(errExpectedMsgpackOrRecord, val.Type)
 	}
 }
 
@@ -549,7 +553,7 @@ func GetStructZeroCopy[T any](s *Store, key []byte, fn func(v *T) error) error {
 		return err
 	}
 	if val.Type != ValueTypeMsgpack {
-		return fmt.Errorf("expected msgpack, got %d", val.Type)
+		return fmt.Errorf(errExpectedMsgpack, val.Type)
 	}
 	return msgpck.DecodeStructFunc(val.Bytes, fn)
 }
