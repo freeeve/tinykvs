@@ -74,17 +74,34 @@ func (w *writer) compactL0ToL1() {
 		return
 	}
 
-	l0Tables := levels[0]
+	l0Tables := limitL0BatchSize(levels[0], w.store.opts.L0CompactionBatchSize)
+	minKey, maxKey := getTableKeyRange(l0Tables)
+	l1Tables := findOverlappingTables(levels, 1, minKey, maxKey)
 
-	// Limit batch size if configured
-	if w.store.opts.L0CompactionBatchSize > 0 && len(l0Tables) > w.store.opts.L0CompactionBatchSize {
-		// Take oldest tables (at the beginning of the slice)
-		l0Tables = l0Tables[:w.store.opts.L0CompactionBatchSize]
+	reversedL0 := reverseTables(l0Tables)
+	allTables := append(reversedL0, l1Tables...)
+
+	mergeRes, err := w.mergeTables(allTables, 1)
+	if err != nil {
+		return
 	}
 
-	// Find key range of L0
-	var minKey, maxKey []byte
-	for _, t := range l0Tables {
+	w.store.replaceTablesAfterCompaction(0, l0Tables, l1Tables, mergeRes.tables)
+	w.reader.SetLevels(w.store.getLevels())
+	w.removeCompactedTables(l0Tables, l1Tables)
+}
+
+// limitL0BatchSize returns at most batchSize tables from the beginning.
+func limitL0BatchSize(tables []*SSTable, batchSize int) []*SSTable {
+	if batchSize > 0 && len(tables) > batchSize {
+		return tables[:batchSize]
+	}
+	return tables
+}
+
+// getTableKeyRange finds the min and max keys across all tables.
+func getTableKeyRange(tables []*SSTable) (minKey, maxKey []byte) {
+	for _, t := range tables {
 		if minKey == nil || CompareKeys(t.MinKey(), minKey) < 0 {
 			minKey = t.MinKey()
 		}
@@ -92,51 +109,41 @@ func (w *writer) compactL0ToL1() {
 			maxKey = t.MaxKey()
 		}
 	}
+	return minKey, maxKey
+}
 
-	// Find overlapping L1 tables
-	var l1Tables []*SSTable
-	if len(levels) > 1 {
-		for _, t := range levels[1] {
-			if CompareKeys(t.MaxKey(), minKey) >= 0 && CompareKeys(t.MinKey(), maxKey) <= 0 {
-				l1Tables = append(l1Tables, t)
+// findOverlappingTables returns tables from the specified level that overlap with the key range.
+func findOverlappingTables(levels [][]*SSTable, level int, minKey, maxKey []byte) []*SSTable {
+	if level >= len(levels) {
+		return nil
+	}
+	var result []*SSTable
+	for _, t := range levels[level] {
+		if CompareKeys(t.MaxKey(), minKey) >= 0 && CompareKeys(t.MinKey(), maxKey) <= 0 {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+// reverseTables returns a new slice with tables in reverse order.
+func reverseTables(tables []*SSTable) []*SSTable {
+	reversed := make([]*SSTable, len(tables))
+	for i, t := range tables {
+		reversed[len(tables)-1-i] = t
+	}
+	return reversed
+}
+
+// removeCompactedTables closes and removes files for compacted tables.
+func (w *writer) removeCompactedTables(tableSets ...[]*SSTable) {
+	for _, tables := range tableSets {
+		for _, t := range tables {
+			w.store.cache.RemoveByFileID(t.ID)
+			t.Close()
+			if err := os.Remove(t.Path); err != nil {
+				log.Printf("[compaction] Warning: failed to remove file %s: %v", t.Path, err)
 			}
-		}
-	}
-
-	// Reverse L0 tables so newer tables (appended last) come first
-	// The merge iterator uses index order to determine which entry is newer
-	reversedL0 := make([]*SSTable, len(l0Tables))
-	for i, t := range l0Tables {
-		reversedL0[len(l0Tables)-1-i] = t
-	}
-
-	// Merge all tables (reversed L0 first, then L1)
-	allTables := append(reversedL0, l1Tables...)
-	mergeRes, err := w.mergeTables(allTables, 1)
-	if err != nil {
-		return
-	}
-	newTables := mergeRes.tables
-
-	// Update store with new tables
-	w.store.replaceTablesAfterCompaction(0, l0Tables, l1Tables, newTables)
-
-	// Update reader
-	w.reader.SetLevels(w.store.getLevels())
-
-	// Remove old files and close old tables
-	for _, t := range l0Tables {
-		w.store.cache.RemoveByFileID(t.ID)
-		t.Close()
-		if err := os.Remove(t.Path); err != nil {
-			log.Printf("[compaction] Warning: failed to remove L0 file %s: %v", t.Path, err)
-		}
-	}
-	for _, t := range l1Tables {
-		w.store.cache.RemoveByFileID(t.ID)
-		t.Close()
-		if err := os.Remove(t.Path); err != nil {
-			log.Printf("[compaction] Warning: failed to remove L1 file %s: %v", t.Path, err)
 		}
 	}
 }
@@ -201,95 +208,57 @@ func (w *writer) mergeTables(tables []*SSTable, targetLevel int) (*mergeResult, 
 		return &mergeResult{}, nil
 	}
 
-	// Create merge iterator
 	mergeIter := newMergeIterator(tables, w.store.cache, w.store.opts.VerifyChecksums)
 	defer mergeIter.Close()
 
-	// Estimate keys per output table for bloom filter sizing
-	// This is approximate since we don't know deduplication ratio upfront
-	var totalKeys uint
-	var totalBytes int64
-	for _, t := range tables {
-		totalKeys += uint(t.Footer.NumKeys)
-		totalBytes += t.Size() // Use actual file size, not Footer.FileSize
-	}
-	// Estimate output tables based on total bytes, not key count
+	keysPerTable := w.estimateKeysPerTable(tables)
 	maxTableSize := w.maxTableSize()
-	estimatedOutputTables := (totalBytes + maxTableSize - 1) / maxTableSize
-	if estimatedOutputTables < 1 {
-		estimatedOutputTables = 1
-	}
-	keysPerTable := totalKeys / uint(estimatedOutputTables)
-	if keysPerTable < 1000 {
-		keysPerTable = totalKeys // small dataset, use total
-	}
+	isLastLevel := targetLevel >= w.store.opts.MaxLevels-1
 
-	// Create output SSTable
 	var newTables []*SSTable
-	var writer *sstableWriter
+	var sstWriter *sstableWriter
 	var currentKeys uint
 	var totalUncompressed uint64
-	isLastLevel := targetLevel >= w.store.opts.MaxLevels-1
 
 	for mergeIter.Next() {
 		entry := mergeIter.Entry()
 
-		// Drop tombstones at last level
 		if isLastLevel && entry.Value.IsTombstone() {
 			continue
 		}
 
-		// Start new SSTable if needed
-		if writer == nil {
-			id := w.store.nextSSTableID()
-			path := filepath.Join(w.store.opts.Dir, fmt.Sprintf("%06d.sst", id))
+		if sstWriter == nil {
 			var err error
-			// L1+ tables don't need bloom filters (non-overlapping key ranges)
-			writer, err = newSSTableWriter(id, path, keysPerTable, w.store.opts, false)
+			sstWriter, err = w.createSSTableWriter(keysPerTable)
 			if err != nil {
 				return nil, err
 			}
 			currentKeys = 0
 		}
 
-		if err := writer.Add(entry); err != nil {
-			writer.Abort()
+		if err := sstWriter.Add(entry); err != nil {
+			sstWriter.Abort()
 			return nil, err
 		}
 		currentKeys++
 
-		// Check if we should finish this SSTable
-		// Check every 100 keys using internal size tracker (no syscall)
-		if currentKeys%100 == 0 && writer.Size() >= maxTableSize {
-			if err := writer.Finish(targetLevel); err != nil {
-				writer.Abort()
-				return nil, err
-			}
-			totalUncompressed += writer.UncompressedBytes()
-			writer.Close()
-
-			sst, err := OpenSSTable(writer.ID(), writer.Path())
+		if currentKeys%100 == 0 && sstWriter.Size() >= maxTableSize {
+			sst, uncompressed, err := w.finishSSTable(sstWriter, targetLevel)
 			if err != nil {
 				return nil, err
 			}
+			totalUncompressed += uncompressed
 			newTables = append(newTables, sst)
-			writer = nil
+			sstWriter = nil
 		}
 	}
 
-	// Finish last SSTable
-	if writer != nil {
-		if err := writer.Finish(targetLevel); err != nil {
-			writer.Abort()
-			return nil, err
-		}
-		totalUncompressed += writer.UncompressedBytes()
-		writer.Close()
-
-		sst, err := OpenSSTable(writer.ID(), writer.Path())
+	if sstWriter != nil {
+		sst, uncompressed, err := w.finishSSTable(sstWriter, targetLevel)
 		if err != nil {
 			return nil, err
 		}
+		totalUncompressed += uncompressed
 		newTables = append(newTables, sst)
 	}
 
@@ -297,6 +266,51 @@ func (w *writer) mergeTables(tables []*SSTable, targetLevel int) (*mergeResult, 
 		tables:            newTables,
 		uncompressedBytes: totalUncompressed,
 	}, nil
+}
+
+// estimateKeysPerTable calculates expected keys per output table for bloom filter sizing.
+func (w *writer) estimateKeysPerTable(tables []*SSTable) uint {
+	var totalKeys uint
+	var totalBytes int64
+	for _, t := range tables {
+		totalKeys += uint(t.Footer.NumKeys)
+		totalBytes += t.Size()
+	}
+
+	maxTableSize := w.maxTableSize()
+	estimatedOutputTables := (totalBytes + maxTableSize - 1) / maxTableSize
+	if estimatedOutputTables < 1 {
+		estimatedOutputTables = 1
+	}
+
+	keysPerTable := totalKeys / uint(estimatedOutputTables)
+	if keysPerTable < 1000 {
+		keysPerTable = totalKeys
+	}
+	return keysPerTable
+}
+
+// createSSTableWriter creates a new SSTable writer for compaction output.
+func (w *writer) createSSTableWriter(keysPerTable uint) (*sstableWriter, error) {
+	id := w.store.nextSSTableID()
+	path := filepath.Join(w.store.opts.Dir, fmt.Sprintf("%06d.sst", id))
+	return newSSTableWriter(id, path, keysPerTable, w.store.opts, false)
+}
+
+// finishSSTable finishes writing, closes, and opens an SSTable.
+func (w *writer) finishSSTable(sstWriter *sstableWriter, targetLevel int) (*SSTable, uint64, error) {
+	if err := sstWriter.Finish(targetLevel); err != nil {
+		sstWriter.Abort()
+		return nil, 0, err
+	}
+	uncompressed := sstWriter.UncompressedBytes()
+	sstWriter.Close()
+
+	sst, err := OpenSSTable(sstWriter.ID(), sstWriter.Path())
+	if err != nil {
+		return nil, 0, err
+	}
+	return sst, uncompressed, nil
 }
 
 func (w *writer) levelSize(tables []*SSTable) int64 {
