@@ -228,207 +228,50 @@ func (vf *valueFilter) matches(val tinykvs.Value) bool {
 	}
 }
 
+// selectContext holds state for a SELECT query execution.
+type selectContext struct {
+	keyEquals    string
+	keyPrefix    string
+	keyStart     string
+	keyEnd       string
+	valueFilters []*valueFilter
+	limit        int
+	fields       []string
+	aggs         []*aggregator
+	headers      []string
+	orderBy      []SortOrder
+	scanned      int64
+	scanStats    tinykvs.ScanStats
+	matchCount   int
+	bufferedRows [][]string
+	lastProgress time.Time
+	startTime    time.Time
+	interrupted  int32
+	scanErr      error
+}
+
 func (s *Shell) handleSelect(stmt *sqlparser.Select, orderBy []SortOrder) {
-	// Parse WHERE clause
-	var keyEquals string
-	var keyPrefix string
-	var keyStart, keyEnd string
-	var valueFilters []*valueFilter
-	limit := 100 // default limit
+	ctx := s.parseSelectStatement(stmt, orderBy)
 
-	// Parse SELECT fields and aggregates
-	var fields []string
-	var aggs []*aggregator
-	for _, expr := range stmt.SelectExprs {
-		switch e := expr.(type) {
-		case *sqlparser.AliasedExpr:
-			// Check for aggregate functions
-			if funcExpr, ok := e.Expr.(*sqlparser.FuncExpr); ok {
-				agg := parseAggregateFunc(funcExpr)
-				if agg != nil {
-					aggs = append(aggs, agg)
-					continue
-				}
-			}
-
-			// Check for field access (v.name, v.address.city)
-			if col, ok := e.Expr.(*sqlparser.ColName); ok {
-				qualifier := strings.ToLower(col.Qualifier.Name.String())
-				fieldName := col.Name.String()
-
-				if qualifier == "v" {
-					// Direct v.field or v.`nested.path` syntax
-					fields = append(fields, fieldName)
-				} else if qualifier != "" && qualifier != "kv" {
-					// Parser split v.address.city into qualifier="address", name="city"
-					// Reconstruct as dotted path: "address.city"
-					fields = append(fields, qualifier+"."+fieldName)
-				}
-			}
-		case *sqlparser.StarExpr:
-			// SELECT * - no specific fields
-			fields = nil
-		}
-	}
-
-	// Parse LIMIT
-	if stmt.Limit != nil {
-		if stmt.Limit.Rowcount != nil {
-			if val, ok := stmt.Limit.Rowcount.(*sqlparser.SQLVal); ok {
-				if n, err := strconv.Atoi(string(val.Val)); err == nil {
-					limit = n
-				}
-			}
-		}
-	}
-
-	// Parse WHERE
-	if stmt.Where != nil {
-		s.parseWhere(stmt.Where.Expr, &keyEquals, &keyPrefix, &keyStart, &keyEnd, &valueFilters)
-	}
-
-	isAggregate := len(aggs) > 0
-	hasOrderBy := len(orderBy) > 0
-
-	// Set up headers based on fields
-	var headers []string
-	if len(fields) > 0 {
-		headers = append([]string{"k"}, fields...)
-	} else {
-		headers = []string{"k", "v"}
-	}
-
-	// Track progress for slow queries
-	var scanned int64
-	var scanStats tinykvs.ScanStats
-	var matchCount int
-	var lastProgress time.Time
-	hasValueFilters := len(valueFilters) > 0
-	startTime := time.Now()
-
-	// Buffer rows for table output
-	var bufferedRows [][]string
-
-	// Set up Ctrl+C handler to cancel scan
-	var interrupted int32
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT)
-	go func() {
-		<-sigChan
-		atomic.StoreInt32(&interrupted, 1)
-	}()
+	sigChan := setupInterruptHandler(&ctx.interrupted)
 	defer signal.Stop(sigChan)
 
-	// Progress callback for scan stats
-	progressCallback := func(stats tinykvs.ScanStats) bool {
-		if atomic.LoadInt32(&interrupted) != 0 {
-			return false
-		}
-		scanStats = stats
-		if time.Since(lastProgress) > time.Second {
-			elapsed := time.Since(startTime)
-			rate := int64(float64(stats.KeysExamined) / elapsed.Seconds())
-			fmt.Fprintf(os.Stderr, "\rScanned %s keys (%s blocks) in %s (%s keys/sec)...    ",
-				formatIntCommas(stats.KeysExamined), formatIntCommas(stats.BlocksLoaded),
-				formatDuration(elapsed), formatIntCommas(rate))
-			lastProgress = time.Now()
-		}
-		return true
-	}
+	progressCallback := ctx.createProgressCallback()
+	processRow := ctx.createRowProcessor()
+	safeProcessRow := ctx.wrapRowProcessor(processRow)
 
-	// Callback for processing each row
-	processRow := func(key []byte, val tinykvs.Value) bool {
-		if atomic.LoadInt32(&interrupted) != 0 {
-			return false
-		}
-		scanned++
+	err := s.executeScan(ctx, safeProcessRow, progressCallback)
 
-		// Show progress every second for queries with value filters
-		if hasValueFilters && time.Since(lastProgress) > time.Second {
-			elapsed := time.Since(startTime)
-			rate := int64(float64(scanned) / elapsed.Seconds())
-			fmt.Fprintf(os.Stderr, "\rScanned %s keys (%s blocks) in %s (%s keys/sec), found %d matches...    ",
-				formatIntCommas(scanned), formatIntCommas(scanStats.BlocksLoaded),
-				formatDuration(elapsed), formatIntCommas(rate), matchCount)
-			lastProgress = time.Now()
-		}
+	ctx.clearProgressLine()
 
-		// For ORDER BY, we need all matching rows before applying limit
-		if !isAggregate && !hasOrderBy && matchCount >= limit {
-			return false
-		}
-
-		// Apply value filters
-		for _, vf := range valueFilters {
-			if !vf.matches(val) {
-				return true // skip this row, continue scanning
-			}
-		}
-
-		if isAggregate {
-			for _, agg := range aggs {
-				agg.update(val)
-			}
-		} else {
-			// Buffer rows for table output
-			row := extractRowFields(key, val, fields)
-			bufferedRows = append(bufferedRows, row)
-			matchCount++
-		}
-		return true
-	}
-
-	var err error
-	var scanErr error
-
-	// Wrap processRow to catch any panics
-	safeProcessRow := func(key []byte, val tinykvs.Value) bool {
-		defer func() {
-			if r := recover(); r != nil {
-				scanErr = fmt.Errorf("panic processing key %x: %v", key[:min(8, len(key))], r)
-			}
-		}()
-		return processRow(key, val)
-	}
-
-	if keyEquals != "" {
-		// Point lookup
-		val, e := s.store.Get([]byte(keyEquals))
-		if e == tinykvs.ErrKeyNotFound {
-			if isAggregate {
-				printAggregateResults(aggs)
-			} else {
-				printTable(headers, nil)
-				fmt.Printf("(0 rows)\n")
-			}
-			return
-		}
-		if e != nil {
-			fmt.Printf("Error: %v\n", e)
-			return
-		}
-		safeProcessRow([]byte(keyEquals), val)
-	} else if keyPrefix != "" {
-		scanStats, err = s.store.ScanPrefixWithStats([]byte(keyPrefix), safeProcessRow, progressCallback)
-	} else if keyStart != "" && keyEnd != "" {
-		err = s.store.ScanRange([]byte(keyStart), []byte(keyEnd), safeProcessRow)
-	} else {
-		scanStats, err = s.store.ScanPrefixWithStats(nil, safeProcessRow, progressCallback)
-	}
-
-	// Clear progress line
-	if (hasValueFilters || scanned > 10000) && scanned > 0 {
-		fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 80))
-	}
-
-	wasInterrupted := atomic.LoadInt32(&interrupted) != 0
+	wasInterrupted := atomic.LoadInt32(&ctx.interrupted) != 0
 	if wasInterrupted {
 		fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 80))
 		fmt.Println("^C")
 	}
 
-	if scanErr != nil {
-		fmt.Printf("Scan error: %v\n", scanErr)
+	if ctx.scanErr != nil {
+		fmt.Printf("Scan error: %v\n", ctx.scanErr)
 		return
 	}
 	if err != nil {
@@ -436,52 +279,242 @@ func (s *Shell) handleSelect(stmt *sqlparser.Select, orderBy []SortOrder) {
 		return
 	}
 
-	elapsed := time.Since(startTime)
+	ctx.renderResults()
+	ctx.reportStatistics(wasInterrupted)
+}
 
-	if isAggregate {
-		printAggregateResults(aggs)
-	} else {
-		// Sort if ORDER BY was specified
-		if hasOrderBy {
-			SortRows(headers, bufferedRows, orderBy)
-		}
-
-		// Apply limit after sorting (for ORDER BY) or just cap results
-		if len(bufferedRows) > limit {
-			bufferedRows = bufferedRows[:limit]
-		}
-		matchCount = len(bufferedRows)
-
-		// Print table with box formatting
-		printTable(headers, bufferedRows)
+func (s *Shell) parseSelectStatement(stmt *sqlparser.Select, orderBy []SortOrder) *selectContext {
+	ctx := &selectContext{
+		limit:     100,
+		orderBy:   orderBy,
+		startTime: time.Now(),
 	}
 
-	// Show stats
-	if scanned > 0 || scanStats.BlocksLoaded > 0 {
-		rate := float64(scanned) / elapsed.Seconds()
-		if wasInterrupted {
-			fmt.Printf("(%d rows) - interrupted, scanned %s keys (%s blocks) in %s (%s keys/sec)\n",
-				matchCount, formatIntCommas(scanned),
-				formatIntCommas(scanStats.BlocksLoaded), formatDuration(elapsed), formatIntCommas(int64(rate)))
+	ctx.fields, ctx.aggs = parseSelectExpressions(stmt.SelectExprs)
+
+	if stmt.Limit != nil && stmt.Limit.Rowcount != nil {
+		if val, ok := stmt.Limit.Rowcount.(*sqlparser.SQLVal); ok {
+			if n, err := strconv.Atoi(string(val.Val)); err == nil {
+				ctx.limit = n
+			}
+		}
+	}
+
+	if stmt.Where != nil {
+		s.parseWhere(stmt.Where.Expr, &ctx.keyEquals, &ctx.keyPrefix, &ctx.keyStart, &ctx.keyEnd, &ctx.valueFilters)
+	}
+
+	if len(ctx.fields) > 0 {
+		ctx.headers = append([]string{"k"}, ctx.fields...)
+	} else {
+		ctx.headers = []string{"k", "v"}
+	}
+
+	return ctx
+}
+
+func parseSelectExpressions(exprs sqlparser.SelectExprs) ([]string, []*aggregator) {
+	var fields []string
+	var aggs []*aggregator
+
+	for _, expr := range exprs {
+		switch e := expr.(type) {
+		case *sqlparser.AliasedExpr:
+			if funcExpr, ok := e.Expr.(*sqlparser.FuncExpr); ok {
+				if agg := parseAggregateFunc(funcExpr); agg != nil {
+					aggs = append(aggs, agg)
+					continue
+				}
+			}
+			if col, ok := e.Expr.(*sqlparser.ColName); ok {
+				qualifier := strings.ToLower(col.Qualifier.Name.String())
+				fieldName := col.Name.String()
+				if qualifier == "v" {
+					fields = append(fields, fieldName)
+				} else if qualifier != "" && qualifier != "kv" {
+					fields = append(fields, qualifier+"."+fieldName)
+				}
+			}
+		case *sqlparser.StarExpr:
+			fields = nil
+		}
+	}
+	return fields, aggs
+}
+
+func setupInterruptHandler(interrupted *int32) chan os.Signal {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT)
+	go func() {
+		<-sigChan
+		atomic.StoreInt32(interrupted, 1)
+	}()
+	return sigChan
+}
+
+func (ctx *selectContext) createProgressCallback() tinykvs.ScanProgress {
+	return func(stats tinykvs.ScanStats) bool {
+		if atomic.LoadInt32(&ctx.interrupted) != 0 {
+			return false
+		}
+		ctx.scanStats = stats
+		if time.Since(ctx.lastProgress) > time.Second {
+			elapsed := time.Since(ctx.startTime)
+			rate := int64(float64(stats.KeysExamined) / elapsed.Seconds())
+			fmt.Fprintf(os.Stderr, "\rScanned %s keys (%s blocks) in %s (%s keys/sec)...    ",
+				formatIntCommas(stats.KeysExamined), formatIntCommas(stats.BlocksLoaded),
+				formatDuration(elapsed), formatIntCommas(rate))
+			ctx.lastProgress = time.Now()
+		}
+		return true
+	}
+}
+
+func (ctx *selectContext) createRowProcessor() func([]byte, tinykvs.Value) bool {
+	isAggregate := len(ctx.aggs) > 0
+	hasOrderBy := len(ctx.orderBy) > 0
+	hasValueFilters := len(ctx.valueFilters) > 0
+
+	return func(key []byte, val tinykvs.Value) bool {
+		if atomic.LoadInt32(&ctx.interrupted) != 0 {
+			return false
+		}
+		ctx.scanned++
+
+		if hasValueFilters && time.Since(ctx.lastProgress) > time.Second {
+			ctx.printFilterProgress()
+		}
+
+		if !isAggregate && !hasOrderBy && ctx.matchCount >= ctx.limit {
+			return false
+		}
+
+		for _, vf := range ctx.valueFilters {
+			if !vf.matches(val) {
+				return true
+			}
+		}
+
+		if isAggregate {
+			for _, agg := range ctx.aggs {
+				agg.update(val)
+			}
 		} else {
-			// Show detailed stats: tables checked/added, blocks (cache/disk)
-			blockDetails := fmt.Sprintf("%d blocks", scanStats.BlocksLoaded)
-			if scanStats.BlocksCacheHit > 0 || scanStats.BlocksDiskRead > 0 {
-				blockDetails = fmt.Sprintf("%d blocks (%d cache, %d disk)",
-					scanStats.BlocksLoaded, scanStats.BlocksCacheHit, scanStats.BlocksDiskRead)
-			}
-			tableDetails := ""
-			if scanStats.TablesChecked > 0 {
-				tableDetails = fmt.Sprintf(", %d/%d tables",
-					scanStats.TablesAdded, scanStats.TablesChecked)
-			}
-			fmt.Printf("(%d rows) scanned %s keys, %s%s, %s\n",
-				matchCount, formatIntCommas(scanned),
-				blockDetails, tableDetails, formatDuration(elapsed))
+			row := extractRowFields(key, val, ctx.fields)
+			ctx.bufferedRows = append(ctx.bufferedRows, row)
+			ctx.matchCount++
 		}
-	} else {
-		fmt.Printf("(%d rows)\n", matchCount)
+		return true
 	}
+}
+
+func (ctx *selectContext) printFilterProgress() {
+	elapsed := time.Since(ctx.startTime)
+	rate := int64(float64(ctx.scanned) / elapsed.Seconds())
+	fmt.Fprintf(os.Stderr, "\rScanned %s keys (%s blocks) in %s (%s keys/sec), found %d matches...    ",
+		formatIntCommas(ctx.scanned), formatIntCommas(ctx.scanStats.BlocksLoaded),
+		formatDuration(elapsed), formatIntCommas(rate), ctx.matchCount)
+	ctx.lastProgress = time.Now()
+}
+
+func (ctx *selectContext) wrapRowProcessor(processRow func([]byte, tinykvs.Value) bool) func([]byte, tinykvs.Value) bool {
+	return func(key []byte, val tinykvs.Value) bool {
+		defer func() {
+			if r := recover(); r != nil {
+				ctx.scanErr = fmt.Errorf("panic processing key %x: %v", key[:min(8, len(key))], r)
+			}
+		}()
+		return processRow(key, val)
+	}
+}
+
+func (s *Shell) executeScan(ctx *selectContext, processRow func([]byte, tinykvs.Value) bool, progress tinykvs.ScanProgress) error {
+	if ctx.keyEquals != "" {
+		return s.executePointLookup(ctx, processRow)
+	}
+	if ctx.keyPrefix != "" {
+		var err error
+		ctx.scanStats, err = s.store.ScanPrefixWithStats([]byte(ctx.keyPrefix), processRow, progress)
+		return err
+	}
+	if ctx.keyStart != "" && ctx.keyEnd != "" {
+		return s.store.ScanRange([]byte(ctx.keyStart), []byte(ctx.keyEnd), processRow)
+	}
+	var err error
+	ctx.scanStats, err = s.store.ScanPrefixWithStats(nil, processRow, progress)
+	return err
+}
+
+func (s *Shell) executePointLookup(ctx *selectContext, processRow func([]byte, tinykvs.Value) bool) error {
+	val, err := s.store.Get([]byte(ctx.keyEquals))
+	if err == tinykvs.ErrKeyNotFound {
+		if len(ctx.aggs) > 0 {
+			printAggregateResults(ctx.aggs)
+		} else {
+			printTable(ctx.headers, nil)
+			fmt.Printf("(0 rows)\n")
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	processRow([]byte(ctx.keyEquals), val)
+	return nil
+}
+
+func (ctx *selectContext) clearProgressLine() {
+	hasValueFilters := len(ctx.valueFilters) > 0
+	if (hasValueFilters || ctx.scanned > 10000) && ctx.scanned > 0 {
+		fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 80))
+	}
+}
+
+func (ctx *selectContext) renderResults() {
+	if len(ctx.aggs) > 0 {
+		printAggregateResults(ctx.aggs)
+		return
+	}
+
+	if len(ctx.orderBy) > 0 {
+		SortRows(ctx.headers, ctx.bufferedRows, ctx.orderBy)
+	}
+
+	if len(ctx.bufferedRows) > ctx.limit {
+		ctx.bufferedRows = ctx.bufferedRows[:ctx.limit]
+	}
+	ctx.matchCount = len(ctx.bufferedRows)
+
+	printTable(ctx.headers, ctx.bufferedRows)
+}
+
+func (ctx *selectContext) reportStatistics(wasInterrupted bool) {
+	if ctx.scanned == 0 && ctx.scanStats.BlocksLoaded == 0 {
+		fmt.Printf("(%d rows)\n", ctx.matchCount)
+		return
+	}
+
+	elapsed := time.Since(ctx.startTime)
+	rate := float64(ctx.scanned) / elapsed.Seconds()
+
+	if wasInterrupted {
+		fmt.Printf("(%d rows) - interrupted, scanned %s keys (%s blocks) in %s (%s keys/sec)\n",
+			ctx.matchCount, formatIntCommas(ctx.scanned),
+			formatIntCommas(ctx.scanStats.BlocksLoaded), formatDuration(elapsed), formatIntCommas(int64(rate)))
+		return
+	}
+
+	blockDetails := fmt.Sprintf("%d blocks", ctx.scanStats.BlocksLoaded)
+	if ctx.scanStats.BlocksCacheHit > 0 || ctx.scanStats.BlocksDiskRead > 0 {
+		blockDetails = fmt.Sprintf("%d blocks (%d cache, %d disk)",
+			ctx.scanStats.BlocksLoaded, ctx.scanStats.BlocksCacheHit, ctx.scanStats.BlocksDiskRead)
+	}
+	tableDetails := ""
+	if ctx.scanStats.TablesChecked > 0 {
+		tableDetails = fmt.Sprintf(", %d/%d tables", ctx.scanStats.TablesAdded, ctx.scanStats.TablesChecked)
+	}
+	fmt.Printf("(%d rows) scanned %s keys, %s%s, %s\n",
+		ctx.matchCount, formatIntCommas(ctx.scanned), blockDetails, tableDetails, formatDuration(elapsed))
 }
 
 // printStreamingHeader prints column headers for streaming output
