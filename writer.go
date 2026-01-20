@@ -210,36 +210,7 @@ func (w *writer) flushmemtable(mt *memtable) error {
 		return nil
 	}
 
-	// Generate SSTable filename
-	id := w.store.nextSSTableID()
-	path := filepath.Join(w.store.opts.Dir, fmt.Sprintf("%06d.sst", id))
-
-	// Create writer (L0 tables get bloom filters for overlapping key range lookups)
-	writer, err := newSSTableWriter(id, path, uint(mt.Count()), w.store.opts, true)
-	if err != nil {
-		return err
-	}
-
-	// Iterate memtable and write entries
-	iter := mt.Iterator()
-	for iter.Next() {
-		if err := writer.Add(iter.Entry()); err != nil {
-			iter.Close()
-			writer.Abort()
-			return err
-		}
-	}
-	iter.Close()
-
-	// Finish SSTable
-	if err := writer.Finish(0); err != nil { // Level 0
-		writer.Abort()
-		return err
-	}
-	writer.Close()
-
-	// Open the new SSTable and add to L0
-	sst, err := OpenSSTable(id, path)
+	sst, err := w.writeMemtableToSSTable(mt)
 	if err != nil {
 		return err
 	}
@@ -247,26 +218,71 @@ func (w *writer) flushmemtable(mt *memtable) error {
 	w.store.addSSTable(0, sst)
 	w.reader.AddSSTable(0, sst)
 
-	// Add to manifest
-	if w.store.manifest != nil {
-		meta := &TableMeta{
-			ID:          sst.ID,
-			Level:       0,
-			MinKey:      sst.MinKey(),
-			MaxKey:      sst.MaxKey(),
-			NumKeys:     sst.Footer.NumKeys,
-			FileSize:    int64(sst.Footer.FileSize),
-			IndexOffset: sst.Footer.IndexOffset,
-			IndexSize:   sst.Footer.IndexSize,
-			BloomOffset: sst.Footer.BloomOffset,
-			BloomSize:   sst.Footer.BloomSize,
-		}
-		if err := w.store.manifest.AddTable(meta); err != nil {
-			return fmt.Errorf("failed to add table to manifest: %w", err)
-		}
+	if err := w.addToManifest(sst); err != nil {
+		return err
 	}
 
-	// Remove from immutables and signal waiting writers
+	w.removeFromImmutables(mt)
+	w.truncateWALAfterFlush()
+	w.maybeScheduleCompaction()
+
+	return nil
+}
+
+// writeMemtableToSSTable writes a memtable to a new SSTable file.
+func (w *writer) writeMemtableToSSTable(mt *memtable) (*SSTable, error) {
+	id := w.store.nextSSTableID()
+	path := filepath.Join(w.store.opts.Dir, fmt.Sprintf("%06d.sst", id))
+
+	writer, err := newSSTableWriter(id, path, uint(mt.Count()), w.store.opts, true)
+	if err != nil {
+		return nil, err
+	}
+
+	iter := mt.Iterator()
+	for iter.Next() {
+		if err := writer.Add(iter.Entry()); err != nil {
+			iter.Close()
+			writer.Abort()
+			return nil, err
+		}
+	}
+	iter.Close()
+
+	if err := writer.Finish(0); err != nil {
+		writer.Abort()
+		return nil, err
+	}
+	writer.Close()
+
+	return OpenSSTable(id, path)
+}
+
+// addToManifest adds the SSTable to the manifest if enabled.
+func (w *writer) addToManifest(sst *SSTable) error {
+	if w.store.manifest == nil {
+		return nil
+	}
+	meta := &TableMeta{
+		ID:          sst.ID,
+		Level:       0,
+		MinKey:      sst.MinKey(),
+		MaxKey:      sst.MaxKey(),
+		NumKeys:     sst.Footer.NumKeys,
+		FileSize:    int64(sst.Footer.FileSize),
+		IndexOffset: sst.Footer.IndexOffset,
+		IndexSize:   sst.Footer.IndexSize,
+		BloomOffset: sst.Footer.BloomOffset,
+		BloomSize:   sst.Footer.BloomSize,
+	}
+	if err := w.store.manifest.AddTable(meta); err != nil {
+		return fmt.Errorf("failed to add table to manifest: %w", err)
+	}
+	return nil
+}
+
+// removeFromImmutables removes a memtable from the immutables list.
+func (w *writer) removeFromImmutables(mt *memtable) {
 	w.flushMu.Lock()
 	for i, imm := range w.immutables {
 		if imm == mt {
@@ -274,32 +290,34 @@ func (w *writer) flushmemtable(mt *memtable) error {
 			break
 		}
 	}
-	w.flushCond.Signal() // Wake up any blocked writers
+	w.flushCond.Signal()
 	w.flushMu.Unlock()
 	w.reader.RemoveImmutable(mt)
+}
 
-	// Truncate wal entries that have been flushed
+// truncateWALAfterFlush truncates the WAL based on remaining immutables.
+func (w *writer) truncateWALAfterFlush() {
 	w.flushMu.Lock()
+	defer w.flushMu.Unlock()
+
 	if len(w.immutables) == 0 {
-		// All flushed, fully truncate
 		w.wal.Truncate()
-	} else {
-		// Find minimum sequence of remaining immutables
-		minSeq := w.immutables[0].MinSequence()
-		for _, imm := range w.immutables[1:] {
-			if seq := imm.MinSequence(); seq < minSeq {
-				minSeq = seq
-			}
-		}
-		// Truncate entries before the oldest unflushed memtable
-		w.wal.TruncateBefore(minSeq)
+		return
 	}
-	w.flushMu.Unlock()
 
-	// Check if compaction needed
-	w.maybeScheduleCompaction()
+	minSeq := w.findMinImmutableSequence()
+	w.wal.TruncateBefore(minSeq)
+}
 
-	return nil
+// findMinImmutableSequence finds the minimum sequence number among immutables.
+func (w *writer) findMinImmutableSequence() uint64 {
+	minSeq := w.immutables[0].MinSequence()
+	for _, imm := range w.immutables[1:] {
+		if seq := imm.MinSequence(); seq < minSeq {
+			minSeq = seq
+		}
+	}
+	return minSeq
 }
 
 // Background flush goroutine
