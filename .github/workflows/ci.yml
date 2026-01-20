@@ -63,7 +63,7 @@ jobs:
                       FuzzDecodeEntry FuzzEntryRoundTrip FuzzBlockRoundTrip FuzzDecodeMsgpack \
                       FuzzRecordValueEncode FuzzStoreOperations FuzzPrefixCompare; do
             echo "=== Running $fuzz ==="
-            go test -fuzz=$fuzz -fuzztime=30s . || exit 1
+            go test -fuzz="^${fuzz}\$" -fuzztime=30s . || exit 1
           done
 
       - name: Run shell fuzz tests (30s each)
@@ -73,7 +73,7 @@ jobs:
                       FuzzShellBinaryFunctions FuzzShellAggregations FuzzShellNestedFields \
                       FuzzShellHexValues; do
             echo "=== Running $fuzz ==="
-            go test -fuzz=$fuzz -fuzztime=30s . || exit 1
+            go test -fuzz="^${fuzz}\$" -fuzztime=30s . || exit 1
           done
 
       - name: Commit fuzz corpus

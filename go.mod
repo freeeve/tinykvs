@@ -16,5 +16,5 @@ require (
 	github.com/juju/errors v0.0.0-20170703010042-c7d06af17c68 // indirect
 	github.com/mattn/go-runewidth v0.0.3 // indirect
 	golang.org/x/sys v0.0.0-20211117180635-dee7805ff2e1 // indirect
-	golang.org/x/text v0.0.0-20180302201248-b7ef84aaf62a // indirect
+	golang.org/x/text v0.33.0 // indirect
 )
