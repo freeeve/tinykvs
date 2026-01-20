@@ -320,26 +320,43 @@ func parseSelectExpressions(exprs sqlparser.SelectExprs) ([]string, []*aggregato
 	for _, expr := range exprs {
 		switch e := expr.(type) {
 		case *sqlparser.AliasedExpr:
-			if funcExpr, ok := e.Expr.(*sqlparser.FuncExpr); ok {
-				if agg := parseAggregateFunc(funcExpr); agg != nil {
-					aggs = append(aggs, agg)
-					continue
-				}
-			}
-			if col, ok := e.Expr.(*sqlparser.ColName); ok {
-				qualifier := strings.ToLower(col.Qualifier.Name.String())
-				fieldName := col.Name.String()
-				if qualifier == "v" {
-					fields = append(fields, fieldName)
-				} else if qualifier != "" && qualifier != "kv" {
-					fields = append(fields, qualifier+"."+fieldName)
-				}
+			if agg := tryParseAggregate(e); agg != nil {
+				aggs = append(aggs, agg)
+			} else if field := tryParseColName(e); field != "" {
+				fields = append(fields, field)
 			}
 		case *sqlparser.StarExpr:
 			fields = nil
 		}
 	}
 	return fields, aggs
+}
+
+// tryParseAggregate attempts to parse an aliased expression as an aggregate function.
+func tryParseAggregate(e *sqlparser.AliasedExpr) *aggregator {
+	funcExpr, ok := e.Expr.(*sqlparser.FuncExpr)
+	if !ok {
+		return nil
+	}
+	return parseAggregateFunc(funcExpr)
+}
+
+// tryParseColName attempts to parse an aliased expression as a column name.
+// Returns the field name with proper qualification, or empty string if not a column.
+func tryParseColName(e *sqlparser.AliasedExpr) string {
+	col, ok := e.Expr.(*sqlparser.ColName)
+	if !ok {
+		return ""
+	}
+	qualifier := strings.ToLower(col.Qualifier.Name.String())
+	fieldName := col.Name.String()
+	if qualifier == "v" {
+		return fieldName
+	}
+	if qualifier != "" && qualifier != "kv" {
+		return qualifier + "." + fieldName
+	}
+	return ""
 }
 
 func setupInterruptHandler(interrupted *int32) chan os.Signal {
@@ -373,38 +390,57 @@ func (ctx *selectContext) createProgressCallback() tinykvs.ScanProgress {
 func (ctx *selectContext) createRowProcessor() func([]byte, tinykvs.Value) bool {
 	isAggregate := len(ctx.aggs) > 0
 	hasOrderBy := len(ctx.orderBy) > 0
-	hasValueFilters := len(ctx.valueFilters) > 0
 
 	return func(key []byte, val tinykvs.Value) bool {
-		if atomic.LoadInt32(&ctx.interrupted) != 0 {
+		if ctx.isInterrupted() {
 			return false
 		}
 		ctx.scanned++
-
-		if hasValueFilters && time.Since(ctx.lastProgress) > time.Second {
-			ctx.printFilterProgress()
-		}
+		ctx.maybeShowFilterProgress()
 
 		if !isAggregate && !hasOrderBy && ctx.matchCount >= ctx.limit {
 			return false
 		}
-
-		for _, vf := range ctx.valueFilters {
-			if !vf.matches(val) {
-				return true
-			}
+		if !ctx.matchesFilters(val) {
+			return true
 		}
-
-		if isAggregate {
-			for _, agg := range ctx.aggs {
-				agg.update(val)
-			}
-		} else {
-			row := extractRowFields(key, val, ctx.fields)
-			ctx.bufferedRows = append(ctx.bufferedRows, row)
-			ctx.matchCount++
-		}
+		ctx.processMatch(key, val, isAggregate)
 		return true
+	}
+}
+
+// isInterrupted checks if query execution was interrupted.
+func (ctx *selectContext) isInterrupted() bool {
+	return atomic.LoadInt32(&ctx.interrupted) != 0
+}
+
+// maybeShowFilterProgress prints progress if filters are active and enough time passed.
+func (ctx *selectContext) maybeShowFilterProgress() {
+	if len(ctx.valueFilters) > 0 && time.Since(ctx.lastProgress) > time.Second {
+		ctx.printFilterProgress()
+	}
+}
+
+// matchesFilters checks if value passes all value filters.
+func (ctx *selectContext) matchesFilters(val tinykvs.Value) bool {
+	for _, vf := range ctx.valueFilters {
+		if !vf.matches(val) {
+			return false
+		}
+	}
+	return true
+}
+
+// processMatch handles a matching row by updating aggregates or buffering the row.
+func (ctx *selectContext) processMatch(key []byte, val tinykvs.Value, isAggregate bool) {
+	if isAggregate {
+		for _, agg := range ctx.aggs {
+			agg.update(val)
+		}
+	} else {
+		row := extractRowFields(key, val, ctx.fields)
+		ctx.bufferedRows = append(ctx.bufferedRows, row)
+		ctx.matchCount++
 	}
 }
 
@@ -558,54 +594,59 @@ func printTable(headers []string, rows [][]string) {
 		return
 	}
 
-	// Calculate column widths
+	widths := calculateColumnWidths(headers, rows)
+
+	printBoxLine(widths, "┌", "┬", "┐")
+	printTableRow(headers, widths)
+	printBoxLine(widths, "├", "┼", "┤")
+	for _, row := range rows {
+		printTableRow(row, widths)
+	}
+	printBoxLine(widths, "└", "┴", "┘")
+}
+
+// calculateColumnWidths computes column widths based on headers and data rows.
+func calculateColumnWidths(headers []string, rows [][]string) []int {
 	widths := make([]int, len(headers))
 	for i, h := range headers {
 		widths[i] = len(h)
 	}
 	for _, row := range rows {
-		for i, cell := range row {
-			if i < len(widths) && len(cell) > widths[i] {
-				widths[i] = len(cell)
-			}
+		updateRowWidths(widths, row)
+	}
+	capWidths(widths, 50)
+	return widths
+}
+
+// updateRowWidths updates widths based on a single row's cell lengths.
+func updateRowWidths(widths []int, row []string) {
+	for i, cell := range row {
+		if i < len(widths) && len(cell) > widths[i] {
+			widths[i] = len(cell)
 		}
 	}
+}
 
-	// Cap column widths at 50 chars for readability
+// capWidths limits all widths to the specified maximum.
+func capWidths(widths []int, maxWidth int) {
 	for i := range widths {
-		if widths[i] > 50 {
-			widths[i] = 50
+		if widths[i] > maxWidth {
+			widths[i] = maxWidth
 		}
 	}
+}
 
-	// Print top border
-	printBoxLine(widths, "┌", "┬", "┐")
-
-	// Print header row
+// printTableRow prints a single table row with proper formatting.
+func printTableRow(cells []string, widths []int) {
 	fmt.Print("│")
-	for i, h := range headers {
-		fmt.Printf(" %-*s │", widths[i], truncate(h, widths[i]))
+	for i, w := range widths {
+		cell := ""
+		if i < len(cells) {
+			cell = cells[i]
+		}
+		fmt.Printf(" %-*s │", w, truncate(cell, w))
 	}
 	fmt.Println()
-
-	// Print header separator
-	printBoxLine(widths, "├", "┼", "┤")
-
-	// Print data rows
-	for _, row := range rows {
-		fmt.Print("│")
-		for i := 0; i < len(headers); i++ {
-			cell := ""
-			if i < len(row) {
-				cell = row[i]
-			}
-			fmt.Printf(" %-*s │", widths[i], truncate(cell, widths[i]))
-		}
-		fmt.Println()
-	}
-
-	// Print bottom border
-	printBoxLine(widths, "└", "┴", "┘")
 }
 
 func printBoxLine(widths []int, left, mid, right string) {
