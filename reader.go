@@ -777,48 +777,67 @@ type sstablePrefixSource struct {
 }
 
 func (s *sstablePrefixSource) seekToPrefix() {
-	// Ensure index is loaded for lazy-loaded SSTables
 	if err := s.sst.ensureIndex(); err != nil {
 		s.valid = false
 		return
 	}
 
-	// Check if SSTable might contain keys with this prefix
 	if !hasKeyInRange(s.prefix, s.sst.Index.MinKey, s.sst.Index.MaxKey) {
 		s.valid = false
 		return
 	}
 
-	// Find starting block using index
-	s.blockIdx = s.sst.Index.Search(s.prefix)
-	if s.blockIdx < 0 {
-		// Prefix is before all keys - start at block 0 if minKey has prefix
-		if hasPrefix(s.sst.Index.MinKey, s.prefix) {
-			s.blockIdx = 0
-		} else {
-			s.valid = false
-			return
-		}
+	if !s.findFirstMatchingBlock() {
+		return
 	}
 
-	// Load the block
 	if err := s.loadBlock(); err != nil {
 		s.valid = false
 		return
 	}
 
-	// Find first entry >= prefix in block
+	if s.findFirstMatchingEntry() {
+		return
+	}
+
+	s.searchNextBlocks()
+}
+
+// findFirstMatchingBlock locates the starting block for prefix search.
+// Returns false if no block could contain the prefix.
+func (s *sstablePrefixSource) findFirstMatchingBlock() bool {
+	s.blockIdx = s.sst.Index.Search(s.prefix)
+	if s.blockIdx < 0 {
+		if hasPrefix(s.sst.Index.MinKey, s.prefix) {
+			s.blockIdx = 0
+			return true
+		}
+		s.valid = false
+		return false
+	}
+	return true
+}
+
+// findFirstMatchingEntry scans the current block for the first entry >= prefix.
+// Returns true if found (sets s.valid), false if should continue to next block.
+func (s *sstablePrefixSource) findFirstMatchingEntry() bool {
 	for s.entryIdx = 0; s.entryIdx < len(s.block.Entries); s.entryIdx++ {
 		if CompareKeys(s.block.Entries[s.entryIdx].Key, s.prefix) >= 0 {
 			s.valid = hasPrefix(s.block.Entries[s.entryIdx].Key, s.prefix)
-			return
+			return true
 		}
 	}
+	return false
+}
 
-	// Not found in this block - check next block's first key via index
-	// before loading to avoid unnecessary block loads
+// canSkipRemainingBlocks checks if the block's first key indicates no prefix matches exist.
+func (s *sstablePrefixSource) canSkipRemainingBlocks(blockFirstKey []byte) bool {
+	return CompareKeys(blockFirstKey, s.prefix) > 0 && !hasPrefix(blockFirstKey, s.prefix)
+}
+
+// searchNextBlocks continues searching subsequent blocks for prefix matches.
+func (s *sstablePrefixSource) searchNextBlocks() {
 	for {
-		// Release old block and clear it
 		if s.block != nil && !s.fromCache {
 			s.block.Release()
 		}
@@ -830,14 +849,8 @@ func (s *sstablePrefixSource) seekToPrefix() {
 			return
 		}
 
-		// Optimization: check if this block could contain matching keys
-		// The sparse index stores the first key of each block
 		blockFirstKey := s.sst.Index.Entries[s.blockIdx].Key
-
-		// If this block's first key > prefix AND doesn't start with prefix,
-		// then no keys with this prefix can exist in this or later blocks
-		// (blocks are sorted, so all subsequent first keys will be even larger)
-		if CompareKeys(blockFirstKey, s.prefix) > 0 && !hasPrefix(blockFirstKey, s.prefix) {
+		if s.canSkipRemainingBlocks(blockFirstKey) {
 			s.valid = false
 			return
 		}
@@ -851,17 +864,13 @@ func (s *sstablePrefixSource) seekToPrefix() {
 			continue
 		}
 
-		// Find first entry >= prefix in this block
 		for s.entryIdx = 0; s.entryIdx < len(s.block.Entries); s.entryIdx++ {
 			key := s.block.Entries[s.entryIdx].Key
-			cmp := CompareKeys(key, s.prefix)
-			if cmp >= 0 {
-				// Found entry >= prefix, check if it matches
+			if CompareKeys(key, s.prefix) >= 0 {
 				s.valid = hasPrefix(key, s.prefix)
 				return
 			}
 		}
-		// All entries in this block are < prefix, continue to next block
 	}
 }
 
