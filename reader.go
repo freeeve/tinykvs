@@ -333,22 +333,33 @@ func (r *reader) collectPrefixTables(levels [][]*SSTable, prefix []byte, scanner
 	for level := 0; level < len(levels); level++ {
 		tables := levels[level]
 		if level == 0 {
-			for i := len(tables) - 1; i >= 0; i-- {
-				scanner.addSSTable(tables[i], *baseIdx)
-				*baseIdx++
-			}
+			addL0Tables(tables, scanner, baseIdx)
 		} else {
-			startIdx := findTableForPrefix(tables, prefix)
-			if startIdx >= 0 {
-				for i := startIdx; i < len(tables); i++ {
-					if hasKeyInRange(prefix, tables[i].MinKey(), tables[i].MaxKey()) {
-						sortedTables = append(sortedTables, tables[i])
-					} else {
-						break
-					}
-				}
-			}
+			sortedTables = appendMatchingTables(sortedTables, tables, prefix)
 		}
+	}
+	return sortedTables
+}
+
+// addL0Tables adds L0 tables to scanner in reverse order (newest first).
+func addL0Tables(tables []*SSTable, scanner *prefixScanner, baseIdx *int) {
+	for i := len(tables) - 1; i >= 0; i-- {
+		scanner.addSSTable(tables[i], *baseIdx)
+		*baseIdx++
+	}
+}
+
+// appendMatchingTables appends tables that may contain the prefix to sortedTables.
+func appendMatchingTables(sortedTables, tables []*SSTable, prefix []byte) []*SSTable {
+	startIdx := findTableForPrefix(tables, prefix)
+	if startIdx < 0 {
+		return sortedTables
+	}
+	for i := startIdx; i < len(tables); i++ {
+		if !hasKeyInRange(prefix, tables[i].MinKey(), tables[i].MaxKey()) {
+			break
+		}
+		sortedTables = append(sortedTables, tables[i])
 	}
 	return sortedTables
 }
