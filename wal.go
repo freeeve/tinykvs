@@ -190,73 +190,130 @@ func (w *wal) Recover() ([]walEntry, error) {
 	return entries, nil
 }
 
+// walRecoveryState holds state during WAL recovery.
+type walRecoveryState struct {
+	entries        []walEntry
+	fragmentBuffer []byte
+}
+
 // recoverUnlocked is the internal unlocked version of Recover.
 // Caller must hold w.mu and position the file at the start.
 func (w *wal) recoverUnlocked() ([]walEntry, error) {
-	var entries []walEntry
-	var fragmentBuffer []byte
-
+	state := &walRecoveryState{}
 	block := make([]byte, walBlockSize)
 
 	for {
-		n, err := io.ReadFull(w.file, block)
-		if err == io.EOF {
-			break
-		}
-		if err != nil && err != io.ErrUnexpectedEOF {
+		n, done, err := w.readWALBlock(block)
+		if err != nil {
 			return nil, err
 		}
-		if n == 0 {
+		if done {
 			break
 		}
 
-		pos := 0
-		for pos+walHeaderSize <= n {
-			checksum := binary.LittleEndian.Uint32(block[pos:])
-			length := binary.LittleEndian.Uint16(block[pos+4:])
-			recordType := block[pos+6]
-
-			if length == 0 {
-				break // End of records in block
-			}
-
-			if pos+walHeaderSize+int(length) > n {
-				break // Incomplete record
-			}
-
-			data := block[pos+walHeaderSize : pos+walHeaderSize+int(length)]
-
-			// Verify checksum
-			if crc32.ChecksumIEEE(data) != checksum {
-				// Corrupted record, stop recovery here
-				break
-			}
-
-			switch recordType {
-			case walRecordFull:
-				entry, err := w.decodeEntry(data)
-				if err == nil {
-					entries = append(entries, entry)
-				}
-			case walRecordFirst:
-				fragmentBuffer = make([]byte, len(data))
-				copy(fragmentBuffer, data)
-			case walRecordMiddle:
-				fragmentBuffer = append(fragmentBuffer, data...)
-			case walRecordLast:
-				fragmentBuffer = append(fragmentBuffer, data...)
-				entry, err := w.decodeEntry(fragmentBuffer)
-				if err == nil {
-					entries = append(entries, entry)
-				}
-				fragmentBuffer = nil
-			}
-
-			pos += walHeaderSize + int(length)
+		if !w.parseWALBlock(block[:n], state) {
+			break // Corruption detected, stop recovery
 		}
 	}
 
-	return entries, nil
+	return state.entries, nil
+}
+
+// readWALBlock reads the next block from the WAL file.
+// Returns bytes read, whether EOF was reached, and any error.
+func (w *wal) readWALBlock(block []byte) (int, bool, error) {
+	n, err := io.ReadFull(w.file, block)
+	if err == io.EOF || n == 0 {
+		return 0, true, nil
+	}
+	if err != nil && err != io.ErrUnexpectedEOF {
+		return 0, false, err
+	}
+	return n, false, nil
+}
+
+// parseWALBlock parses all records from a WAL block.
+// Returns false if corruption is detected.
+func (w *wal) parseWALBlock(block []byte, state *walRecoveryState) bool {
+	pos := 0
+	for pos+walHeaderSize <= len(block) {
+		record, size, ok := w.parseWALRecord(block[pos:])
+		if !ok {
+			return true // End of valid records in block
+		}
+
+		if !w.processWALRecord(record, state) {
+			return false // Checksum mismatch
+		}
+
+		pos += size
+	}
+	return true
+}
+
+// walRecord represents a parsed WAL record header and data.
+type walRecord struct {
+	checksum   uint32
+	recordType uint8
+	data       []byte
+}
+
+// parseWALRecord extracts a single record from block data.
+// Returns the record, total size consumed, and whether parsing succeeded.
+func (w *wal) parseWALRecord(block []byte) (walRecord, int, bool) {
+	if len(block) < walHeaderSize {
+		return walRecord{}, 0, false
+	}
+
+	checksum := binary.LittleEndian.Uint32(block)
+	length := binary.LittleEndian.Uint16(block[4:])
+	recordType := block[6]
+
+	if length == 0 {
+		return walRecord{}, 0, false // End of records marker
+	}
+
+	totalSize := walHeaderSize + int(length)
+	if totalSize > len(block) {
+		return walRecord{}, 0, false // Incomplete record
+	}
+
+	return walRecord{
+		checksum:   checksum,
+		recordType: recordType,
+		data:       block[walHeaderSize:totalSize],
+	}, totalSize, true
+}
+
+// processWALRecord handles a single WAL record based on its type.
+// Returns false if checksum verification fails.
+func (w *wal) processWALRecord(record walRecord, state *walRecoveryState) bool {
+	if crc32.ChecksumIEEE(record.data) != record.checksum {
+		return false
+	}
+
+	switch record.recordType {
+	case walRecordFull:
+		w.appendDecodedEntry(record.data, state)
+	case walRecordFirst:
+		state.fragmentBuffer = make([]byte, len(record.data))
+		copy(state.fragmentBuffer, record.data)
+	case walRecordMiddle:
+		state.fragmentBuffer = append(state.fragmentBuffer, record.data...)
+	case walRecordLast:
+		state.fragmentBuffer = append(state.fragmentBuffer, record.data...)
+		w.appendDecodedEntry(state.fragmentBuffer, state)
+		state.fragmentBuffer = nil
+	}
+	return true
+}
+
+// appendDecodedEntry decodes and appends a WAL entry to the recovery state.
+func (w *wal) appendDecodedEntry(data []byte, state *walRecoveryState) {
+	entry, err := w.decodeEntry(data)
+	if err == nil {
+		state.entries = append(state.entries, entry)
+	}
 }
 
 // Close closes the wal file.
