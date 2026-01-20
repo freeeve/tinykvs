@@ -65,6 +65,9 @@ type SSTable struct {
 	// Reference counting for safe concurrent access during compaction
 	refs             atomic.Int32
 	markedForRemoval atomic.Bool
+
+	// Protects file field during concurrent Close/DecRef
+	fileMu sync.Mutex
 }
 
 // OpenSSTable opens an existing SSTable file (eagerly loads index and bloom filter).
@@ -357,10 +360,14 @@ func (sst *SSTable) MaxKey() []byte {
 
 // Close closes the SSTable file.
 func (sst *SSTable) Close() error {
+	sst.fileMu.Lock()
+	defer sst.fileMu.Unlock()
 	if sst.file == nil {
 		return nil
 	}
-	return sst.file.Close()
+	err := sst.file.Close()
+	sst.file = nil
+	return err
 }
 
 // IncRef increments the reference count.
@@ -373,10 +380,12 @@ func (sst *SSTable) IncRef() {
 // If the count reaches zero and the table is marked for removal, the file is closed and removed.
 func (sst *SSTable) DecRef() {
 	if sst.refs.Add(-1) == 0 && sst.markedForRemoval.Load() {
+		sst.fileMu.Lock()
 		if sst.file != nil {
 			sst.file.Close()
 			sst.file = nil
 		}
+		sst.fileMu.Unlock()
 		// Remove the file from disk
 		os.Remove(sst.Path)
 	}
