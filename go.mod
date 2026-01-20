@@ -5,7 +5,7 @@ go 1.25
 require (
 	github.com/bits-and-blooms/bloom/v3 v3.7.1
 	github.com/blastrain/vitess-sqlparser v0.0.0-20201030050434-a139afbb1aba
-	github.com/freeeve/msgpck v0.1.3
+	github.com/freeeve/msgpck v0.1.4
 	github.com/golang/snappy v1.0.0
 	github.com/klauspost/compress v1.18.3
 	github.com/peterh/liner v1.2.2
