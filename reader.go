@@ -251,94 +251,8 @@ func (r *reader) GetLevels() [][]*SSTable {
 // Keys and values passed to the callback are copies owned by the caller.
 // Note: Streams entries directly without buffering for constant memory usage.
 func (r *reader) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool) error {
-	// Snapshot state under brief lock to minimize blocking.
-	// Deep copy slices to avoid race with concurrent modifications.
-	r.mu.RLock()
-	memtable := r.memtable
-	immutables := copyImmutables(r.immutables)
-	levels := copyLevels(r.levels)
-	cache := r.cache
-	verify := r.opts.VerifyChecksums
-	r.mu.RUnlock()
-
-	scanner := newPrefixScanner(prefix, cache, verify)
-
-	scanner.addmemtable(memtable, 0)
-
-	for i := len(immutables) - 1; i >= 0; i-- {
-		scanner.addmemtable(immutables[i], len(immutables)-i)
-	}
-
-	baseIdx := len(immutables) + 1
-
-	// Collect L1+ tables for lazy loading (sorted, non-overlapping)
-	var sortedTables []*SSTable
-
-	for level := 0; level < len(levels); level++ {
-		tables := levels[level]
-		if level == 0 {
-			// L0: tables may overlap, must add all to heap
-			for i := len(tables) - 1; i >= 0; i-- {
-				scanner.addSSTable(tables[i], baseIdx)
-				baseIdx++
-			}
-		} else {
-			// L1+: tables are sorted and non-overlapping
-			// Collect matching tables for lazy loading
-			startIdx := findTableForPrefix(tables, prefix)
-			if startIdx >= 0 {
-				for i := startIdx; i < len(tables); i++ {
-					if hasKeyInRange(prefix, tables[i].MinKey(), tables[i].MaxKey()) {
-						sortedTables = append(sortedTables, tables[i])
-					} else {
-						break
-					}
-				}
-			}
-		}
-	}
-
-	// Queue L1+ tables for lazy loading (only first is added to heap)
-	if len(sortedTables) > 0 {
-		scanner.queueSortedTables(sortedTables, baseIdx)
-	}
-
-	scanner.init()
-
-	var lastKey []byte
-
-	for scanner.next() {
-		entry := scanner.entry()
-
-		// Skip duplicates (newer version already seen)
-		if lastKey != nil && CompareKeys(entry.Key, lastKey) == 0 {
-			continue
-		}
-
-		lastKey = make([]byte, len(entry.Key))
-		copy(lastKey, entry.Key)
-
-		// Skip tombstones
-		if entry.Value.IsTombstone() {
-			continue
-		}
-
-		// Check prefix still matches
-		if !hasPrefix(entry.Key, prefix) {
-			break
-		}
-
-		// Stream directly to callback
-		keyCopy := make([]byte, len(entry.Key))
-		copy(keyCopy, entry.Key)
-
-		if !fn(keyCopy, copyValue(entry.Value)) {
-			break
-		}
-	}
-
-	scanner.close()
-	return nil
+	_, err := r.ScanPrefixWithStats(prefix, fn, nil)
+	return err
 }
 
 // ScanPrefixWithStats is like ScanPrefix but also returns scan statistics.
@@ -347,8 +261,14 @@ func (r *reader) ScanPrefix(prefix []byte, fn func(key []byte, value Value) bool
 // Note: This streams entries directly to the callback without buffering,
 // so it uses constant memory regardless of result size.
 func (r *reader) ScanPrefixWithStats(prefix []byte, fn func(key []byte, value Value) bool, progress ScanProgress) (ScanStats, error) {
-	// Snapshot state under brief lock to minimize blocking.
-	// Deep copy slices to avoid race with concurrent modifications.
+	scanner := r.setupPrefixScanner(prefix)
+	defer scanner.close()
+
+	return r.scanPrefixLoop(scanner, prefix, fn, progress)
+}
+
+// setupPrefixScanner creates and initializes a prefix scanner with all sources.
+func (r *reader) setupPrefixScanner(prefix []byte) *prefixScanner {
 	r.mu.RLock()
 	memtable := r.memtable
 	immutables := copyImmutables(r.immutables)
@@ -366,21 +286,28 @@ func (r *reader) ScanPrefixWithStats(prefix []byte, fn func(key []byte, value Va
 	}
 
 	baseIdx := len(immutables) + 1
+	sortedTables := r.collectPrefixTables(levels, prefix, scanner, &baseIdx)
 
-	// Collect L1+ tables for lazy loading (sorted, non-overlapping)
+	if len(sortedTables) > 0 {
+		scanner.queueSortedTables(sortedTables, baseIdx)
+	}
+
+	scanner.init()
+	return scanner
+}
+
+// collectPrefixTables adds L0 tables to scanner and returns L1+ tables for lazy loading.
+func (r *reader) collectPrefixTables(levels [][]*SSTable, prefix []byte, scanner *prefixScanner, baseIdx *int) []*SSTable {
 	var sortedTables []*SSTable
 
 	for level := 0; level < len(levels); level++ {
 		tables := levels[level]
 		if level == 0 {
-			// L0: tables may overlap, must add all to heap
 			for i := len(tables) - 1; i >= 0; i-- {
-				scanner.addSSTable(tables[i], baseIdx)
-				baseIdx++
+				scanner.addSSTable(tables[i], *baseIdx)
+				*baseIdx++
 			}
 		} else {
-			// L1+: tables are sorted and non-overlapping
-			// Collect matching tables for lazy loading
 			startIdx := findTableForPrefix(tables, prefix)
 			if startIdx >= 0 {
 				for i := startIdx; i < len(tables); i++ {
@@ -393,21 +320,17 @@ func (r *reader) ScanPrefixWithStats(prefix []byte, fn func(key []byte, value Va
 			}
 		}
 	}
+	return sortedTables
+}
 
-	// Queue L1+ tables for lazy loading (only first is added to heap)
-	if len(sortedTables) > 0 {
-		scanner.queueSortedTables(sortedTables, baseIdx)
-	}
-
-	scanner.init()
-
+// scanPrefixLoop iterates through entries, calling fn for each matching key.
+func (r *reader) scanPrefixLoop(scanner *prefixScanner, prefix []byte, fn func(key []byte, value Value) bool, progress ScanProgress) (ScanStats, error) {
 	var lastKey []byte
 	var progressCount int64
 
 	for scanner.next() {
 		entry := scanner.entry()
 
-		// Call progress every 10000 keys
 		progressCount++
 		if progress != nil && progressCount%10000 == 0 {
 			if !progress(scanner.stats) {
@@ -415,7 +338,6 @@ func (r *reader) ScanPrefixWithStats(prefix []byte, fn func(key []byte, value Va
 			}
 		}
 
-		// Skip duplicates (newer version already seen)
 		if lastKey != nil && CompareKeys(entry.Key, lastKey) == 0 {
 			continue
 		}
@@ -423,17 +345,14 @@ func (r *reader) ScanPrefixWithStats(prefix []byte, fn func(key []byte, value Va
 		lastKey = make([]byte, len(entry.Key))
 		copy(lastKey, entry.Key)
 
-		// Skip tombstones
 		if entry.Value.IsTombstone() {
 			continue
 		}
 
-		// Check prefix still matches
 		if !hasPrefix(entry.Key, prefix) {
 			break
 		}
 
-		// Stream directly to callback (no buffering)
 		keyCopy := make([]byte, len(entry.Key))
 		copy(keyCopy, entry.Key)
 
@@ -442,10 +361,7 @@ func (r *reader) ScanPrefixWithStats(prefix []byte, fn func(key []byte, value Va
 		}
 	}
 
-	stats := scanner.stats
-	scanner.close()
-
-	return stats, nil
+	return scanner.stats, nil
 }
 
 // copyValue creates a deep copy of a Value.
