@@ -50,27 +50,28 @@ copy_corpus_to_testdata() {
     echo "Copying fuzz corpus to testdata/"
     echo "=========================================="
 
-    local GOCACHE_BASE="$(go env GOCACHE)/fuzz/github.com/freeeve/tinykvs"
-    local TESTDATA_FUZZ="$PROJECT_ROOT/testdata/fuzz"
+    local gocache_base="$(go env GOCACHE)/fuzz/github.com/freeeve/tinykvs"
+    local testdata_fuzz="$PROJECT_ROOT/testdata/fuzz"
 
-    mkdir -p "$TESTDATA_FUZZ"
-    local before_count=$(find "$TESTDATA_FUZZ" -type f 2>/dev/null | wc -l | tr -d ' ')
+    mkdir -p "$testdata_fuzz"
+    local before_count=$(find "$testdata_fuzz" -type f 2>/dev/null | wc -l | tr -d ' ')
 
     # Copy from root package
-    if [ -d "$GOCACHE_BASE" ]; then
-        cp -r "$GOCACHE_BASE"/* "$TESTDATA_FUZZ"/ 2>/dev/null || true
+    if [[ -d "$gocache_base" ]]; then
+        cp -r "$gocache_base"/* "$testdata_fuzz"/ 2>/dev/null || true
     fi
 
     # Copy from cmd/tinykvs package (preserving structure)
-    if [ -d "$GOCACHE_BASE/cmd/tinykvs" ]; then
-        mkdir -p "$TESTDATA_FUZZ/cmd_tinykvs"
-        cp -r "$GOCACHE_BASE/cmd/tinykvs"/* "$TESTDATA_FUZZ/cmd_tinykvs"/ 2>/dev/null || true
+    if [[ -d "$gocache_base/cmd/tinykvs" ]]; then
+        mkdir -p "$testdata_fuzz/cmd_tinykvs"
+        cp -r "$gocache_base/cmd/tinykvs"/* "$testdata_fuzz/cmd_tinykvs"/ 2>/dev/null || true
     fi
 
-    local after_count=$(find "$TESTDATA_FUZZ" -type f | wc -l | tr -d ' ')
+    local after_count=$(find "$testdata_fuzz" -type f | wc -l | tr -d ' ')
     local new_count=$((after_count - before_count))
     echo "Copied corpus from Go cache to testdata/fuzz/"
     echo "New files added: $new_count (total: $after_count)"
+    return 0
 }
 
 print_summary() {
@@ -82,7 +83,7 @@ print_summary() {
     echo "Time per target: $TIME_PER_TARGET"
     echo ""
 
-    if [ -s "$CRASHED_FILE" ]; then
+    if [[ -s "$CRASHED_FILE" ]]; then
         echo "⚠️  CRASHED TARGETS:"
         while read -r target; do
             echo "   - $target (see $LOG_DIR/$target.log)"
@@ -91,7 +92,7 @@ print_summary() {
     fi
 
     echo "Results:"
-    if [ -s "$RESULTS_FILE" ]; then
+    if [[ -s "$RESULTS_FILE" ]]; then
         cat "$RESULTS_FILE" | while read -r line; do
             echo "   $line"
         done
@@ -105,6 +106,7 @@ print_summary() {
     echo ""
     echo "To check for failures:"
     echo "   grep -l 'FAIL\|panic\|crash' $LOG_DIR/*.log 2>/dev/null || echo 'No failures found'"
+    return 0
 }
 
 # Cleanup on exit
@@ -141,7 +143,7 @@ run_fuzz_target() {
     set -e
 
     # Check results
-    if [ $exit_code -ne 0 ]; then
+    if [[ $exit_code -ne 0 ]]; then
         echo "⚠️  $target exited with code $exit_code"
         echo "$target" >> "$CRASHED_FILE"
         echo "$target: CRASHED (exit $exit_code)" >> "$RESULTS_FILE"
@@ -156,13 +158,14 @@ run_fuzz_target() {
     fi
 
     echo "Finished: $(date)"
+    return 0
 }
 
 is_in_list() {
     local target="$1"
     local list="$2"
     for item in $list; do
-        if [ "$item" = "$target" ]; then
+        if [[ "$item" = "$target" ]]; then
             return 0
         fi
     done
@@ -178,7 +181,7 @@ echo "Parallel workers: $FUZZ_PARALLEL"
 echo "Log directory: $LOG_DIR"
 echo ""
 
-if [ -n "$SPECIFIC_TARGET" ]; then
+if [[ -n "$SPECIFIC_TARGET" ]]; then
     # Run specific target
     echo "Running specific target: $SPECIFIC_TARGET"
 
