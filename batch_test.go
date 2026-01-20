@@ -321,28 +321,30 @@ func TestBatchPutStruct(t *testing.T) {
 	}
 
 	batch := NewBatch()
-	if err := batch.PutStruct([]byte("user:1"), User{Name: "Alice", Age: 30}); err != nil {
-		t.Fatalf("batch.PutStruct failed: %v", err)
+	u1 := User{Name: "Alice", Age: 30}
+	u2 := User{Name: "Bob", Age: 25}
+	if err := BatchPutStruct(batch, []byte("user:1"), &u1); err != nil {
+		t.Fatalf("BatchPutStruct failed: %v", err)
 	}
-	if err := batch.PutStruct([]byte("user:2"), User{Name: "Bob", Age: 25}); err != nil {
-		t.Fatalf("batch.PutStruct failed: %v", err)
+	if err := BatchPutStruct(batch, []byte("user:2"), &u2); err != nil {
+		t.Fatalf("BatchPutStruct failed: %v", err)
 	}
 
 	if err := store.WriteBatch(batch); err != nil {
 		t.Fatalf("WriteBatch failed: %v", err)
 	}
 
-	// Verify using GetStruct
+	// Verify using GetStructInto
 	var got1, got2 User
-	if err := store.GetStruct([]byte("user:1"), &got1); err != nil {
-		t.Fatalf("GetStruct user:1 failed: %v", err)
+	if err := GetStructInto(store, []byte("user:1"), &got1); err != nil {
+		t.Fatalf("GetStructInto user:1 failed: %v", err)
 	}
 	if got1.Name != "Alice" || got1.Age != 30 {
 		t.Errorf("user:1 = %+v, want {Alice 30}", got1)
 	}
 
-	if err := store.GetStruct([]byte("user:2"), &got2); err != nil {
-		t.Fatalf("GetStruct user:2 failed: %v", err)
+	if err := GetStructInto(store, []byte("user:2"), &got2); err != nil {
+		t.Fatalf("GetStructInto user:2 failed: %v", err)
 	}
 	if got2.Name != "Bob" || got2.Age != 25 {
 		t.Errorf("user:2 = %+v, want {Bob 25}", got2)

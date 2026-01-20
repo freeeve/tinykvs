@@ -119,8 +119,11 @@ func ParseOrderBy(sql string) (string, []SortOrder) {
 	sql = sql[:idx]
 
 	// Remove any trailing LIMIT clause from orderPart
-	limitIdx := strings.Index(strings.ToLower(orderPart), " limit ")
-	if limitIdx != -1 {
+	// Use case-insensitive search - note: index found in lowercased string may not
+	// be valid for original string if unicode characters change length when lowercased
+	lowerOrderPart := strings.ToLower(orderPart)
+	limitIdx := strings.Index(lowerOrderPart, " limit ")
+	if limitIdx != -1 && limitIdx < len(orderPart) {
 		// Put LIMIT back on the main SQL
 		sql = sql + orderPart[limitIdx:]
 		orderPart = orderPart[:limitIdx]

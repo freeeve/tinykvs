@@ -1,22 +1,13 @@
 package tinykvs
 
 import (
-	"bytes"
 	"fmt"
 	"reflect"
 	"strings"
-	"sync"
 
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/freeeve/msgpck"
 )
 
-// readerPool provides reusable bytes.Reader instances to reduce allocations
-// during scan operations.
-var readerPool = sync.Pool{
-	New: func() any {
-		return bytes.NewReader(nil)
-	},
-}
 
 // PutInt64 stores an int64 value.
 func (s *Store) PutInt64(key []byte, value int64) error {
@@ -45,52 +36,13 @@ func (s *Store) PutBytes(key []byte, value []byte) error {
 
 // PutMap stores a structured record with named fields.
 func (s *Store) PutMap(key []byte, fields map[string]any) error {
-	// Serialize directly to msgpack to avoid double-encoding
-	data, err := msgpack.Marshal(fields)
+	data, err := msgpck.MarshalCopy(fields)
 	if err != nil {
 		return err
 	}
 	return s.Put(key, MsgpackValue(data))
 }
 
-// PutStruct stores a Go struct as raw msgpack bytes.
-// This is more efficient than storing as a record map.
-func (s *Store) PutStruct(key []byte, v any) error {
-	data, err := msgpack.Marshal(v)
-	if err != nil {
-		return err
-	}
-	return s.Put(key, MsgpackValue(data))
-}
-
-// GetStruct retrieves msgpack data and decodes it into the provided struct pointer.
-// The dest parameter must be a pointer to a struct.
-// Supports both ValueTypeMsgpack (efficient) and ValueTypeRecord (legacy).
-// Uses pooled decoder for reduced allocations.
-func (s *Store) GetStruct(key []byte, dest any) error {
-	val, err := s.Get(key)
-	if err != nil {
-		return err
-	}
-
-	switch val.Type {
-	case ValueTypeMsgpack:
-		// Use pooled reader and decoder
-		r := readerPool.Get().(*bytes.Reader)
-		r.Reset(val.Bytes)
-		dec := msgpack.GetDecoder()
-		dec.Reset(r)
-		err := dec.Decode(dest)
-		msgpack.PutDecoder(dec)
-		readerPool.Put(r)
-		return err
-	case ValueTypeRecord:
-		// Legacy: convert from map using reflection
-		return mapToStruct(val.Record, dest)
-	default:
-		return fmt.Errorf("expected msgpack or record, got type %d", val.Type)
-	}
-}
 
 // PutJson stores a record as a JSON string.
 // Use this when you want human-readable storage instead of binary msgpack.
@@ -169,7 +121,6 @@ func (s *Store) GetBytes(key []byte) ([]byte, error) {
 }
 
 // GetMap retrieves a structured record by key.
-// Uses pooled decoder for reduced allocations.
 func (s *Store) GetMap(key []byte) (map[string]any, error) {
 	val, err := s.Get(key)
 	if err != nil {
@@ -177,19 +128,7 @@ func (s *Store) GetMap(key []byte) (map[string]any, error) {
 	}
 	switch val.Type {
 	case ValueTypeMsgpack:
-		var m map[string]any
-		// Use pooled reader and decoder
-		r := readerPool.Get().(*bytes.Reader)
-		r.Reset(val.Bytes)
-		dec := msgpack.GetDecoder()
-		dec.Reset(r)
-		err := dec.Decode(&m)
-		msgpack.PutDecoder(dec)
-		readerPool.Put(r)
-		if err != nil {
-			return nil, err
-		}
-		return m, nil
+		return msgpck.UnmarshalMapStringAny(val.Bytes, false)
 	case ValueTypeRecord:
 		// Backward compatibility
 		return val.Record, nil
@@ -433,10 +372,20 @@ func (s *Store) ScanRangeMaps(start, end []byte, fn func(key []byte, m map[strin
 }
 
 // ScanPrefixStructs scans keys with the given prefix and decodes each value into a struct.
+// Uses pre-registered decoder for best performance.
 func ScanPrefixStructs[T any](s *Store, prefix []byte, fn func(key []byte, val *T) bool) error {
+	dec := msgpck.GetStructDecoder[T](false)
 	return s.ScanPrefix(prefix, func(key []byte, v Value) bool {
+		if v.Type != ValueTypeMsgpack {
+			// Fall back to reflection for legacy record types
+			var dest T
+			if err := decodeAsStruct(v, &dest); err != nil {
+				return true
+			}
+			return fn(key, &dest)
+		}
 		var dest T
-		if err := decodeAsStruct(v, &dest); err != nil {
+		if err := dec.Decode(v.Bytes, &dest); err != nil {
 			return true // skip invalid entries
 		}
 		return fn(key, &dest)
@@ -444,10 +393,20 @@ func ScanPrefixStructs[T any](s *Store, prefix []byte, fn func(key []byte, val *
 }
 
 // ScanRangeStructs scans keys in [start, end) and decodes each value into a struct.
+// Uses pre-registered decoder for best performance.
 func ScanRangeStructs[T any](s *Store, start, end []byte, fn func(key []byte, val *T) bool) error {
+	dec := msgpck.GetStructDecoder[T](false)
 	return s.ScanRange(start, end, func(key []byte, v Value) bool {
+		if v.Type != ValueTypeMsgpack {
+			// Fall back to reflection for legacy record types
+			var dest T
+			if err := decodeAsStruct(v, &dest); err != nil {
+				return true
+			}
+			return fn(key, &dest)
+		}
 		var dest T
-		if err := decodeAsStruct(v, &dest); err != nil {
+		if err := dec.Decode(v.Bytes, &dest); err != nil {
 			return true // skip invalid entries
 		}
 		return fn(key, &dest)
@@ -483,23 +442,10 @@ func ScanRangeJson[T any](s *Store, start, end []byte, fn func(key []byte, val *
 }
 
 // decodeAsMap decodes a Value as map[string]any.
-// Uses pooled decoder and reader for reduced allocations.
 func decodeAsMap(val Value) (map[string]any, error) {
 	switch val.Type {
 	case ValueTypeMsgpack:
-		var m map[string]any
-		// Use pooled reader and decoder
-		r := readerPool.Get().(*bytes.Reader)
-		r.Reset(val.Bytes)
-		dec := msgpack.GetDecoder()
-		dec.Reset(r)
-		err := dec.Decode(&m)
-		msgpack.PutDecoder(dec)
-		readerPool.Put(r)
-		if err != nil {
-			return nil, err
-		}
-		return m, nil
+		return msgpck.UnmarshalMapStringAny(val.Bytes, false)
 	case ValueTypeRecord:
 		return val.Record, nil
 	default:
@@ -508,22 +454,148 @@ func decodeAsMap(val Value) (map[string]any, error) {
 }
 
 // decodeAsStruct decodes a Value into a struct pointer.
-// Uses pooled decoder and reader for reduced allocations.
 func decodeAsStruct(val Value, dest any) error {
 	switch val.Type {
 	case ValueTypeMsgpack:
-		// Use pooled reader and decoder
-		r := readerPool.Get().(*bytes.Reader)
-		r.Reset(val.Bytes)
-		dec := msgpack.GetDecoder()
-		dec.Reset(r)
-		err := dec.Decode(dest)
-		msgpack.PutDecoder(dec)
-		readerPool.Put(r)
-		return err
+		return msgpck.UnmarshalStruct(val.Bytes, dest)
 	case ValueTypeRecord:
 		return mapToStruct(val.Record, dest)
 	default:
 		return fmt.Errorf("expected msgpack or record, got %d", val.Type)
 	}
+}
+
+// Fast generic struct APIs - use cached codecs for best performance
+
+// PutStruct stores a struct using cached encoder.
+func PutStruct[T any](s *Store, key []byte, v *T) error {
+	enc := msgpck.GetStructEncoder[T]()
+	data, err := enc.EncodeCopy(v)
+	if err != nil {
+		return err
+	}
+	return s.Put(key, MsgpackValue(data))
+}
+
+// BatchPutStruct adds a struct to a batch using cached encoder.
+func BatchPutStruct[T any](b *Batch, key []byte, v *T) error {
+	enc := msgpck.GetStructEncoder[T]()
+	data, err := enc.EncodeCopy(v)
+	if err != nil {
+		return err
+	}
+	b.Put(key, MsgpackValue(data))
+	return nil
+}
+
+// GetStruct retrieves and decodes a struct using pre-registered decoder (faster than method version).
+// Use this in hot paths where performance matters.
+func GetStruct[T any](s *Store, key []byte) (*T, error) {
+	val, err := s.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	if val.Type != ValueTypeMsgpack {
+		return nil, fmt.Errorf("expected msgpack, got %d", val.Type)
+	}
+	dec := msgpck.GetStructDecoder[T](false)
+	var dest T
+	if err := dec.Decode(val.Bytes, &dest); err != nil {
+		return nil, err
+	}
+	return &dest, nil
+}
+
+// GetStructInto retrieves and decodes a struct into an existing pointer.
+// Avoids allocation when you already have a destination.
+func GetStructInto[T any](s *Store, key []byte, dest *T) error {
+	val, err := s.Get(key)
+	if err != nil {
+		return err
+	}
+	if val.Type != ValueTypeMsgpack {
+		return fmt.Errorf("expected msgpack, got %d", val.Type)
+	}
+	dec := msgpck.GetStructDecoder[T](false)
+	return dec.Decode(val.Bytes, dest)
+}
+
+// Zero-copy APIs - strings point into database buffer, only valid within callback
+
+// GetMapZeroCopy retrieves a map with zero-copy strings.
+// Strings are only valid within the callback - they point into the database buffer.
+// Copy any strings you need to retain before the callback returns.
+func (s *Store) GetMapZeroCopy(key []byte, fn func(m map[string]any) error) error {
+	val, err := s.Get(key)
+	if err != nil {
+		return err
+	}
+	switch val.Type {
+	case ValueTypeMsgpack:
+		return msgpck.DecodeMapFunc(val.Bytes, fn)
+	case ValueTypeRecord:
+		return fn(val.Record)
+	default:
+		return fmt.Errorf("expected msgpack or record, got %d", val.Type)
+	}
+}
+
+// GetStructZeroCopy retrieves a struct with zero-copy strings.
+// Strings are only valid within the callback - they point into the database buffer.
+// This is the fastest way to read structs when you only need temporary access.
+func GetStructZeroCopy[T any](s *Store, key []byte, fn func(v *T) error) error {
+	val, err := s.Get(key)
+	if err != nil {
+		return err
+	}
+	if val.Type != ValueTypeMsgpack {
+		return fmt.Errorf("expected msgpack, got %d", val.Type)
+	}
+	return msgpck.DecodeStructFunc(val.Bytes, fn)
+}
+
+// ScanPrefixMapsZeroCopy scans keys with prefix using zero-copy decoding.
+// Map strings are only valid within the callback - copy any you need to retain.
+func (s *Store) ScanPrefixMapsZeroCopy(prefix []byte, fn func(key []byte, m map[string]any) bool) error {
+	return s.ScanPrefix(prefix, func(key []byte, val Value) bool {
+		if val.Type != ValueTypeMsgpack {
+			return true // skip non-msgpack
+		}
+		m, err := msgpck.UnmarshalMapStringAny(val.Bytes, true)
+		if err != nil {
+			return true // skip invalid
+		}
+		return fn(key, m)
+	})
+}
+
+// ScanPrefixStructsZeroCopy scans keys with prefix using zero-copy decoding.
+// Struct string fields are only valid within the callback - copy any you need.
+func ScanPrefixStructsZeroCopy[T any](s *Store, prefix []byte, fn func(key []byte, val *T) bool) error {
+	dec := msgpck.GetStructDecoder[T](true)
+	return s.ScanPrefix(prefix, func(key []byte, v Value) bool {
+		if v.Type != ValueTypeMsgpack {
+			return true // skip non-msgpack
+		}
+		var dest T
+		if err := dec.Decode(v.Bytes, &dest); err != nil {
+			return true // skip invalid
+		}
+		return fn(key, &dest)
+	})
+}
+
+// ScanRangeStructsZeroCopy scans keys in [start, end) using zero-copy decoding.
+func ScanRangeStructsZeroCopy[T any](s *Store, start, end []byte, fn func(key []byte, val *T) bool) error {
+	dec := msgpck.GetStructDecoder[T](true)
+	return s.ScanRange(start, end, func(key []byte, v Value) bool {
+		if v.Type != ValueTypeMsgpack {
+			return true // skip non-msgpack
+		}
+		var dest T
+		if err := dec.Decode(v.Bytes, &dest); err != nil {
+			return true // skip invalid
+		}
+		return fn(key, &dest)
+	})
 }

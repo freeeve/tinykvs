@@ -411,9 +411,12 @@ func TestScanPrefixStructs(t *testing.T) {
 	}
 
 	// Insert some struct records
-	store.PutStruct([]byte("user:1"), User{Name: "Alice", Age: 30})
-	store.PutStruct([]byte("user:2"), User{Name: "Bob", Age: 25})
-	store.PutStruct([]byte("user:3"), User{Name: "Carol", Age: 35})
+	u1 := User{Name: "Alice", Age: 30}
+	u2 := User{Name: "Bob", Age: 25}
+	u3 := User{Name: "Carol", Age: 35}
+	PutStruct(store, []byte("user:1"), &u1)
+	PutStruct(store, []byte("user:2"), &u2)
+	PutStruct(store, []byte("user:3"), &u3)
 
 	var users []User
 	err = ScanPrefixStructs(store, []byte("user:"), func(key []byte, u *User) bool {
@@ -473,11 +476,16 @@ func TestScanRangeStructs(t *testing.T) {
 		Value string `msgpack:"value"`
 	}
 
-	store.PutStruct([]byte("item:01"), Item{ID: 1, Value: "one"})
-	store.PutStruct([]byte("item:02"), Item{ID: 2, Value: "two"})
-	store.PutStruct([]byte("item:03"), Item{ID: 3, Value: "three"})
-	store.PutStruct([]byte("item:04"), Item{ID: 4, Value: "four"})
-	store.PutStruct([]byte("item:05"), Item{ID: 5, Value: "five"})
+	i1 := Item{ID: 1, Value: "one"}
+	i2 := Item{ID: 2, Value: "two"}
+	i3 := Item{ID: 3, Value: "three"}
+	i4 := Item{ID: 4, Value: "four"}
+	i5 := Item{ID: 5, Value: "five"}
+	PutStruct(store, []byte("item:01"), &i1)
+	PutStruct(store, []byte("item:02"), &i2)
+	PutStruct(store, []byte("item:03"), &i3)
+	PutStruct(store, []byte("item:04"), &i4)
+	PutStruct(store, []byte("item:05"), &i5)
 
 	var items []Item
 	err = ScanRangeStructs(store, []byte("item:02"), []byte("item:05"), func(key []byte, item *Item) bool {
@@ -594,7 +602,7 @@ func TestAggregateWithNestedFields(t *testing.T) {
 		}
 		s.Metadata.Score = i * 2
 		key := fmt.Sprintf("stats:%03d", i)
-		if err := store.PutStruct([]byte(key), s); err != nil {
+		if err := PutStruct(store, []byte(key), &s); err != nil {
 			t.Fatalf("PutStruct failed: %v", err)
 		}
 	}

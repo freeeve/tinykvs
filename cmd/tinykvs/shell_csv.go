@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/freeeve/msgpck"
 	"github.com/freeeve/tinykvs"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 func (s *Shell) exportCSV(filename string) {
@@ -48,8 +48,8 @@ func (s *Shell) exportCSV(filename string) {
 			jsonBytes, _ := json.Marshal(val.Record)
 			valueStr = string(jsonBytes)
 		case tinykvs.ValueTypeMsgpack:
-			var record map[string]any
-			if err := msgpack.Unmarshal(val.Bytes, &record); err != nil {
+			record, err := msgpck.UnmarshalMapStringAny(val.Bytes, false)
+			if err != nil {
 				return true // skip on decode error
 			}
 			jsonBytes, _ := json.Marshal(record)

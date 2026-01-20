@@ -263,17 +263,17 @@ For minimal memory (billions of records), use `LowMemoryOptions()`:
 
 | Operation | Latency | Throughput |
 |-----------|---------|------------|
-| Random read (64MB cache) | 1.3 µs | 800K ops/sec |
-| Sequential read | 684 ns | 1.5M ops/sec |
-| Sequential write | 5.7 µs | 175K ops/sec |
-| Mixed (80% read) | 1.7 µs | 600K ops/sec |
+| Sequential read | 304 ns | 3.3M ops/sec |
+| Sequential write | 465 ns | 2.2M ops/sec |
+| Mixed (80% read) | 392 ns | 2.6M ops/sec |
+| SSTable read (cached) | 300 ns | 3.3M ops/sec |
 
 Block cache impact (random reads, 100K keys):
 
 | Cache | Latency | Hit Rate |
 |-------|---------|----------|
 | 0 MB  | 42 µs   | 0%       |
-| 64 MB | 1.3 µs  | 99.9%    |
+| 64 MB | 300 ns  | 99.9%    |
 
 ### AWS t4g.micro (1GB RAM, ARM64)
 

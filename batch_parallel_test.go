@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/freeeve/msgpck"
 )
 
 type TestUser struct {
@@ -17,26 +17,27 @@ type TestUser struct {
 	Tags    []string `msgpack:"tags"`
 }
 
-func makeTestUsers(n int) []KeyStruct {
-	items := make([]KeyStruct, n)
+func makeTestUsers(n int) []KeyValue[TestUser] {
+	items := make([]KeyValue[TestUser], n)
 	for i := 0; i < n; i++ {
-		items[i] = KeyStruct{
-			Key: []byte(fmt.Sprintf("user:%08d", i)),
-			Value: TestUser{
-				ID:      int64(i),
-				Name:    fmt.Sprintf("User %d", i),
-				Email:   fmt.Sprintf("user%d@example.com", i),
-				Age:     20 + (i % 50),
-				Balance: float64(i) * 100.5,
-				Active:  i%2 == 0,
-				Tags:    []string{"tag1", "tag2", "tag3"},
-			},
+		user := TestUser{
+			ID:      int64(i),
+			Name:    fmt.Sprintf("User %d", i),
+			Email:   fmt.Sprintf("user%d@example.com", i),
+			Age:     20 + (i % 50),
+			Balance: float64(i) * 100.5,
+			Active:  i%2 == 0,
+			Tags:    []string{"tag1", "tag2", "tag3"},
+		}
+		items[i] = KeyValue[TestUser]{
+			Key:   []byte(fmt.Sprintf("user:%08d", i)),
+			Value: &user,
 		}
 	}
 	return items
 }
 
-// BenchmarkBatchSequential benchmarks the original sequential PutStruct
+// BenchmarkBatchSequential benchmarks sequential BatchPutStruct
 func BenchmarkBatchSequential(b *testing.B) {
 	items := makeTestUsers(10000)
 	b.ResetTimer()
@@ -44,12 +45,12 @@ func BenchmarkBatchSequential(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		batch := NewBatch()
 		for _, item := range items {
-			batch.PutStruct(item.Key, item.Value)
+			BatchPutStruct(batch, item.Key, item.Value)
 		}
 	}
 }
 
-// BenchmarkStorePutStructs benchmarks the simple Store.PutStructs API (encode + write)
+// BenchmarkStorePutStructs benchmarks PutStructs (parallel encode + write)
 func BenchmarkStorePutStructs(b *testing.B) {
 	dir := b.TempDir()
 	opts := DefaultOptions(dir)
@@ -61,11 +62,11 @@ func BenchmarkStorePutStructs(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		store.PutStructs(items)
+		PutStructs(store, items)
 	}
 }
 
-// BenchmarkStoreSequentialPutStruct benchmarks sequential Store.PutStruct calls
+// BenchmarkStoreSequentialPutStruct benchmarks sequential PutStruct calls
 func BenchmarkStoreSequentialPutStruct(b *testing.B) {
 	dir := b.TempDir()
 	opts := DefaultOptions(dir)
@@ -78,7 +79,7 @@ func BenchmarkStoreSequentialPutStruct(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		for _, item := range items {
-			store.PutStruct(item.Key, item.Value)
+			PutStruct(store, item.Key, item.Value)
 		}
 	}
 }
@@ -94,23 +95,25 @@ func TestStorePutStructs(t *testing.T) {
 
 	// Create items
 	numItems := 1000
-	items := make([]KeyStruct, numItems)
+	items := make([]KeyValue[TestUser], numItems)
 	for i := 0; i < numItems; i++ {
-		items[i] = KeyStruct{
-			Key: []byte(fmt.Sprintf("user:%05d", i)),
-			Value: TestUser{
-				ID:   int64(i),
-				Name: fmt.Sprintf("User %d", i),
-			},
+		user := TestUser{
+			ID:   int64(i),
+			Name: fmt.Sprintf("User %d", i),
+		}
+		items[i] = KeyValue[TestUser]{
+			Key:   []byte(fmt.Sprintf("user:%05d", i)),
+			Value: &user,
 		}
 	}
 
-	// Simple one-liner API
-	if err := store.PutStructs(items); err != nil {
+	// Parallel bulk insert
+	if err := PutStructs(store, items); err != nil {
 		t.Fatalf("PutStructs failed: %v", err)
 	}
 
-	// Verify all keys
+	// Verify all keys using msgpck decoder
+	dec := msgpck.GetStructDecoder[TestUser](false)
 	for i := 0; i < numItems; i++ {
 		key := []byte(fmt.Sprintf("user:%05d", i))
 		val, err := store.Get(key)
@@ -119,7 +122,7 @@ func TestStorePutStructs(t *testing.T) {
 			continue
 		}
 		var user TestUser
-		if err := msgpack.Unmarshal(val.Bytes, &user); err != nil {
+		if err := dec.Decode(val.Bytes, &user); err != nil {
 			t.Errorf("Decode failed: %v", err)
 			continue
 		}

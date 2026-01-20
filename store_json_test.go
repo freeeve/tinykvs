@@ -180,13 +180,13 @@ func TestStorePutGetStruct(t *testing.T) {
 
 	// Put struct
 	user := User{Name: "Alice", Email: "alice@example.com", Age: 30}
-	if err := store.PutStruct([]byte("user:alice"), user); err != nil {
+	if err := PutStruct(store, []byte("user:alice"), &user); err != nil {
 		t.Fatalf("PutStruct failed: %v", err)
 	}
 
 	// Get back into struct
 	var got User
-	if err := store.GetStruct([]byte("user:alice"), &got); err != nil {
+	if err := GetStructInto(store, []byte("user:alice"), &got); err != nil {
 		t.Fatalf("GetStruct failed: %v", err)
 	}
 
@@ -199,13 +199,13 @@ func TestStorePutGetStruct(t *testing.T) {
 		t.Fatalf("PutString failed: %v", err)
 	}
 	var wrongType User
-	if err := store.GetStruct([]byte("string:key"), &wrongType); err == nil {
+	if err := GetStructInto(store, []byte("string:key"), &wrongType); err == nil {
 		t.Error("GetStruct should fail for non-record type")
 	}
 
 	// Test GetStruct with missing key
 	var missing User
-	if err := store.GetStruct([]byte("missing:key"), &missing); err == nil {
+	if err := GetStructInto(store, []byte("missing:key"), &missing); err == nil {
 		t.Error("GetStruct should fail for missing key")
 	}
 }
@@ -234,13 +234,13 @@ func TestStorePutGetNestedStruct(t *testing.T) {
 		Name:    "Alice",
 		Address: Address{City: "NYC", Country: "USA"},
 	}
-	if err := store.PutStruct([]byte("user:alice"), user); err != nil {
+	if err := PutStruct(store, []byte("user:alice"), &user); err != nil {
 		t.Fatalf("PutStruct failed: %v", err)
 	}
 
 	// Get back into nested struct
 	var got User
-	if err := store.GetStruct([]byte("user:alice"), &got); err != nil {
+	if err := GetStructInto(store, []byte("user:alice"), &got); err != nil {
 		t.Fatalf("GetStruct failed: %v", err)
 	}
 

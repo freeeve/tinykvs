@@ -7,7 +7,7 @@ import (
 	"errors"
 	"math"
 
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/freeeve/msgpck"
 )
 
 // ValueType represents the type of stored value.
@@ -27,6 +27,57 @@ const (
 // inlineThreshold determines when to store data inline vs pointer.
 // Values smaller than this are stored directly in the record.
 const inlineThreshold = 64
+
+// maxDecodeLength is the maximum length we'll decode for variable-length values.
+// This prevents OOM from malicious inputs (e.g., crafted msgpack with huge lengths).
+const maxDecodeLength = 100 * 1024 * 1024 // 100MB
+
+// maxRecordLength is the maximum size for msgpack record data.
+// Records should be reasonably sized structured data, not massive blobs.
+const maxRecordLength = 1024 * 1024 // 1MB
+
+// validateMsgpackSize checks that msgpack data doesn't declare element counts
+// that are impossible given the data length. This prevents OOM attacks where
+// a small payload declares billions of entries.
+func validateMsgpackSize(data []byte) bool {
+	if len(data) == 0 {
+		return true
+	}
+	b := data[0]
+	switch {
+	case b >= 0x80 && b <= 0x8f: // fixmap: 0-15 entries
+		count := int(b & 0x0f)
+		return len(data) >= 1+count*2 // min 1 byte key + 1 byte value each
+	case b >= 0x90 && b <= 0x9f: // fixarray: 0-15 elements
+		count := int(b & 0x0f)
+		return len(data) >= 1+count // min 1 byte each
+	case b == 0xdc: // array16
+		if len(data) < 3 {
+			return false
+		}
+		count := int(data[1])<<8 | int(data[2])
+		return len(data) >= 3+count
+	case b == 0xdd: // array32
+		if len(data) < 5 {
+			return false
+		}
+		count := int(data[1])<<24 | int(data[2])<<16 | int(data[3])<<8 | int(data[4])
+		return len(data) >= 5+count
+	case b == 0xde: // map16
+		if len(data) < 3 {
+			return false
+		}
+		count := int(data[1])<<8 | int(data[2])
+		return len(data) >= 3+count*2
+	case b == 0xdf: // map32
+		if len(data) < 5 {
+			return false
+		}
+		count := int(data[1])<<24 | int(data[2])<<16 | int(data[3])<<8 | int(data[4])
+		return len(data) >= 5+count*2
+	}
+	return true // other types (strings, ints, etc.) are ok
+}
 
 // DataPointer references variable-length data stored in data blocks.
 // Used for strings/bytes larger than inlineThreshold.
@@ -98,7 +149,7 @@ func (v *Value) EncodedSize() int {
 		if v.Record == nil {
 			return 1 + 4 // type + length(0)
 		}
-		encoded, _ := msgpack.Marshal(v.Record)
+		encoded, _ := msgpck.MarshalCopy(v.Record)
 		return 1 + 4 + len(encoded) // type + length + msgpack data
 	case ValueTypeMsgpack:
 		return 1 + 4 + len(v.Bytes) // type + length + raw msgpack data
@@ -146,7 +197,7 @@ func appendEncodedValue(dst []byte, v Value) []byte {
 		if v.Record == nil {
 			dst = binary.LittleEndian.AppendUint32(dst, 0)
 		} else {
-			encoded, _ := msgpack.Marshal(v.Record)
+			encoded, _ := msgpck.MarshalCopy(v.Record)
 			dst = binary.LittleEndian.AppendUint32(dst, uint32(len(encoded)))
 			dst = append(dst, encoded...)
 		}
@@ -217,7 +268,7 @@ func DecodeValueZeroCopy(data []byte) (Value, int, error) {
 				return Value{}, 0, ErrInvalidValue
 			}
 			length := binary.LittleEndian.Uint32(data[2:])
-			if len(data) < 6+int(length) {
+			if length > maxDecodeLength || len(data) < 6+int(length) {
 				return Value{}, 0, ErrInvalidValue
 			}
 			// Zero-copy: slice into source buffer
@@ -230,12 +281,17 @@ func DecodeValueZeroCopy(data []byte) (Value, int, error) {
 			return Value{}, 0, ErrInvalidValue
 		}
 		length := binary.LittleEndian.Uint32(data[1:])
-		if len(data) < 5+int(length) {
+		if length > maxRecordLength || len(data) < 5+int(length) {
 			return Value{}, 0, ErrInvalidValue
 		}
 		if length > 0 {
-			v.Record = make(map[string]any)
-			if err := msgpack.Unmarshal(data[5:5+length], &v.Record); err != nil {
+			msgpackData := data[5 : 5+length]
+			if !validateMsgpackSize(msgpackData) {
+				return Value{}, 0, ErrInvalidValue
+			}
+			var err error
+			v.Record, err = msgpck.UnmarshalMapStringAny(msgpackData, false)
+			if err != nil {
 				return Value{}, 0, ErrInvalidValue
 			}
 		}
@@ -246,7 +302,7 @@ func DecodeValueZeroCopy(data []byte) (Value, int, error) {
 			return Value{}, 0, ErrInvalidValue
 		}
 		length := binary.LittleEndian.Uint32(data[1:])
-		if len(data) < 5+int(length) {
+		if length > maxDecodeLength || len(data) < 5+int(length) {
 			return Value{}, 0, ErrInvalidValue
 		}
 		// Zero-copy: slice into source buffer
@@ -318,7 +374,7 @@ func DecodeValue(data []byte) (Value, int, error) {
 				return Value{}, 0, ErrInvalidValue
 			}
 			length := binary.LittleEndian.Uint32(data[2:])
-			if len(data) < 6+int(length) {
+			if length > maxDecodeLength || len(data) < 6+int(length) {
 				return Value{}, 0, ErrInvalidValue
 			}
 			v.Bytes = make([]byte, length)
@@ -331,12 +387,17 @@ func DecodeValue(data []byte) (Value, int, error) {
 			return Value{}, 0, ErrInvalidValue
 		}
 		length := binary.LittleEndian.Uint32(data[1:])
-		if len(data) < 5+int(length) {
+		if length > maxRecordLength || len(data) < 5+int(length) {
 			return Value{}, 0, ErrInvalidValue
 		}
 		if length > 0 {
-			v.Record = make(map[string]any)
-			if err := msgpack.Unmarshal(data[5:5+length], &v.Record); err != nil {
+			msgpackData := data[5 : 5+length]
+			if !validateMsgpackSize(msgpackData) {
+				return Value{}, 0, ErrInvalidValue
+			}
+			var err error
+			v.Record, err = msgpck.UnmarshalMapStringAny(msgpackData, false)
+			if err != nil {
 				return Value{}, 0, ErrInvalidValue
 			}
 		}
@@ -347,7 +408,7 @@ func DecodeValue(data []byte) (Value, int, error) {
 			return Value{}, 0, ErrInvalidValue
 		}
 		length := binary.LittleEndian.Uint32(data[1:])
-		if len(data) < 5+int(length) {
+		if length > maxDecodeLength || len(data) < 5+int(length) {
 			return Value{}, 0, ErrInvalidValue
 		}
 		// Copy the bytes for safety
@@ -449,16 +510,12 @@ func MsgpackValue(data []byte) Value {
 
 // DecodeMsgpack decodes msgpack bytes into a record map.
 func DecodeMsgpack(data []byte) (map[string]any, error) {
-	var record map[string]any
-	if err := msgpack.Unmarshal(data, &record); err != nil {
-		return nil, err
-	}
-	return record, nil
+	return msgpck.UnmarshalMapStringAny(data, false)
 }
 
 // EncodeMsgpack encodes a record map to msgpack bytes.
 func EncodeMsgpack(record map[string]any) ([]byte, error) {
-	return msgpack.Marshal(record)
+	return msgpck.MarshalCopy(record)
 }
 
 // EncodeJson encodes any value to JSON bytes.

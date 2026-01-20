@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/blastrain/vitess-sqlparser/sqlparser"
+	"github.com/freeeve/msgpck"
 	"github.com/freeeve/tinykvs"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 // aggType represents an aggregation function type.
@@ -85,11 +85,13 @@ func (a *aggregator) extractNumeric(val tinykvs.Value) (float64, bool) {
 
 	// For record/msgpack types, extract the field
 	var record map[string]any
+	var err error
 	switch val.Type {
 	case tinykvs.ValueTypeRecord:
 		record = val.Record
 	case tinykvs.ValueTypeMsgpack:
-		if err := msgpack.Unmarshal(val.Bytes, &record); err != nil {
+		record, err = msgpck.UnmarshalMapStringAny(val.Bytes, false)
+		if err != nil {
 			return 0, false
 		}
 	default:
@@ -180,11 +182,13 @@ type valueFilter struct {
 func (vf *valueFilter) matches(val tinykvs.Value) bool {
 	// Extract the record
 	var record map[string]any
+	var err error
 	switch val.Type {
 	case tinykvs.ValueTypeRecord:
 		record = val.Record
 	case tinykvs.ValueTypeMsgpack:
-		if err := msgpack.Unmarshal(val.Bytes, &record); err != nil {
+		record, err = msgpck.UnmarshalMapStringAny(val.Bytes, false)
+		if err != nil {
 			return false
 		}
 	default:
@@ -680,11 +684,13 @@ func extractRowFields(key []byte, val tinykvs.Value, fields []string) []string {
 	row := []string{keyStr}
 
 	var record map[string]any
+	var err error
 	switch val.Type {
 	case tinykvs.ValueTypeRecord:
 		record = val.Record
 	case tinykvs.ValueTypeMsgpack:
-		if err := msgpack.Unmarshal(val.Bytes, &record); err != nil {
+		record, err = msgpck.UnmarshalMapStringAny(val.Bytes, false)
+		if err != nil {
 			// Can't decode, return NULLs for all fields
 			for range fields {
 				row = append(row, "NULL")
@@ -729,8 +735,8 @@ func formatValue(val tinykvs.Value) string {
 		jsonBytes, _ := json.Marshal(val.Record)
 		return string(jsonBytes)
 	case tinykvs.ValueTypeMsgpack:
-		var record map[string]any
-		if err := msgpack.Unmarshal(val.Bytes, &record); err != nil {
+		record, err := msgpck.UnmarshalMapStringAny(val.Bytes, false)
+		if err != nil {
 			return "(msgpack)"
 		}
 		jsonBytes, _ := json.Marshal(record)

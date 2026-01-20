@@ -4,33 +4,46 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/freeeve/msgpck"
 )
 
-// KeyStruct pairs a key with a struct value for bulk operations.
-type KeyStruct struct {
+// KeyValue pairs a key with a struct value for bulk operations.
+type KeyValue[T any] struct {
 	Key   []byte
-	Value any
+	Value *T
 }
 
-// putStructsParallel encodes and adds multiple structs in parallel.
-// Uses all available CPU cores for encoding, then appends results atomically.
-func (b *Batch) putStructsParallel(items []KeyStruct) error {
-	return b.putStructsParallelN(items, runtime.NumCPU())
-}
-
-// putStructsParallelN encodes and adds multiple structs using n workers.
-func (b *Batch) putStructsParallelN(items []KeyStruct, numWorkers int) error {
+// PutStructs writes multiple structs in parallel using cached encoder.
+// Parallelizes encoding across CPU cores, then writes atomically.
+func PutStructs[T any](s *Store, items []KeyValue[T]) error {
 	if len(items) == 0 {
 		return nil
 	}
 
+	batch := NewBatch()
+	if err := batchPutStructsParallel(batch, items, runtime.NumCPU()); err != nil {
+		return err
+	}
+
+	return s.WriteBatch(batch)
+}
+
+// batchPutStructsParallel encodes structs in parallel using cached encoder.
+func batchPutStructsParallel[T any](b *Batch, items []KeyValue[T], numWorkers int) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	enc := msgpck.GetStructEncoder[T]()
+
 	if numWorkers <= 1 || len(items) < numWorkers {
-		// Fall back to sequential for small batches
+		// Sequential for small batches
 		for _, item := range items {
-			if err := b.PutStruct(item.Key, item.Value); err != nil {
+			data, err := enc.EncodeCopy(item.Value)
+			if err != nil {
 				return err
 			}
+			b.Put(item.Key, MsgpackValue(data))
 		}
 		return nil
 	}
@@ -59,7 +72,7 @@ func (b *Batch) putStructsParallelN(items []KeyStruct, numWorkers int) error {
 			defer wg.Done()
 			for i := start; i < end; i++ {
 				item := items[i]
-				data, err := msgpack.Marshal(item.Value)
+				data, err := enc.EncodeCopy(item.Value)
 				if err != nil {
 					errOnce.Do(func() { firstErr = err })
 					return
@@ -77,25 +90,6 @@ func (b *Batch) putStructsParallelN(items []KeyStruct, numWorkers int) error {
 		return firstErr
 	}
 
-	// Append all results
 	b.ops = append(b.ops, results...)
 	return nil
-}
-
-// PutStructs writes multiple structs in parallel.
-// This is the fastest way to ingest many structs - it parallelizes encoding
-// across all CPU cores, then writes atomically.
-func (s *Store) PutStructs(items []KeyStruct) error {
-	if len(items) == 0 {
-		return nil
-	}
-
-	// Parallel encode
-	batch := NewBatch()
-	if err := batch.putStructsParallel(items); err != nil {
-		return err
-	}
-
-	// Write atomically
-	return s.WriteBatch(batch)
 }

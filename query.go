@@ -3,7 +3,7 @@ package tinykvs
 import (
 	"strings"
 
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/freeeve/msgpck"
 )
 
 // AggregateResult holds the result of an aggregation query.
@@ -152,7 +152,9 @@ func extractNumeric(val Value, field string) (float64, bool) {
 	case ValueTypeRecord:
 		record = val.Record
 	case ValueTypeMsgpack:
-		if err := msgpack.Unmarshal(val.Bytes, &record); err != nil {
+		var err error
+		record, err = msgpck.UnmarshalMapStringAny(val.Bytes, false)
+		if err != nil {
 			return 0, false
 		}
 	default:

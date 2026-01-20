@@ -138,7 +138,7 @@ func BenchmarkPutStruct(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		key := fmt.Sprintf("user:%08d", i)
-		store.PutStruct([]byte(key), user)
+		PutStruct(store, []byte(key), &user)
 	}
 }
 
@@ -161,7 +161,7 @@ func BenchmarkGetStruct(b *testing.B) {
 	}
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("user:%08d", i)
-		store.PutStruct([]byte(key), user)
+		PutStruct(store, []byte(key), &user)
 	}
 	store.Flush()
 
@@ -170,7 +170,7 @@ func BenchmarkGetStruct(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		key := fmt.Sprintf("user:%08d", i%n)
-		store.GetStruct([]byte(key), &dest)
+		GetStructInto(store, []byte(key), &dest)
 	}
 }
 
@@ -321,7 +321,7 @@ func BenchmarkPutStructIndividual(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		key := fmt.Sprintf("user:%08d", i)
-		store.PutStruct([]byte(key), user)
+		PutStruct(store, []byte(key), &user)
 	}
 }
 
@@ -347,7 +347,7 @@ func BenchmarkPutStructBatch100(b *testing.B) {
 		batch := NewBatch()
 		for j := 0; j < 100; j++ {
 			key := fmt.Sprintf("user:%08d:%04d", i, j)
-			batch.PutStruct([]byte(key), user)
+			BatchPutStruct(batch, []byte(key), &user)
 		}
 		store.WriteBatch(batch)
 	}
@@ -421,7 +421,7 @@ func BenchmarkBatchEncodeStructs(b *testing.B) {
 		batch := NewBatch()
 		for j := 0; j < 100; j++ {
 			key := fmt.Sprintf("user:%08d:%04d", i, j)
-			batch.PutStruct([]byte(key), user)
+			BatchPutStruct(batch, []byte(key), &user)
 		}
 	}
 }
@@ -456,15 +456,16 @@ func BenchmarkScanPrefixStructs(b *testing.B) {
 	defer store.Close()
 
 	// Pre-populate with 1000 structs
+	user := benchUser{
+		Name:    "Alice Smith",
+		Email:   "alice@example.com",
+		Age:     30,
+		Active:  true,
+		Balance: 1234.56,
+	}
 	for i := 0; i < 1000; i++ {
 		key := fmt.Sprintf("user:%04d", i)
-		store.PutStruct([]byte(key), benchUser{
-			Name:    "Alice Smith",
-			Email:   "alice@example.com",
-			Age:     30,
-			Active:  true,
-			Balance: 1234.56,
-		})
+		PutStruct(store, []byte(key), &user)
 	}
 	store.Flush()
 
@@ -520,15 +521,16 @@ func BenchmarkScanPrefixRaw(b *testing.B) {
 	defer store.Close()
 
 	// Pre-populate with 1000 structs
+	user := benchUser{
+		Name:    "Alice Smith",
+		Email:   "alice@example.com",
+		Age:     30,
+		Active:  true,
+		Balance: 1234.56,
+	}
 	for i := 0; i < 1000; i++ {
 		key := fmt.Sprintf("user:%04d", i)
-		store.PutStruct([]byte(key), benchUser{
-			Name:    "Alice Smith",
-			Email:   "alice@example.com",
-			Age:     30,
-			Active:  true,
-			Balance: 1234.56,
-		})
+		PutStruct(store, []byte(key), &user)
 	}
 	store.Flush()
 

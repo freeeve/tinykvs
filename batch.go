@@ -1,17 +1,14 @@
 package tinykvs
 
 import (
-	"bytes"
 	"reflect"
 
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/freeeve/msgpck"
 )
 
 // Batch accumulates multiple operations to be applied atomically.
 type Batch struct {
 	ops []batchOp
-	buf bytes.Buffer // Reusable buffer for encoding
-	enc *msgpack.Encoder
 }
 
 type batchOp struct {
@@ -22,9 +19,7 @@ type batchOp struct {
 
 // NewBatch creates a new batch for atomic writes.
 func NewBatch() *Batch {
-	b := &Batch{}
-	b.enc = msgpack.NewEncoder(&b.buf)
-	return b
+	return &Batch{}
 }
 
 // Put adds a put operation to the batch.
@@ -58,15 +53,11 @@ func (b *Batch) PutBytes(key []byte, value []byte) {
 }
 
 // PutMap adds a record put operation.
-// Uses a shared encoder buffer for better performance in bulk operations.
 func (b *Batch) PutMap(key []byte, fields map[string]any) error {
-	b.buf.Reset()
-	if err := b.enc.Encode(fields); err != nil {
+	data, err := msgpck.MarshalCopy(fields)
+	if err != nil {
 		return err
 	}
-	// Copy the encoded bytes since buffer will be reused
-	data := make([]byte, b.buf.Len())
-	copy(data, b.buf.Bytes())
 	b.Put(key, MsgpackValue(data))
 	return nil
 }
@@ -81,19 +72,6 @@ func (b *Batch) PutJson(key []byte, data any) error {
 	return nil
 }
 
-// PutStruct adds a struct put operation using msgpack serialization.
-// Uses a shared encoder buffer for better performance in bulk operations.
-func (b *Batch) PutStruct(key []byte, v any) error {
-	b.buf.Reset()
-	if err := b.enc.Encode(v); err != nil {
-		return err
-	}
-	// Copy the encoded bytes since buffer will be reused
-	data := make([]byte, b.buf.Len())
-	copy(data, b.buf.Bytes())
-	b.Put(key, MsgpackValue(data))
-	return nil
-}
 
 // Len returns the number of operations in the batch.
 func (b *Batch) Len() int {
@@ -103,7 +81,6 @@ func (b *Batch) Len() int {
 // Reset clears the batch for reuse.
 func (b *Batch) Reset() {
 	b.ops = b.ops[:0]
-	b.buf.Reset()
 }
 
 // WriteBatch atomically applies all operations in the batch.
