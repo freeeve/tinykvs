@@ -1020,8 +1020,6 @@ func (s *sstablePrefixSource) close() {
 // Keys are deduplicated (newest version wins) and tombstones are skipped.
 // Return false from the callback to stop iteration early.
 func (r *reader) ScanRange(start, end []byte, fn func(key []byte, value Value) bool) error {
-	// Snapshot state under brief lock to minimize blocking.
-	// Deep copy slices to avoid race with concurrent modifications.
 	r.mu.RLock()
 	memtable := r.memtable
 	immutables := copyImmutables(r.immutables)
@@ -1030,59 +1028,76 @@ func (r *reader) ScanRange(start, end []byte, fn func(key []byte, value Value) b
 	verify := r.opts.VerifyChecksums
 	r.mu.RUnlock()
 
-	// Build a range scanner with all sources
+	scanner := r.setupRangeScanner(start, end, memtable, immutables, levels, cache, verify)
+	defer scanner.close()
+
+	return runRangeScan(scanner, end, fn)
+}
+
+// setupRangeScanner creates and configures a range scanner with all sources.
+func (r *reader) setupRangeScanner(start, end []byte, memtable *memtable, immutables []*memtable, levels [][]*SSTable, cache *lruCache, verify bool) *rangeScanner {
 	scanner := newRangeScanner(start, end, cache, verify)
 
-	// Add memtable (highest priority - index 0)
 	scanner.addMemtable(memtable, 0)
 
-	// Add immutable memtables (newest first)
 	for i := len(immutables) - 1; i >= 0; i-- {
 		scanner.addMemtable(immutables[i], len(immutables)-i)
 	}
 
-	// Add SSTable levels
 	baseIdx := len(immutables) + 1
+	addRangeTables(scanner, levels, start, end, &baseIdx)
+
+	scanner.init()
+	return scanner
+}
+
+// addRangeTables adds SSTable sources that overlap with the range.
+func addRangeTables(scanner *rangeScanner, levels [][]*SSTable, start, end []byte, baseIdx *int) {
 	for level := 0; level < len(levels); level++ {
 		tables := levels[level]
 		if level == 0 {
-			// L0: add all tables that may overlap with range (newest first)
-			for i := len(tables) - 1; i >= 0; i-- {
-				if rangeOverlaps(start, end, tables[i].MinKey(), tables[i].MaxKey()) {
-					scanner.addSSTable(tables[i], baseIdx)
-					baseIdx++
-				}
-			}
+			addL0RangeTables(scanner, tables, start, end, baseIdx)
 		} else {
-			// L1+: add tables that overlap with range
-			for _, t := range tables {
-				if rangeOverlaps(start, end, t.MinKey(), t.MaxKey()) {
-					scanner.addSSTable(t, baseIdx)
-					baseIdx++
-				}
-			}
+			addSortedRangeTables(scanner, tables, start, end, baseIdx)
 		}
 	}
+}
 
-	scanner.init()
+// addL0RangeTables adds overlapping L0 tables (newest first).
+func addL0RangeTables(scanner *rangeScanner, tables []*SSTable, start, end []byte, baseIdx *int) {
+	for i := len(tables) - 1; i >= 0; i-- {
+		if rangeOverlaps(start, end, tables[i].MinKey(), tables[i].MaxKey()) {
+			scanner.addSSTable(tables[i], *baseIdx)
+			*baseIdx++
+		}
+	}
+}
 
-	// Iterate and call callback
+// addSortedRangeTables adds overlapping tables from sorted levels (L1+).
+func addSortedRangeTables(scanner *rangeScanner, tables []*SSTable, start, end []byte, baseIdx *int) {
+	for _, t := range tables {
+		if rangeOverlaps(start, end, t.MinKey(), t.MaxKey()) {
+			scanner.addSSTable(t, *baseIdx)
+			*baseIdx++
+		}
+	}
+}
+
+// runRangeScan iterates through scanner results and calls fn for each matching entry.
+func runRangeScan(scanner *rangeScanner, end []byte, fn func(key []byte, value Value) bool) error {
 	var lastKey []byte
 	for scanner.next() {
 		entry := scanner.entry()
 
-		// Skip duplicates (newer version already seen)
 		if lastKey != nil && CompareKeys(entry.Key, lastKey) == 0 {
 			continue
 		}
 		lastKey = entry.Key
 
-		// Skip tombstones
 		if entry.Value.IsTombstone() {
 			continue
 		}
 
-		// Check if we've passed the end
 		if CompareKeys(entry.Key, end) >= 0 {
 			break
 		}
@@ -1091,8 +1106,6 @@ func (r *reader) ScanRange(start, end []byte, fn func(key []byte, value Value) b
 			break
 		}
 	}
-
-	scanner.close()
 	return nil
 }
 
