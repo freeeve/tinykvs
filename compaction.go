@@ -196,6 +196,16 @@ type mergeResult struct {
 	uncompressedBytes uint64
 }
 
+// mergeState holds state during table merging.
+type mergeState struct {
+	writer            *sstableWriter
+	keysPerTable      uint
+	maxTableSize      uint64
+	currentKeys       uint
+	tables            []*SSTable
+	totalUncompressed uint64
+}
+
 // mergeTables merges multiple SSTables into new ones at target level.
 func (w *writer) mergeTables(tables []*SSTable, targetLevel int) (*mergeResult, error) {
 	if len(tables) == 0 {
@@ -205,14 +215,11 @@ func (w *writer) mergeTables(tables []*SSTable, targetLevel int) (*mergeResult, 
 	mergeIter := newMergeIterator(tables, w.store.cache, w.store.opts.VerifyChecksums)
 	defer mergeIter.Close()
 
-	keysPerTable := w.estimateKeysPerTable(tables)
-	maxTableSize := w.maxTableSize()
+	state := &mergeState{
+		keysPerTable: w.estimateKeysPerTable(tables),
+		maxTableSize: w.maxTableSize(),
+	}
 	isLastLevel := targetLevel >= w.store.opts.MaxLevels-1
-
-	var newTables []*SSTable
-	var sstWriter *sstableWriter
-	var currentKeys uint
-	var totalUncompressed uint64
 
 	for mergeIter.Next() {
 		entry := mergeIter.Entry()
@@ -221,54 +228,71 @@ func (w *writer) mergeTables(tables []*SSTable, targetLevel int) (*mergeResult, 
 			continue
 		}
 
-		if sstWriter == nil {
-			var err error
-			sstWriter, err = w.createSSTableWriter(keysPerTable)
-			if err != nil {
-				return nil, err
-			}
-			currentKeys = 0
-		}
-
-		if err := sstWriter.Add(entry); err != nil {
-			sstWriter.Abort()
+		if err := w.processMergeEntry(entry, state, targetLevel); err != nil {
 			return nil, err
-		}
-		currentKeys++
-
-		if currentKeys%100 == 0 && sstWriter.Size() >= maxTableSize {
-			sst, uncompressed, err := w.finishSSTable(sstWriter, targetLevel)
-			if err != nil {
-				return nil, err
-			}
-			totalUncompressed += uncompressed
-			newTables = append(newTables, sst)
-			sstWriter = nil
 		}
 	}
 
-	if sstWriter != nil {
-		sst, uncompressed, err := w.finishSSTable(sstWriter, targetLevel)
-		if err != nil {
-			return nil, err
-		}
-		totalUncompressed += uncompressed
-		newTables = append(newTables, sst)
+	if err := w.finalizeMerge(state, targetLevel); err != nil {
+		return nil, err
 	}
 
 	return &mergeResult{
-		tables:            newTables,
-		uncompressedBytes: totalUncompressed,
+		tables:            state.tables,
+		uncompressedBytes: state.totalUncompressed,
 	}, nil
+}
+
+// processMergeEntry handles writing a single entry during merge.
+func (w *writer) processMergeEntry(entry Entry, state *mergeState, targetLevel int) error {
+	if state.writer == nil {
+		var err error
+		state.writer, err = w.createSSTableWriter(state.keysPerTable)
+		if err != nil {
+			return err
+		}
+		state.currentKeys = 0
+	}
+
+	if err := state.writer.Add(entry); err != nil {
+		state.writer.Abort()
+		return err
+	}
+	state.currentKeys++
+
+	if state.currentKeys%100 == 0 && uint64(state.writer.Size()) >= state.maxTableSize {
+		return w.rotateTable(state, targetLevel)
+	}
+	return nil
+}
+
+// rotateTable finishes the current table and prepares for the next.
+func (w *writer) rotateTable(state *mergeState, targetLevel int) error {
+	sst, uncompressed, err := w.finishSSTable(state.writer, targetLevel)
+	if err != nil {
+		return err
+	}
+	state.totalUncompressed += uncompressed
+	state.tables = append(state.tables, sst)
+	state.writer = nil
+	return nil
+}
+
+// finalizeMerge finishes any remaining table data.
+func (w *writer) finalizeMerge(state *mergeState, targetLevel int) error {
+	if state.writer != nil {
+		return w.rotateTable(state, targetLevel)
+	}
+	return nil
 }
 
 // estimateKeysPerTable calculates expected keys per output table for bloom filter sizing.
 func (w *writer) estimateKeysPerTable(tables []*SSTable) uint {
 	var totalKeys uint
-	var totalBytes int64
+	var totalBytes uint64
 	for _, t := range tables {
 		totalKeys += uint(t.Footer.NumKeys)
-		totalBytes += t.Size()
+		totalBytes += uint64(t.Size())
 	}
 
 	maxTableSize := w.maxTableSize()
@@ -327,7 +351,7 @@ func (w *writer) maxLevelSize(level int) int64 {
 	return base
 }
 
-func (w *writer) maxTableSize() int64 {
+func (w *writer) maxTableSize() uint64 {
 	return 64 * 1024 * 1024 // 64MB per SSTable
 }
 
