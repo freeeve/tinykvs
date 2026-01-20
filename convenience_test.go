@@ -295,3 +295,288 @@ func TestValuesEqual(t *testing.T) {
 		})
 	}
 }
+
+func TestSetNumericOrPrimitive(t *testing.T) {
+	// Test int field with float64
+	var intVal int
+	rv := reflect.ValueOf(&intVal).Elem()
+	setNumericOrPrimitive(rv, float64(42))
+	if intVal != 42 {
+		t.Errorf("int from float64: got %d, want 42", intVal)
+	}
+
+	// Test int field with int64
+	setNumericOrPrimitive(rv, int64(100))
+	if intVal != 100 {
+		t.Errorf("int from int64: got %d, want 100", intVal)
+	}
+
+	// Test int field with int
+	setNumericOrPrimitive(rv, int(200))
+	if intVal != 200 {
+		t.Errorf("int from int: got %d, want 200", intVal)
+	}
+
+	// Test float field with float64
+	var floatVal float64
+	rv = reflect.ValueOf(&floatVal).Elem()
+	setNumericOrPrimitive(rv, float64(3.14))
+	if floatVal != 3.14 {
+		t.Errorf("float from float64: got %f, want 3.14", floatVal)
+	}
+
+	// Test float field with int64
+	setNumericOrPrimitive(rv, int64(50))
+	if floatVal != 50.0 {
+		t.Errorf("float from int64: got %f, want 50.0", floatVal)
+	}
+
+	// Test float field with int
+	setNumericOrPrimitive(rv, int(75))
+	if floatVal != 75.0 {
+		t.Errorf("float from int: got %f, want 75.0", floatVal)
+	}
+
+	// Test bool field
+	var boolVal bool
+	rv = reflect.ValueOf(&boolVal).Elem()
+	setNumericOrPrimitive(rv, true)
+	if !boolVal {
+		t.Error("bool should be true")
+	}
+
+	// Test string field
+	var strVal string
+	rv = reflect.ValueOf(&strVal).Elem()
+	setNumericOrPrimitive(rv, "hello")
+	if strVal != "hello" {
+		t.Errorf("string: got %q, want hello", strVal)
+	}
+}
+
+func TestGetStruct(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	type User struct {
+		Name  string `msgpack:"name"`
+		Email string `msgpack:"email"`
+		Age   int    `msgpack:"age"`
+	}
+
+	// Store a struct
+	user := User{Name: "Alice", Email: "alice@example.com", Age: 30}
+	if err := PutStruct(store, []byte("user:1"), &user); err != nil {
+		t.Fatalf("PutStruct failed: %v", err)
+	}
+
+	// Retrieve using GetStruct
+	got, err := GetStruct[User](store, []byte("user:1"))
+	if err != nil {
+		t.Fatalf("GetStruct failed: %v", err)
+	}
+	if got.Name != "Alice" || got.Email != "alice@example.com" || got.Age != 30 {
+		t.Errorf("got %+v, want {Alice alice@example.com 30}", got)
+	}
+
+	// Test with non-existent key
+	_, err = GetStruct[User](store, []byte("nonexistent"))
+	if err == nil {
+		t.Error("GetStruct with nonexistent key should fail")
+	}
+
+	// Test with wrong type
+	store.PutString([]byte("str"), "not a struct")
+	_, err = GetStruct[User](store, []byte("str"))
+	if err == nil {
+		t.Error("GetStruct on string value should fail")
+	}
+}
+
+func TestGetMapZeroCopy(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Store a map as msgpack
+	data := map[string]any{"name": "Alice", "age": int64(30)}
+	if err := store.PutMap([]byte("user:1"), data); err != nil {
+		t.Fatalf("PutMap failed: %v", err)
+	}
+
+	// Retrieve with zero-copy
+	var gotName string
+	err = store.GetMapZeroCopy([]byte("user:1"), func(m map[string]any) error {
+		gotName = m["name"].(string)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("GetMapZeroCopy failed: %v", err)
+	}
+	if gotName != "Alice" {
+		t.Errorf("name = %q, want Alice", gotName)
+	}
+
+	// Test with wrong type
+	store.PutString([]byte("str"), "not a map")
+	err = store.GetMapZeroCopy([]byte("str"), func(m map[string]any) error {
+		return nil
+	})
+	if err == nil {
+		t.Error("GetMapZeroCopy on string should fail")
+	}
+}
+
+func TestGetStructZeroCopy(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	type User struct {
+		Name string `msgpack:"name"`
+		Age  int    `msgpack:"age"`
+	}
+
+	user := User{Name: "Bob", Age: 25}
+	if err := PutStruct(store, []byte("user:1"), &user); err != nil {
+		t.Fatalf("PutStruct failed: %v", err)
+	}
+
+	var gotName string
+	err = GetStructZeroCopy(store, []byte("user:1"), func(u *User) error {
+		gotName = u.Name
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("GetStructZeroCopy failed: %v", err)
+	}
+	if gotName != "Bob" {
+		t.Errorf("name = %q, want Bob", gotName)
+	}
+
+	// Test with wrong type
+	store.PutString([]byte("str"), "not a struct")
+	err = GetStructZeroCopy(store, []byte("str"), func(u *User) error {
+		return nil
+	})
+	if err == nil {
+		t.Error("GetStructZeroCopy on string should fail")
+	}
+}
+
+func TestScanPrefixMapsZeroCopy(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Store some maps
+	for i := 0; i < 5; i++ {
+		data := map[string]any{"id": int64(i), "name": "user"}
+		if err := store.PutMap([]byte("user:"+string(rune('0'+i))), data); err != nil {
+			t.Fatalf("PutMap failed: %v", err)
+		}
+	}
+
+	// Also store a string to test skipping
+	store.PutString([]byte("user:str"), "not a map")
+
+	count := 0
+	err = store.ScanPrefixMapsZeroCopy([]byte("user:"), func(key []byte, m map[string]any) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefixMapsZeroCopy failed: %v", err)
+	}
+	if count != 5 {
+		t.Errorf("count = %d, want 5", count)
+	}
+}
+
+func TestScanPrefixStructsZeroCopy(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	type Item struct {
+		ID   int    `msgpack:"id"`
+		Name string `msgpack:"name"`
+	}
+
+	// Store some structs
+	for i := 0; i < 5; i++ {
+		item := Item{ID: i, Name: "item"}
+		if err := PutStruct(store, []byte("item:"+string(rune('0'+i))), &item); err != nil {
+			t.Fatalf("PutStruct failed: %v", err)
+		}
+	}
+
+	// Also store a string to test skipping
+	store.PutString([]byte("item:str"), "not a struct")
+
+	count := 0
+	err = ScanPrefixStructsZeroCopy(store, []byte("item:"), func(key []byte, item *Item) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefixStructsZeroCopy failed: %v", err)
+	}
+	if count != 5 {
+		t.Errorf("count = %d, want 5", count)
+	}
+}
+
+func TestScanRangeStructsZeroCopy(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, DefaultOptions(dir))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	type Item struct {
+		ID   int    `msgpack:"id"`
+		Name string `msgpack:"name"`
+	}
+
+	// Store some structs
+	for i := 0; i < 10; i++ {
+		item := Item{ID: i, Name: "item"}
+		key := []byte("item:" + string(rune('0'+i)))
+		if err := PutStruct(store, key, &item); err != nil {
+			t.Fatalf("PutStruct failed: %v", err)
+		}
+	}
+
+	// Also store a string in range to test skipping
+	store.PutString([]byte("item:str"), "not a struct")
+
+	count := 0
+	err = ScanRangeStructsZeroCopy(store, []byte("item:3"), []byte("item:7"), func(key []byte, item *Item) bool {
+		count++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ScanRangeStructsZeroCopy failed: %v", err)
+	}
+	if count != 4 {
+		t.Errorf("count = %d, want 4 (items 3,4,5,6)", count)
+	}
+}

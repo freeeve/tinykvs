@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/freeeve/tinykvs"
 )
@@ -1022,5 +1023,123 @@ func TestShellFlushError(t *testing.T) {
 	})
 	if !strings.Contains(output, "Error") && !strings.Contains(output, "closed") {
 		t.Logf("flush on closed store: %q", output)
+	}
+}
+
+func TestParseHexPrefix(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected []byte
+	}{
+		{"plain string", "user:", []byte("user:")},
+		{"0x prefix", "0x75736572", []byte("user")},
+		{"0X prefix uppercase", "0X75736572", []byte("user")},
+		{"x'' format", "x'75736572'", []byte("user")},
+		{"empty 0x", "0x", []byte{}},
+		{"empty x''", "x''", []byte{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseHexPrefix(tt.input)
+			if !bytes.Equal(result, tt.expected) {
+				t.Errorf("parseHexPrefix(%q) = %x, want %x", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestParseHexString(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected []byte
+	}{
+		{"empty", "", []byte{}},
+		{"single byte", "ff", []byte{0xff}},
+		{"multiple bytes", "010203", []byte{1, 2, 3}},
+		{"user as hex", "75736572", []byte("user")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseHexString(tt.input)
+			if !bytes.Equal(result, tt.expected) {
+				t.Errorf("parseHexString(%q) = %x, want %x", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGroupTablesByLevel(t *testing.T) {
+	tables := []tinykvs.PrefixTableInfo{
+		{Level: 0, TableID: 1},
+		{Level: 0, TableID: 2},
+		{Level: 1, TableID: 3},
+		{Level: 2, TableID: 4},
+		{Level: 2, TableID: 5},
+		{Level: 2, TableID: 6},
+	}
+
+	result := groupTablesByLevel(tables)
+
+	if len(result[0]) != 2 {
+		t.Errorf("L0 tables = %d, want 2", len(result[0]))
+	}
+	if len(result[1]) != 1 {
+		t.Errorf("L1 tables = %d, want 1", len(result[1]))
+	}
+	if len(result[2]) != 3 {
+		t.Errorf("L2 tables = %d, want 3", len(result[2]))
+	}
+}
+
+func TestFormatIntCommas(t *testing.T) {
+	tests := []struct {
+		input    int64
+		expected string
+	}{
+		{0, "0"},
+		{1, "1"},
+		{12, "12"},
+		{123, "123"},
+		{1234, "1,234"},
+		{12345, "12,345"},
+		{123456, "123,456"},
+		{1234567, "1,234,567"},
+		{-1234, "-1,234"},
+		{-1234567, "-1,234,567"},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%d", tt.input), func(t *testing.T) {
+			result := formatIntCommas(tt.input)
+			if result != tt.expected {
+				t.Errorf("formatIntCommas(%d) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFormatDuration(t *testing.T) {
+	tests := []struct {
+		name     string
+		duration time.Duration
+		contains string
+	}{
+		{"sub-second", 500 * time.Millisecond, "ms"},
+		{"one second", 1 * time.Second, "s"},
+		{"minutes", 90 * time.Second, "m"}, // "1m 30s"
+		{"hours", 2 * time.Hour, "h"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatDuration(tt.duration)
+			if !strings.Contains(result, tt.contains) {
+				t.Errorf("formatDuration(%v) = %q, want contains %q", tt.duration, result, tt.contains)
+			}
+		})
 	}
 }

@@ -704,3 +704,79 @@ func TestLoadSSTablesWithoutManifest(t *testing.T) {
 	stats := store.Stats()
 	t.Logf("After migration: L0=%d tables", stats.Levels[0].NumTables)
 }
+
+func TestExplainPrefix(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MemtableSize = 4096 // Small memtable to trigger flushes
+
+	store, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Insert data with different prefixes
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("user:%05d", i)
+		store.PutString([]byte(key), "userdata")
+	}
+	for i := 0; i < 50; i++ {
+		key := fmt.Sprintf("order:%05d", i)
+		store.PutString([]byte(key), "orderdata")
+	}
+	for i := 0; i < 25; i++ {
+		key := fmt.Sprintf("product:%05d", i)
+		store.PutString([]byte(key), "productdata")
+	}
+
+	// Flush to create SSTables
+	if err := store.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	// Test ExplainPrefix for "user:" prefix
+	results := store.ExplainPrefix([]byte("user:"))
+	if len(results) == 0 {
+		t.Error("ExplainPrefix(user:) returned no results")
+	}
+
+	foundMatch := false
+	for _, info := range results {
+		if info.HasMatch {
+			foundMatch = true
+			if len(info.FirstMatch) == 0 {
+				t.Error("HasMatch is true but FirstMatch is empty")
+			}
+			if string(info.FirstMatch[:5]) != "user:" {
+				t.Errorf("FirstMatch = %q, want user:* prefix", info.FirstMatch)
+			}
+		}
+		if !info.InRange {
+			t.Error("InRange should be true for returned results")
+		}
+	}
+	if !foundMatch {
+		t.Error("ExplainPrefix should find a match for user:")
+	}
+
+	// Test ExplainPrefix for non-existent prefix
+	results = store.ExplainPrefix([]byte("nonexistent:"))
+	for _, info := range results {
+		if info.HasMatch {
+			t.Error("ExplainPrefix(nonexistent:) should not find matches")
+		}
+	}
+
+	// Test ExplainPrefix for "order:" prefix
+	results = store.ExplainPrefix([]byte("order:"))
+	foundMatch = false
+	for _, info := range results {
+		if info.HasMatch {
+			foundMatch = true
+		}
+	}
+	if !foundMatch {
+		t.Error("ExplainPrefix should find a match for order:")
+	}
+}

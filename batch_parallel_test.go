@@ -131,3 +131,47 @@ func TestStorePutStructs(t *testing.T) {
 		}
 	}
 }
+
+func TestBatchPutStructsSequential(t *testing.T) {
+	// Test the sequential encoding path (numWorkers=1)
+	items := makeTestUsers(10)
+
+	batch := NewBatch()
+	// Use numWorkers=1 to hit encodeItemsSequential
+	if err := batchPutStructsParallel(batch, items, 1); err != nil {
+		t.Fatalf("batchPutStructsParallel failed: %v", err)
+	}
+
+	if batch.Len() != 10 {
+		t.Errorf("batch length = %d, want 10", batch.Len())
+	}
+}
+
+func TestBatchPutStructsSmallBatch(t *testing.T) {
+	// Test with fewer items than workers to hit sequential path
+	items := makeTestUsers(2)
+
+	batch := NewBatch()
+	// numWorkers > len(items) should use sequential path
+	if err := batchPutStructsParallel(batch, items, 8); err != nil {
+		t.Fatalf("batchPutStructsParallel failed: %v", err)
+	}
+
+	if batch.Len() != 2 {
+		t.Errorf("batch length = %d, want 2", batch.Len())
+	}
+}
+
+func TestBatchPutStructsEmpty(t *testing.T) {
+	// Test empty items
+	var items []KeyValue[TestUser]
+
+	batch := NewBatch()
+	if err := batchPutStructsParallel(batch, items, 4); err != nil {
+		t.Fatalf("batchPutStructsParallel with empty items failed: %v", err)
+	}
+
+	if batch.Len() != 0 {
+		t.Errorf("batch length = %d, want 0", batch.Len())
+	}
+}
