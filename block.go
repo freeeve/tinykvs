@@ -29,6 +29,10 @@ var decompressPools = [5]sync.Pool{
 
 var decompressPoolSizes = [5]int{4 * 1024, 16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024}
 
+// maxBlockSize is the maximum allowed uncompressed block size (64MB).
+// This prevents OOM from malformed blocks claiming huge uncompressed sizes.
+const maxBlockSize = 64 * 1024 * 1024
+
 func getDecompressBuffer(size int) []byte {
 	for i, poolSize := range decompressPoolSizes {
 		if size <= poolSize {
@@ -329,6 +333,11 @@ func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
 
 	if verifyChecksum && crc32.ChecksumIEEE(compressed) != checksum {
 		return nil, ErrChecksumMismatch
+	}
+
+	// Validate uncompressed size to prevent OOM from malformed data
+	if uncompressedSize > maxBlockSize {
+		return nil, ErrCorruptedData
 	}
 
 	// Get pooled buffer for decompression
