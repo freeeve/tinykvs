@@ -343,7 +343,7 @@ func (w *writer) flushImmutables() {
 	w.flushMu.Unlock()
 
 	for _, mt := range imm {
-		if err := w.flushmemtable(mt); err != nil {
+		if w.flushmemtable(mt) != nil {
 			// Log error, will retry on next tick
 			continue
 		}

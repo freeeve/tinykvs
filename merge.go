@@ -104,7 +104,7 @@ func newMergeIterator(tables []*SSTable, cache *lruCache, verify bool) *mergeIte
 	// Note: Iterators don't use the cache to avoid use-after-free issues
 	for i, t := range tables {
 		// Ensure index is loaded for lazy-loaded SSTables
-		if err := t.ensureIndex(); err != nil {
+		if t.ensureIndex() != nil {
 			continue // Skip tables that can't be loaded
 		}
 

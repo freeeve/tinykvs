@@ -292,7 +292,7 @@ func extractSQLValForLike(v *sqlparser.SQLVal, operator string) (string, bool) {
 }
 
 // extractStrValForLike handles string value extraction with hex LIKE pattern support.
-func extractStrValForLike(s string, operator string) (string, bool) {
+func extractStrValForLike(s, operator string) (string, bool) {
 	if operator != "like" {
 		return s, false
 	}

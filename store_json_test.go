@@ -126,7 +126,7 @@ func TestStorePutGetJson(t *testing.T) {
 	// GetJson on non-string should fail
 	store.PutInt64([]byte("num"), 42)
 	var dummy map[string]any
-	if err := store.GetJson([]byte("num"), &dummy); err == nil {
+	if store.GetJson([]byte("num"), &dummy) == nil {
 		t.Error("GetJson on int64 should fail")
 	}
 }
@@ -199,13 +199,13 @@ func TestStorePutGetStruct(t *testing.T) {
 		t.Fatalf("PutString failed: %v", err)
 	}
 	var wrongType User
-	if err := GetStructInto(store, []byte("string:key"), &wrongType); err == nil {
+	if GetStructInto(store, []byte("string:key"), &wrongType) == nil {
 		t.Error("GetStruct should fail for non-record type")
 	}
 
 	// Test GetStruct with missing key
 	var missing User
-	if err := GetStructInto(store, []byte("missing:key"), &missing); err == nil {
+	if GetStructInto(store, []byte("missing:key"), &missing) == nil {
 		t.Error("GetStruct should fail for missing key")
 	}
 }

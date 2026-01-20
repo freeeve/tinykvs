@@ -173,17 +173,17 @@ func TestMapToStruct(t *testing.T) {
 
 	// Test errors
 	var notPtr User
-	if err := mapToStruct(m, notPtr); err == nil {
+	if mapToStruct(m, notPtr) == nil {
 		t.Error("mapToStruct with non-pointer should fail")
 	}
 
 	var nilDest *User
-	if err := mapToStruct(m, nilDest); err == nil {
+	if mapToStruct(m, nilDest) == nil {
 		t.Error("mapToStruct with nil pointer should fail")
 	}
 
 	var notStruct string
-	if err := mapToStruct(m, &notStruct); err == nil {
+	if mapToStruct(m, &notStruct) == nil {
 		t.Error("mapToStruct with non-struct should fail")
 	}
 }

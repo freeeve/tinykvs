@@ -850,7 +850,7 @@ type sstablePrefixSource struct {
 }
 
 func (s *sstablePrefixSource) seekToPrefix() {
-	if err := s.sst.ensureIndex(); err != nil {
+	if s.sst.ensureIndex() != nil {
 		s.valid = false
 		return
 	}
@@ -864,7 +864,7 @@ func (s *sstablePrefixSource) seekToPrefix() {
 		return
 	}
 
-	if err := s.loadBlock(); err != nil {
+	if s.loadBlock() != nil {
 		s.valid = false
 		return
 	}
@@ -922,7 +922,7 @@ func (s *sstablePrefixSource) searchNextBlocks() {
 			s.valid = false
 			return
 		}
-		if err := s.loadBlock(); err != nil {
+		if s.loadBlock() != nil {
 			s.valid = false
 			return
 		}
@@ -1032,7 +1032,7 @@ func (s *sstablePrefixSource) next() bool {
 		return false
 	}
 
-	if err := s.loadBlock(); err != nil {
+	if s.loadBlock() != nil {
 		s.valid = false
 		return false
 	}
@@ -1410,7 +1410,7 @@ type sstableRangeSource struct {
 
 func (s *sstableRangeSource) seekToStart() {
 	// Ensure index is loaded for lazy-loaded SSTables
-	if err := s.sst.ensureIndex(); err != nil {
+	if s.sst.ensureIndex() != nil {
 		s.valid = false
 		return
 	}
@@ -1428,7 +1428,7 @@ func (s *sstableRangeSource) seekToStart() {
 	}
 
 	// Load the block
-	if err := s.loadBlock(); err != nil {
+	if s.loadBlock() != nil {
 		s.valid = false
 		return
 	}
@@ -1457,7 +1457,7 @@ func (s *sstableRangeSource) seekToStart() {
 		return
 	}
 
-	if err := s.loadBlock(); err != nil {
+	if s.loadBlock() != nil {
 		s.valid = false
 		return
 	}
@@ -1543,7 +1543,7 @@ func (s *sstableRangeSource) next() bool {
 		return false
 	}
 
-	if err := s.loadBlock(); err != nil {
+	if s.loadBlock() != nil {
 		s.valid = false
 		return false
 	}

@@ -48,7 +48,7 @@ func (b *Batch) PutInt64(key []byte, value int64) {
 }
 
 // PutBytes adds a bytes put operation.
-func (b *Batch) PutBytes(key []byte, value []byte) {
+func (b *Batch) PutBytes(key, value []byte) {
 	b.Put(key, BytesValue(value))
 }
 

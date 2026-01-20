@@ -155,7 +155,7 @@ func (s *Shell) importCSVRecords(reader *csv.Reader, header []string, format csv
 			continue
 		}
 
-		if err := s.store.Put(key, val); err != nil {
+		if s.store.Put(key, val) != nil {
 			errors++
 			continue
 		}
@@ -271,7 +271,7 @@ func parseAutoValue(s string) tinykvs.Value {
 	// Try JSON object
 	if strings.HasPrefix(s, "{") {
 		var record map[string]any
-		if err := json.Unmarshal([]byte(s), &record); err == nil {
+		if json.Unmarshal([]byte(s), &record) == nil {
 			return tinykvs.RecordValue(record)
 		}
 	}
@@ -313,7 +313,7 @@ func parseFieldValue(s string) any {
 	// Try JSON
 	if strings.HasPrefix(s, "{") || strings.HasPrefix(s, "[") {
 		var v any
-		if err := json.Unmarshal([]byte(s), &v); err == nil {
+		if json.Unmarshal([]byte(s), &v) == nil {
 			return v
 		}
 	}
@@ -323,7 +323,7 @@ func parseFieldValue(s string) any {
 
 // parseFieldValueWithHint parses a field value using an optional type hint
 // Type hints: "string", "int", "float", "bool", "json", or "" for auto-detect
-func parseFieldValueWithHint(s string, typeHint string) any {
+func parseFieldValueWithHint(s, typeHint string) any {
 	switch typeHint {
 	case "string", "str", "s":
 		return s
@@ -344,7 +344,7 @@ func parseFieldValueWithHint(s string, typeHint string) any {
 		return s
 	case "json", "j", "object":
 		var v any
-		if err := json.Unmarshal([]byte(s), &v); err == nil {
+		if json.Unmarshal([]byte(s), &v) == nil {
 			return v
 		}
 		return s

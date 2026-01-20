@@ -28,6 +28,9 @@ SPECIFIC_TARGET="${2:-}"
 # Limit parallel workers to avoid memory exhaustion (default: 4)
 FUZZ_PARALLEL="${FUZZ_PARALLEL:-4}"
 
+# Separator line for output formatting
+SEPARATOR="=========================================="
+
 # Create log directory
 DATE=$(date +%Y-%m-%d-%H%M%S)
 LOG_DIR="$PROJECT_ROOT/logs/fuzz-$DATE"
@@ -46,9 +49,9 @@ TOTAL_FINDINGS=0
 
 copy_corpus_to_testdata() {
     echo ""
-    echo "=========================================="
+    echo "$SEPARATOR"
     echo "Copying fuzz corpus to testdata/"
-    echo "=========================================="
+    echo "$SEPARATOR"
 
     local gocache_base="$(go env GOCACHE)/fuzz/github.com/freeeve/tinykvs"
     local testdata_fuzz="$PROJECT_ROOT/testdata/fuzz"
@@ -76,9 +79,9 @@ copy_corpus_to_testdata() {
 
 print_summary() {
     echo ""
-    echo "=========================================="
+    echo "$SEPARATOR"
     echo "FUZZ TESTING SUMMARY"
-    echo "=========================================="
+    echo "$SEPARATOR"
     echo "Log directory: $LOG_DIR"
     echo "Time per target: $TIME_PER_TARGET"
     echo ""
@@ -112,9 +115,9 @@ print_summary() {
 # Cleanup on exit
 cleanup() {
     echo ""
-    echo "=========================================="
+    echo "$SEPARATOR"
     echo "Fuzz testing interrupted or completed"
-    echo "=========================================="
+    echo "$SEPARATOR"
     copy_corpus_to_testdata
     print_summary
     exit 0
@@ -127,12 +130,12 @@ run_fuzz_target() {
     local logfile="$LOG_DIR/$target.log"
 
     echo ""
-    echo "=========================================="
+    echo "$SEPARATOR"
     echo "Running $target for $TIME_PER_TARGET"
     echo "Package: $pkg"
     echo "Log: $logfile"
     echo "Started: $(date)"
-    echo "=========================================="
+    echo "$SEPARATOR"
 
     # Run fuzz test, capture output
     # Use ^...$ anchors for exact match (otherwise FuzzDecodeValue matches FuzzDecodeValueZeroCopy)
@@ -172,9 +175,9 @@ is_in_list() {
     return 1
 }
 
-echo "=========================================="
+echo "$SEPARATOR"
 echo "TinyKVS Overnight Fuzz Testing"
-echo "=========================================="
+echo "$SEPARATOR"
 echo "Started: $(date)"
 echo "Time per target: $TIME_PER_TARGET"
 echo "Parallel workers: $FUZZ_PARALLEL"

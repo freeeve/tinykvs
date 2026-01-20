@@ -35,7 +35,7 @@ func (s *Store) PutString(key []byte, value string) error {
 }
 
 // PutBytes stores a byte slice value.
-func (s *Store) PutBytes(key []byte, value []byte) error {
+func (s *Store) PutBytes(key, value []byte) error {
 	return s.Put(key, BytesValue(value))
 }
 
@@ -410,13 +410,13 @@ func ScanPrefixStructs[T any](s *Store, prefix []byte, fn func(key []byte, val *
 		if v.Type != ValueTypeMsgpack {
 			// Fall back to reflection for legacy record types
 			var dest T
-			if err := decodeAsStruct(v, &dest); err != nil {
+			if decodeAsStruct(v, &dest) != nil {
 				return true
 			}
 			return fn(key, &dest)
 		}
 		var dest T
-		if err := dec.Decode(v.Bytes, &dest); err != nil {
+		if dec.Decode(v.Bytes, &dest) != nil {
 			return true // skip invalid entries
 		}
 		return fn(key, &dest)
@@ -431,13 +431,13 @@ func ScanRangeStructs[T any](s *Store, start, end []byte, fn func(key []byte, va
 		if v.Type != ValueTypeMsgpack {
 			// Fall back to reflection for legacy record types
 			var dest T
-			if err := decodeAsStruct(v, &dest); err != nil {
+			if decodeAsStruct(v, &dest) != nil {
 				return true
 			}
 			return fn(key, &dest)
 		}
 		var dest T
-		if err := dec.Decode(v.Bytes, &dest); err != nil {
+		if dec.Decode(v.Bytes, &dest) != nil {
 			return true // skip invalid entries
 		}
 		return fn(key, &dest)
@@ -451,7 +451,7 @@ func ScanPrefixJson[T any](s *Store, prefix []byte, fn func(key []byte, val *T) 
 			return true // skip non-JSON entries
 		}
 		var dest T
-		if err := DecodeJson(v.Bytes, &dest); err != nil {
+		if DecodeJson(v.Bytes, &dest) != nil {
 			return true // skip invalid entries
 		}
 		return fn(key, &dest)
@@ -465,7 +465,7 @@ func ScanRangeJson[T any](s *Store, start, end []byte, fn func(key []byte, val *
 			return true // skip non-JSON entries
 		}
 		var dest T
-		if err := DecodeJson(v.Bytes, &dest); err != nil {
+		if DecodeJson(v.Bytes, &dest) != nil {
 			return true // skip invalid entries
 		}
 		return fn(key, &dest)
@@ -609,7 +609,7 @@ func ScanPrefixStructsZeroCopy[T any](s *Store, prefix []byte, fn func(key []byt
 			return true // skip non-msgpack
 		}
 		var dest T
-		if err := dec.Decode(v.Bytes, &dest); err != nil {
+		if dec.Decode(v.Bytes, &dest) != nil {
 			return true // skip invalid
 		}
 		return fn(key, &dest)
@@ -624,7 +624,7 @@ func ScanRangeStructsZeroCopy[T any](s *Store, start, end []byte, fn func(key []
 			return true // skip non-msgpack
 		}
 		var dest T
-		if err := dec.Decode(v.Bytes, &dest); err != nil {
+		if dec.Decode(v.Bytes, &dest) != nil {
 			return true // skip invalid
 		}
 		return fn(key, &dest)

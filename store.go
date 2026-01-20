@@ -52,7 +52,7 @@ func Open(path string, opts Options) (*Store, error) {
 		return nil, fmt.Errorf("failed to open lock file: %w", err)
 	}
 
-	if err := acquireLock(lockFile); err != nil {
+	if acquireLock(lockFile) != nil {
 		lockFile.Close()
 		return nil, ErrStoreLocked
 	}

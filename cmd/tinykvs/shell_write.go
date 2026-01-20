@@ -51,14 +51,14 @@ func (s *Shell) storeInsertValue(key, value string, hexBytes []byte, isHex bool)
 
 	// Try msgpack first if it's hex data that looks like a msgpack map
 	if isHex && isMsgpackMap(hexBytes) {
-		if ok := s.tryStoreMsgpack(keyBytes, hexBytes); ok {
+		if s.tryStoreMsgpack(keyBytes, hexBytes) {
 			return true
 		}
 		// Fall through to store as bytes if msgpack decode fails
 	}
 
 	// Detect JSON and store as record
-	if ok := s.tryStoreJSON(keyBytes, value); ok {
+	if s.tryStoreJSON(keyBytes, value) {
 		return true
 	}
 
@@ -85,7 +85,7 @@ func (s *Shell) tryStoreJSON(key []byte, value string) bool {
 		return false
 	}
 	var record map[string]any
-	if err := json.Unmarshal([]byte(value), &record); err != nil {
+	if json.Unmarshal([]byte(value), &record) != nil {
 		return false
 	}
 	if err := s.store.PutMap(key, record); err != nil {
