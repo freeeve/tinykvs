@@ -217,214 +217,140 @@ func appendEncodedValue(dst []byte, v Value) []byte {
 // Caller must ensure data outlives the returned Value.
 // This is faster but the Value is only valid while data is valid.
 func DecodeValueZeroCopy(data []byte) (Value, int, error) {
-	if len(data) < 1 {
-		return Value{}, 0, ErrInvalidValue
-	}
-
-	v := Value{Type: ValueType(data[0])}
-	var consumed int
-
-	switch v.Type {
-	case ValueTypeInt64:
-		if len(data) < 9 {
-			return Value{}, 0, ErrInvalidValue
-		}
-		v.Int64 = int64(binary.LittleEndian.Uint64(data[1:]))
-		consumed = 9
-
-	case ValueTypeFloat64:
-		if len(data) < 9 {
-			return Value{}, 0, ErrInvalidValue
-		}
-		v.Float64 = math.Float64frombits(binary.LittleEndian.Uint64(data[1:]))
-		consumed = 9
-
-	case ValueTypeBool:
-		if len(data) < 2 {
-			return Value{}, 0, ErrInvalidValue
-		}
-		v.Bool = data[1] != 0
-		consumed = 2
-
-	case ValueTypeString, ValueTypeBytes:
-		if len(data) < 2 {
-			return Value{}, 0, ErrInvalidValue
-		}
-		isPointer := data[1] == 1
-		if isPointer {
-			if len(data) < 2+dataPointerSize {
-				return Value{}, 0, ErrInvalidValue
-			}
-			// Embed pointer data directly to avoid allocation
-			v.Pointer = &dataPointer{
-				FileID:      binary.LittleEndian.Uint32(data[2:]),
-				BlockOffset: binary.LittleEndian.Uint32(data[6:]),
-				DataOffset:  binary.LittleEndian.Uint16(data[10:]),
-				Length:      binary.LittleEndian.Uint32(data[12:]),
-			}
-			consumed = 2 + dataPointerSize
-		} else {
-			if len(data) < 6 {
-				return Value{}, 0, ErrInvalidValue
-			}
-			length := binary.LittleEndian.Uint32(data[2:])
-			if length > maxDecodeLength || len(data) < 6+int(length) {
-				return Value{}, 0, ErrInvalidValue
-			}
-			// Zero-copy: slice into source buffer
-			v.Bytes = data[6 : 6+length]
-			consumed = 6 + int(length)
-		}
-
-	case ValueTypeRecord:
-		if len(data) < 5 {
-			return Value{}, 0, ErrInvalidValue
-		}
-		length := binary.LittleEndian.Uint32(data[1:])
-		if length > maxRecordLength || len(data) < 5+int(length) {
-			return Value{}, 0, ErrInvalidValue
-		}
-		if length > 0 {
-			msgpackData := data[5 : 5+length]
-			if !validateMsgpackSize(msgpackData) {
-				return Value{}, 0, ErrInvalidValue
-			}
-			var err error
-			v.Record, err = msgpck.UnmarshalMapStringAny(msgpackData, false)
-			if err != nil {
-				return Value{}, 0, ErrInvalidValue
-			}
-		}
-		consumed = 5 + int(length)
-
-	case ValueTypeMsgpack:
-		if len(data) < 5 {
-			return Value{}, 0, ErrInvalidValue
-		}
-		length := binary.LittleEndian.Uint32(data[1:])
-		if length > maxDecodeLength || len(data) < 5+int(length) {
-			return Value{}, 0, ErrInvalidValue
-		}
-		// Zero-copy: slice into source buffer
-		v.Bytes = data[5 : 5+length]
-		consumed = 5 + int(length)
-
-	case ValueTypeTombstone:
-		consumed = 1
-
-	default:
-		return Value{}, 0, ErrInvalidValue
-	}
-
-	return v, consumed, nil
+	return decodeValueInternal(data, false)
 }
 
 // DecodeValue deserializes a value from bytes.
 // Returns the value and number of bytes consumed.
 func DecodeValue(data []byte) (Value, int, error) {
+	return decodeValueInternal(data, true)
+}
+
+// decodeValueInternal is the shared implementation for value decoding.
+// When copyBytes is true, byte data is copied for safety.
+// When copyBytes is false, the returned Value's Bytes field points into data.
+func decodeValueInternal(data []byte, copyBytes bool) (Value, int, error) {
 	if len(data) < 1 {
 		return Value{}, 0, ErrInvalidValue
 	}
 
 	v := Value{Type: ValueType(data[0])}
-	var consumed int
 
 	switch v.Type {
 	case ValueTypeInt64:
-		if len(data) < 9 {
-			return Value{}, 0, ErrInvalidValue
-		}
-		v.Int64 = int64(binary.LittleEndian.Uint64(data[1:]))
-		consumed = 9
-
+		return decodeInt64(data, v)
 	case ValueTypeFloat64:
-		if len(data) < 9 {
-			return Value{}, 0, ErrInvalidValue
-		}
-		v.Float64 = math.Float64frombits(binary.LittleEndian.Uint64(data[1:]))
-		consumed = 9
-
+		return decodeFloat64(data, v)
 	case ValueTypeBool:
-		if len(data) < 2 {
-			return Value{}, 0, ErrInvalidValue
-		}
-		v.Bool = data[1] != 0
-		consumed = 2
-
+		return decodeBool(data, v)
 	case ValueTypeString, ValueTypeBytes:
-		if len(data) < 2 {
-			return Value{}, 0, ErrInvalidValue
-		}
-		isPointer := data[1] == 1
-		if isPointer {
-			// Pointer to data block
-			if len(data) < 2+dataPointerSize {
-				return Value{}, 0, ErrInvalidValue
-			}
-			v.Pointer = &dataPointer{
-				FileID:      binary.LittleEndian.Uint32(data[2:]),
-				BlockOffset: binary.LittleEndian.Uint32(data[6:]),
-				DataOffset:  binary.LittleEndian.Uint16(data[10:]),
-				Length:      binary.LittleEndian.Uint32(data[12:]),
-			}
-			consumed = 2 + dataPointerSize
-		} else {
-			// Inline data
-			if len(data) < 6 {
-				return Value{}, 0, ErrInvalidValue
-			}
-			length := binary.LittleEndian.Uint32(data[2:])
-			if length > maxDecodeLength || len(data) < 6+int(length) {
-				return Value{}, 0, ErrInvalidValue
-			}
-			v.Bytes = make([]byte, length)
-			copy(v.Bytes, data[6:6+length])
-			consumed = 6 + int(length)
-		}
-
+		return decodeStringOrBytes(data, v, copyBytes)
 	case ValueTypeRecord:
-		if len(data) < 5 {
-			return Value{}, 0, ErrInvalidValue
-		}
-		length := binary.LittleEndian.Uint32(data[1:])
-		if length > maxRecordLength || len(data) < 5+int(length) {
-			return Value{}, 0, ErrInvalidValue
-		}
-		if length > 0 {
-			msgpackData := data[5 : 5+length]
-			if !validateMsgpackSize(msgpackData) {
-				return Value{}, 0, ErrInvalidValue
-			}
-			var err error
-			v.Record, err = msgpck.UnmarshalMapStringAny(msgpackData, false)
-			if err != nil {
-				return Value{}, 0, ErrInvalidValue
-			}
-		}
-		consumed = 5 + int(length)
-
+		return decodeRecord(data, v)
 	case ValueTypeMsgpack:
-		if len(data) < 5 {
-			return Value{}, 0, ErrInvalidValue
-		}
-		length := binary.LittleEndian.Uint32(data[1:])
-		if length > maxDecodeLength || len(data) < 5+int(length) {
-			return Value{}, 0, ErrInvalidValue
-		}
-		// Copy the bytes for safety
-		v.Bytes = make([]byte, length)
-		copy(v.Bytes, data[5:5+length])
-		consumed = 5 + int(length)
-
+		return decodeMsgpack(data, v, copyBytes)
 	case ValueTypeTombstone:
-		// No additional data
-		consumed = 1
-
+		return v, 1, nil
 	default:
 		return Value{}, 0, ErrInvalidValue
 	}
+}
 
-	return v, consumed, nil
+func decodeInt64(data []byte, v Value) (Value, int, error) {
+	if len(data) < 9 {
+		return Value{}, 0, ErrInvalidValue
+	}
+	v.Int64 = int64(binary.LittleEndian.Uint64(data[1:]))
+	return v, 9, nil
+}
+
+func decodeFloat64(data []byte, v Value) (Value, int, error) {
+	if len(data) < 9 {
+		return Value{}, 0, ErrInvalidValue
+	}
+	v.Float64 = math.Float64frombits(binary.LittleEndian.Uint64(data[1:]))
+	return v, 9, nil
+}
+
+func decodeBool(data []byte, v Value) (Value, int, error) {
+	if len(data) < 2 {
+		return Value{}, 0, ErrInvalidValue
+	}
+	v.Bool = data[1] != 0
+	return v, 2, nil
+}
+
+func decodeStringOrBytes(data []byte, v Value, copyBytes bool) (Value, int, error) {
+	if len(data) < 2 {
+		return Value{}, 0, ErrInvalidValue
+	}
+	isPointer := data[1] == 1
+	if isPointer {
+		if len(data) < 2+dataPointerSize {
+			return Value{}, 0, ErrInvalidValue
+		}
+		v.Pointer = &dataPointer{
+			FileID:      binary.LittleEndian.Uint32(data[2:]),
+			BlockOffset: binary.LittleEndian.Uint32(data[6:]),
+			DataOffset:  binary.LittleEndian.Uint16(data[10:]),
+			Length:      binary.LittleEndian.Uint32(data[12:]),
+		}
+		return v, 2 + dataPointerSize, nil
+	}
+
+	if len(data) < 6 {
+		return Value{}, 0, ErrInvalidValue
+	}
+	length := binary.LittleEndian.Uint32(data[2:])
+	if length > maxDecodeLength || len(data) < 6+int(length) {
+		return Value{}, 0, ErrInvalidValue
+	}
+	if copyBytes {
+		v.Bytes = make([]byte, length)
+		copy(v.Bytes, data[6:6+length])
+	} else {
+		v.Bytes = data[6 : 6+length]
+	}
+	return v, 6 + int(length), nil
+}
+
+func decodeRecord(data []byte, v Value) (Value, int, error) {
+	if len(data) < 5 {
+		return Value{}, 0, ErrInvalidValue
+	}
+	length := binary.LittleEndian.Uint32(data[1:])
+	if length > maxRecordLength || len(data) < 5+int(length) {
+		return Value{}, 0, ErrInvalidValue
+	}
+	if length > 0 {
+		msgpackData := data[5 : 5+length]
+		if !validateMsgpackSize(msgpackData) {
+			return Value{}, 0, ErrInvalidValue
+		}
+		var err error
+		v.Record, err = msgpck.UnmarshalMapStringAny(msgpackData, false)
+		if err != nil {
+			return Value{}, 0, ErrInvalidValue
+		}
+	}
+	return v, 5 + int(length), nil
+}
+
+func decodeMsgpack(data []byte, v Value, copyBytes bool) (Value, int, error) {
+	if len(data) < 5 {
+		return Value{}, 0, ErrInvalidValue
+	}
+	length := binary.LittleEndian.Uint32(data[1:])
+	if length > maxDecodeLength || len(data) < 5+int(length) {
+		return Value{}, 0, ErrInvalidValue
+	}
+	if copyBytes {
+		v.Bytes = make([]byte, length)
+		copy(v.Bytes, data[5:5+length])
+	} else {
+		v.Bytes = data[5 : 5+length]
+	}
+	return v, 5 + int(length), nil
 }
 
 // EncodeEntry serializes an entry (key + value + sequence) to bytes.
