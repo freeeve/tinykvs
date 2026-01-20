@@ -24,78 +24,88 @@ import (
 //   - k STARTS WITH x'10' || uint64_be(7341141)
 //   - k STARTS WITH byte(0x14) || uint64_be(28708) || fnv64('library-123')
 func preprocessFunctions(sql string) string {
-	// First expand individual functions to x'...' literals
-	sql = expandFunction(sql, "uint64_be", func(arg string) ([]byte, bool) {
-		val, err := parseUint(arg)
-		if err != nil {
-			return nil, false
-		}
-		b := make([]byte, 8)
-		for i := 7; i >= 0; i-- {
-			b[7-i] = byte(val >> (i * 8))
-		}
-		return b, true
-	})
+	// Expand each function type to x'...' literals
+	sql = expandFunction(sql, "uint64_be", encodeUint64BE)
+	sql = expandFunction(sql, "uint64_le", encodeUint64LE)
+	sql = expandFunction(sql, "uint32_be", encodeUint32BE)
+	sql = expandFunction(sql, "uint32_le", encodeUint32LE)
+	sql = expandFunction(sql, "byte", encodeByte)
+	sql = expandFunction(sql, "fnv64", encodeFNV64)
 
-	sql = expandFunction(sql, "uint64_le", func(arg string) ([]byte, bool) {
-		val, err := parseUint(arg)
-		if err != nil {
-			return nil, false
-		}
-		b := make([]byte, 8)
-		for i := 0; i < 8; i++ {
-			b[i] = byte(val >> (i * 8))
-		}
-		return b, true
-	})
+	// Concatenate adjacent x'...' || x'...' literals
+	return concatenateHexLiterals(sql)
+}
 
-	sql = expandFunction(sql, "uint32_be", func(arg string) ([]byte, bool) {
-		val, err := parseUint(arg)
-		if err != nil {
-			return nil, false
-		}
-		b := make([]byte, 4)
-		for i := 3; i >= 0; i-- {
-			b[3-i] = byte(val >> (i * 8))
-		}
-		return b, true
-	})
+// encodeUint64BE encodes a uint64 as 8 bytes big-endian.
+func encodeUint64BE(arg string) ([]byte, bool) {
+	val, err := parseUint(arg)
+	if err != nil {
+		return nil, false
+	}
+	b := make([]byte, 8)
+	for i := 7; i >= 0; i-- {
+		b[7-i] = byte(val >> (i * 8))
+	}
+	return b, true
+}
 
-	sql = expandFunction(sql, "uint32_le", func(arg string) ([]byte, bool) {
-		val, err := parseUint(arg)
-		if err != nil {
-			return nil, false
-		}
-		b := make([]byte, 4)
-		for i := 0; i < 4; i++ {
-			b[i] = byte(val >> (i * 8))
-		}
-		return b, true
-	})
+// encodeUint64LE encodes a uint64 as 8 bytes little-endian.
+func encodeUint64LE(arg string) ([]byte, bool) {
+	val, err := parseUint(arg)
+	if err != nil {
+		return nil, false
+	}
+	b := make([]byte, 8)
+	for i := 0; i < 8; i++ {
+		b[i] = byte(val >> (i * 8))
+	}
+	return b, true
+}
 
-	sql = expandFunction(sql, "byte", func(arg string) ([]byte, bool) {
-		val, err := parseUint(arg)
-		if err != nil || val > 255 {
-			return nil, false
-		}
-		return []byte{byte(val)}, true
-	})
+// encodeUint32BE encodes a uint32 as 4 bytes big-endian.
+func encodeUint32BE(arg string) ([]byte, bool) {
+	val, err := parseUint(arg)
+	if err != nil {
+		return nil, false
+	}
+	b := make([]byte, 4)
+	for i := 3; i >= 0; i-- {
+		b[3-i] = byte(val >> (i * 8))
+	}
+	return b, true
+}
 
-	sql = expandFunction(sql, "fnv64", func(arg string) ([]byte, bool) {
-		// Strip quotes if present
-		s := strings.Trim(arg, "'\"")
-		h := fnv64a(s)
-		b := make([]byte, 8)
-		for i := 7; i >= 0; i-- {
-			b[7-i] = byte(h >> (i * 8))
-		}
-		return b, true
-	})
+// encodeUint32LE encodes a uint32 as 4 bytes little-endian.
+func encodeUint32LE(arg string) ([]byte, bool) {
+	val, err := parseUint(arg)
+	if err != nil {
+		return nil, false
+	}
+	b := make([]byte, 4)
+	for i := 0; i < 4; i++ {
+		b[i] = byte(val >> (i * 8))
+	}
+	return b, true
+}
 
-	// Now concatenate adjacent x'...' || x'...' literals
-	sql = concatenateHexLiterals(sql)
+// encodeByte encodes a single byte value.
+func encodeByte(arg string) ([]byte, bool) {
+	val, err := parseUint(arg)
+	if err != nil || val > 255 {
+		return nil, false
+	}
+	return []byte{byte(val)}, true
+}
 
-	return sql
+// encodeFNV64 encodes the FNV-1a hash of a string as 8 bytes big-endian.
+func encodeFNV64(arg string) ([]byte, bool) {
+	s := strings.Trim(arg, "'\"")
+	h := fnv64a(s)
+	b := make([]byte, 8)
+	for i := 7; i >= 0; i-- {
+		b[7-i] = byte(h >> (i * 8))
+	}
+	return b, true
 }
 
 // parseUint parses a uint64 from decimal or hex (0x...) string
