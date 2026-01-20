@@ -268,25 +268,7 @@ func (s *Shell) printStats() {
 }
 
 func (s *Shell) explainPrefix(prefixStr string) {
-	// Parse prefix (handle hex format)
-	var prefix []byte
-	if strings.HasPrefix(prefixStr, "0x") || strings.HasPrefix(prefixStr, "0X") {
-		// Hex format
-		hexStr := prefixStr[2:]
-		prefix = make([]byte, len(hexStr)/2)
-		for i := 0; i < len(prefix); i++ {
-			fmt.Sscanf(hexStr[i*2:i*2+2], "%02x", &prefix[i])
-		}
-	} else if strings.HasPrefix(prefixStr, "x'") && strings.HasSuffix(prefixStr, "'") {
-		// SQL hex format x'...'
-		hexStr := prefixStr[2 : len(prefixStr)-1]
-		prefix = make([]byte, len(hexStr)/2)
-		for i := 0; i < len(prefix); i++ {
-			fmt.Sscanf(hexStr[i*2:i*2+2], "%02x", &prefix[i])
-		}
-	} else {
-		prefix = []byte(prefixStr)
-	}
+	prefix := parseHexPrefix(prefixStr)
 
 	tables := s.store.ExplainPrefix(prefix)
 
@@ -295,11 +277,7 @@ func (s *Shell) explainPrefix(prefixStr string) {
 		return
 	}
 
-	// Group by level
-	levelTables := make(map[int][]tinykvs.PrefixTableInfo)
-	for _, t := range tables {
-		levelTables[t.Level] = append(levelTables[t.Level], t)
-	}
+	levelTables := groupTablesByLevel(tables)
 
 	fmt.Printf("Tables with prefix %x in range:\n", prefix)
 	fmt.Println()
@@ -311,33 +289,68 @@ func (s *Shell) explainPrefix(prefixStr string) {
 			continue
 		}
 
-		matchCount := 0
-		for _, t := range lt {
-			if t.HasMatch {
-				matchCount++
-			}
-		}
-		totalInRange += len(lt)
-		totalWithMatch += matchCount
-
-		fmt.Printf("L%d: %d tables in range, %d with matching keys\n", level, len(lt), matchCount)
-
-		// Show details for tables with matches (limit to 10)
-		shown := 0
-		for _, t := range lt {
-			if t.HasMatch && shown < 10 {
-				fmt.Printf("  [%d] minKey=%x maxKey=%x firstMatch=%x (%d keys)\n",
-					t.TableID, t.MinKey, t.MaxKey, t.FirstMatch, t.NumKeys)
-				shown++
-			}
-		}
-		if matchCount > 10 {
-			fmt.Printf("  ... and %d more tables with matches\n", matchCount-10)
-		}
+		inRange, withMatch := printLevelDetails(level, lt)
+		totalInRange += inRange
+		totalWithMatch += withMatch
 	}
 
 	fmt.Println()
 	fmt.Printf("Summary: %d tables in range, %d with actual matches\n", totalInRange, totalWithMatch)
+}
+
+// parseHexPrefix parses a prefix string, handling hex formats (0x..., x'...').
+func parseHexPrefix(prefixStr string) []byte {
+	if strings.HasPrefix(prefixStr, "0x") || strings.HasPrefix(prefixStr, "0X") {
+		return parseHexString(prefixStr[2:])
+	}
+	if strings.HasPrefix(prefixStr, "x'") && strings.HasSuffix(prefixStr, "'") {
+		return parseHexString(prefixStr[2 : len(prefixStr)-1])
+	}
+	return []byte(prefixStr)
+}
+
+// parseHexString converts a hex string to bytes.
+func parseHexString(hexStr string) []byte {
+	prefix := make([]byte, len(hexStr)/2)
+	for i := 0; i < len(prefix); i++ {
+		fmt.Sscanf(hexStr[i*2:i*2+2], "%02x", &prefix[i])
+	}
+	return prefix
+}
+
+// groupTablesByLevel organizes tables into a map by their level.
+func groupTablesByLevel(tables []tinykvs.PrefixTableInfo) map[int][]tinykvs.PrefixTableInfo {
+	levelTables := make(map[int][]tinykvs.PrefixTableInfo)
+	for _, t := range tables {
+		levelTables[t.Level] = append(levelTables[t.Level], t)
+	}
+	return levelTables
+}
+
+// printLevelDetails prints information about tables at a given level and returns counts.
+func printLevelDetails(level int, tables []tinykvs.PrefixTableInfo) (inRange, withMatch int) {
+	matchCount := 0
+	for _, t := range tables {
+		if t.HasMatch {
+			matchCount++
+		}
+	}
+
+	fmt.Printf("L%d: %d tables in range, %d with matching keys\n", level, len(tables), matchCount)
+
+	shown := 0
+	for _, t := range tables {
+		if t.HasMatch && shown < 10 {
+			fmt.Printf("  [%d] minKey=%x maxKey=%x firstMatch=%x (%d keys)\n",
+				t.TableID, t.MinKey, t.MaxKey, t.FirstMatch, t.NumKeys)
+			shown++
+		}
+	}
+	if matchCount > 10 {
+		fmt.Printf("  ... and %d more tables with matches\n", matchCount-10)
+	}
+
+	return len(tables), matchCount
 }
 
 func cacheHitRate(cs tinykvs.CacheStats) float64 {
