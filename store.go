@@ -379,8 +379,8 @@ type PrefixTableInfo struct {
 	MinKey     []byte
 	MaxKey     []byte
 	NumKeys    uint64
-	InRange    bool // Prefix is within [MinKey, MaxKey]
-	HasMatch   bool // Table actually contains keys with this prefix
+	InRange    bool   // Prefix is within [MinKey, MaxKey]
+	HasMatch   bool   // Table actually contains keys with this prefix
 	FirstMatch []byte // First matching key (if HasMatch)
 }
 
@@ -401,60 +401,77 @@ func (s *Store) ExplainPrefix(prefix []byte) []PrefixTableInfo {
 				NumKeys: sst.Footer.NumKeys,
 			}
 
-			// Check if prefix is in range
 			info.InRange = hasKeyInRange(prefix, info.MinKey, info.MaxKey)
 
 			if info.InRange {
-				// Try to find an actual matching key using same logic as seekToPrefix
-				sst.ensureIndex()
-				blockIdx := sst.Index.Search(prefix)
-				if blockIdx < 0 {
-					// Prefix is before all keys - check if minKey has prefix
-					if hasPrefix(sst.Index.MinKey, prefix) {
-						blockIdx = 0
-					}
-				}
-
-				// Search through blocks (same as seekToPrefix forward scanning)
-				for blockIdx >= 0 && blockIdx < len(sst.Index.Entries) && !info.HasMatch {
-					ie := sst.Index.Entries[blockIdx]
-
-					// Check if this block could contain matching keys
-					blockFirstKey := ie.Key
-					if CompareKeys(blockFirstKey, prefix) > 0 && !hasPrefix(blockFirstKey, prefix) {
-						break // No keys with this prefix in this or later blocks
-					}
-
-					// Load block and check for match
-					blockData := make([]byte, ie.BlockSize)
-					if _, err := sst.file.ReadAt(blockData, int64(ie.BlockOffset)); err == nil {
-						if block, err := DecodeBlock(blockData, false); err == nil {
-							foundEntry := false
-							for _, entry := range block.Entries {
-								if CompareKeys(entry.Key, prefix) >= 0 {
-									foundEntry = true
-									if hasPrefix(entry.Key, prefix) {
-										info.HasMatch = true
-										info.FirstMatch = make([]byte, len(entry.Key))
-										copy(info.FirstMatch, entry.Key)
-									}
-									break
-								}
-							}
-							block.Release()
-							if foundEntry && !info.HasMatch {
-								break // Found entry >= prefix but no match
-							}
-						}
-					}
-					blockIdx++
-				}
+				info.HasMatch, info.FirstMatch = findPrefixInTable(sst, prefix)
 				results = append(results, info)
 			}
 		}
 	}
 
 	return results
+}
+
+// findPrefixInTable searches an SSTable for keys matching the given prefix.
+// Returns whether a match was found and the first matching key.
+func findPrefixInTable(sst *SSTable, prefix []byte) (bool, []byte) {
+	sst.ensureIndex()
+	blockIdx := sst.Index.Search(prefix)
+	if blockIdx < 0 {
+		if hasPrefix(sst.Index.MinKey, prefix) {
+			blockIdx = 0
+		} else {
+			return false, nil
+		}
+	}
+
+	for blockIdx >= 0 && blockIdx < len(sst.Index.Entries) {
+		ie := sst.Index.Entries[blockIdx]
+
+		if CompareKeys(ie.Key, prefix) > 0 && !hasPrefix(ie.Key, prefix) {
+			break
+		}
+
+		hasMatch, firstMatch, continueSearch := findPrefixInBlock(sst, ie, prefix)
+		if hasMatch {
+			return true, firstMatch
+		}
+		if !continueSearch {
+			break
+		}
+		blockIdx++
+	}
+
+	return false, nil
+}
+
+// findPrefixInBlock searches a single block for a prefix match.
+// Returns: hasMatch, firstMatch key, whether to continue searching.
+func findPrefixInBlock(sst *SSTable, ie IndexEntry, prefix []byte) (bool, []byte, bool) {
+	blockData := make([]byte, ie.BlockSize)
+	if _, err := sst.file.ReadAt(blockData, int64(ie.BlockOffset)); err != nil {
+		return false, nil, true
+	}
+
+	block, err := DecodeBlock(blockData, false)
+	if err != nil {
+		return false, nil, true
+	}
+	defer block.Release()
+
+	for _, entry := range block.Entries {
+		if CompareKeys(entry.Key, prefix) >= 0 {
+			if hasPrefix(entry.Key, prefix) {
+				firstMatch := make([]byte, len(entry.Key))
+				copy(firstMatch, entry.Key)
+				return true, firstMatch, false
+			}
+			return false, nil, false
+		}
+	}
+
+	return false, nil, true
 }
 
 // Errors
