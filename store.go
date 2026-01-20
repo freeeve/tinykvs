@@ -510,17 +510,37 @@ func (s *Store) recover() error {
 	return nil
 }
 
+// sstFile holds SSTable file info for loading.
+type sstFile struct {
+	id   uint32
+	path string
+}
+
 func (s *Store) loadSSTables() error {
-	entries, err := os.ReadDir(s.dir)
+	files, maxID, err := s.collectSSTableFiles()
 	if err != nil {
 		return err
 	}
 
-	// Collect SSTable file info
-	type sstFile struct {
-		id   uint32
-		path string
+	if len(files) == 0 {
+		atomic.StoreUint32(&s.nextID, maxID)
+		return nil
 	}
+
+	tables := s.loadSSTablesParallel(files)
+	s.organizeTables(tables)
+
+	atomic.StoreUint32(&s.nextID, maxID)
+	return nil
+}
+
+// collectSSTableFiles scans the directory for .sst files.
+func (s *Store) collectSSTableFiles() ([]sstFile, uint32, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, 0, err
+	}
+
 	var files []sstFile
 	var maxID uint32
 
@@ -529,13 +549,10 @@ func (s *Store) loadSSTables() error {
 			continue
 		}
 
-		// Parse ID from filename (e.g., "000001.sst")
-		name := strings.TrimSuffix(entry.Name(), ".sst")
-		id64, err := strconv.ParseUint(name, 10, 32)
-		if err != nil {
+		id, ok := parseSSTableID(entry.Name())
+		if !ok {
 			continue
 		}
-		id := uint32(id64)
 
 		if id > maxID {
 			maxID = id
@@ -547,23 +564,28 @@ func (s *Store) loadSSTables() error {
 		})
 	}
 
-	// Load SSTables in parallel
+	return files, maxID, nil
+}
+
+// parseSSTableID extracts the ID from an SSTable filename.
+func parseSSTableID(filename string) (uint32, bool) {
+	name := strings.TrimSuffix(filename, ".sst")
+	id64, err := strconv.ParseUint(name, 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(id64), true
+}
+
+// loadSSTablesParallel loads SSTables concurrently.
+func (s *Store) loadSSTablesParallel(files []sstFile) []*SSTable {
 	numWorkers := 8
 	if len(files) < numWorkers {
 		numWorkers = len(files)
 	}
-	if numWorkers == 0 {
-		atomic.StoreUint32(&s.nextID, maxID)
-		return nil
-	}
-
-	type result struct {
-		sst *SSTable
-		err error
-	}
 
 	jobs := make(chan sstFile, len(files))
-	results := make(chan result, len(files))
+	results := make(chan *SSTable, len(files))
 
 	// Start workers
 	var wg sync.WaitGroup
@@ -573,7 +595,9 @@ func (s *Store) loadSSTables() error {
 			defer wg.Done()
 			for f := range jobs {
 				sst, err := OpenSSTable(f.id, f.path)
-				results <- result{sst: sst, err: err}
+				if err == nil {
+					results <- sst
+				}
 			}
 		}()
 	}
@@ -584,29 +608,30 @@ func (s *Store) loadSSTables() error {
 	}
 	close(jobs)
 
-	// Wait for workers and close results
+	// Wait and collect
 	go func() {
 		wg.Wait()
 		close(results)
 	}()
 
-	// Collect results
-	for r := range results {
-		if r.err != nil {
-			// Log error but continue loading other files
-			continue
-		}
+	var tables []*SSTable
+	for sst := range results {
+		tables = append(tables, sst)
+	}
+	return tables
+}
 
-		// Add to appropriate level
-		level := r.sst.Level
+// organizeTables adds tables to levels and sorts them.
+func (s *Store) organizeTables(tables []*SSTable) {
+	for _, sst := range tables {
+		level := sst.Level
 		for len(s.levels) <= level {
 			s.levels = append(s.levels, nil)
 		}
-		s.levels[level] = append(s.levels[level], r.sst)
+		s.levels[level] = append(s.levels[level], sst)
 	}
 
 	// Sort L0 tables by ID (oldest first = lowest ID first)
-	// This is critical for correct compaction ordering
 	if len(s.levels) > 0 {
 		sortTablesByID(s.levels[0])
 	}
@@ -615,11 +640,6 @@ func (s *Store) loadSSTables() error {
 	for level := 1; level < len(s.levels); level++ {
 		sortTablesByMinKey(s.levels[level])
 	}
-
-	// Set next ID
-	atomic.StoreUint32(&s.nextID, maxID)
-
-	return nil
 }
 
 // loadSSTablesFromManifest loads SSTables using metadata from the manifest.
