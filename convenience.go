@@ -224,13 +224,9 @@ func convertToAny(rv reflect.Value) any {
 
 // mapToStruct populates a struct from a map using reflection.
 func mapToStruct(m map[string]any, dest any) error {
-	rv := reflect.ValueOf(dest)
-	if rv.Kind() != reflect.Ptr || rv.IsNil() {
-		return fmt.Errorf("dest must be a non-nil pointer to struct")
-	}
-	rv = rv.Elem()
-	if rv.Kind() != reflect.Struct {
-		return fmt.Errorf("dest must be a pointer to struct, got %v", rv.Kind())
+	rv, err := validateStructDest(dest)
+	if err != nil {
+		return err
 	}
 
 	rt := rv.Type()
@@ -240,17 +236,7 @@ func mapToStruct(m map[string]any, dest any) error {
 			continue
 		}
 
-		// Get field name from tags
-		name := field.Tag.Get("msgpack")
-		if name == "" {
-			name = field.Tag.Get("json")
-		}
-		if name == "" || name == "-" {
-			name = field.Name
-		}
-		if idx := strings.Index(name, ","); idx != -1 {
-			name = name[:idx]
-		}
+		name := getFieldMapKey(field)
 		if name == "-" {
 			continue
 		}
@@ -260,13 +246,40 @@ func mapToStruct(m map[string]any, dest any) error {
 			continue
 		}
 
-		fv := rv.Field(i)
-		if err := setFieldValue(fv, val); err != nil {
+		if err := setFieldValue(rv.Field(i), val); err != nil {
 			return fmt.Errorf("field %s: %w", name, err)
 		}
 	}
 
 	return nil
+}
+
+// validateStructDest validates that dest is a non-nil pointer to struct.
+func validateStructDest(dest any) (reflect.Value, error) {
+	rv := reflect.ValueOf(dest)
+	if rv.Kind() != reflect.Ptr || rv.IsNil() {
+		return reflect.Value{}, fmt.Errorf("dest must be a non-nil pointer to struct")
+	}
+	rv = rv.Elem()
+	if rv.Kind() != reflect.Struct {
+		return reflect.Value{}, fmt.Errorf("dest must be a pointer to struct, got %v", rv.Kind())
+	}
+	return rv, nil
+}
+
+// getFieldMapKey gets the map key for a struct field from tags.
+func getFieldMapKey(field reflect.StructField) string {
+	name := field.Tag.Get("msgpack")
+	if name == "" {
+		name = field.Tag.Get("json")
+	}
+	if name == "" || name == "-" {
+		return field.Name
+	}
+	if idx := strings.Index(name, ","); idx != -1 {
+		name = name[:idx]
+	}
+	return name
 }
 
 // setFieldValue sets a struct field from an any value.
