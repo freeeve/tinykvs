@@ -9,6 +9,8 @@ import (
 	"github.com/freeeve/tinykvs"
 )
 
+const msgErrFmt = "Error: %v\n"
+
 func (s *Shell) handleInsert(stmt *sqlparser.Insert) {
 	rows, ok := stmt.Rows.(sqlparser.Values)
 	if !ok || len(rows) == 0 {
@@ -71,7 +73,7 @@ func (s *Shell) tryStoreMsgpack(key, hexBytes []byte) bool {
 		return false
 	}
 	if err := s.store.PutMap(key, record); err != nil {
-		fmt.Printf("Error: %v\n", err)
+		fmt.Printf(msgErrFmt, err)
 		return false
 	}
 	return true
@@ -87,7 +89,7 @@ func (s *Shell) tryStoreJSON(key []byte, value string) bool {
 		return false
 	}
 	if err := s.store.PutMap(key, record); err != nil {
-		fmt.Printf("Error: %v\n", err)
+		fmt.Printf(msgErrFmt, err)
 		return false
 	}
 	return true
@@ -102,7 +104,7 @@ func (s *Shell) storeRawValue(key []byte, value string, hexBytes []byte, isHex b
 		err = s.store.PutString(key, value)
 	}
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
+		fmt.Printf(msgErrFmt, err)
 		return false
 	}
 	return true
@@ -136,7 +138,7 @@ func (s *Shell) handleUpdate(stmt *sqlparser.Update) {
 		var record map[string]any
 		if err := json.Unmarshal([]byte(newValue), &record); err == nil {
 			if err := s.store.PutMap([]byte(keyEquals), record); err != nil {
-				fmt.Printf("Error: %v\n", err)
+				fmt.Printf(msgErrFmt, err)
 				return
 			}
 			fmt.Println("UPDATE 1")
@@ -145,7 +147,7 @@ func (s *Shell) handleUpdate(stmt *sqlparser.Update) {
 	}
 
 	if err := s.store.PutString([]byte(keyEquals), newValue); err != nil {
-		fmt.Printf("Error: %v\n", err)
+		fmt.Printf(msgErrFmt, err)
 		return
 	}
 
@@ -165,7 +167,7 @@ func (s *Shell) handleDelete(stmt *sqlparser.Delete) {
 	if keyEquals != "" {
 		// Delete single key
 		if err := s.store.Delete([]byte(keyEquals)); err != nil {
-			fmt.Printf("Error: %v\n", err)
+			fmt.Printf(msgErrFmt, err)
 			return
 		}
 		fmt.Println("DELETE 1")
@@ -173,7 +175,7 @@ func (s *Shell) handleDelete(stmt *sqlparser.Delete) {
 		// Delete by prefix
 		deleted, err := s.store.DeletePrefix([]byte(keyPrefix))
 		if err != nil {
-			fmt.Printf("Error: %v\n", err)
+			fmt.Printf(msgErrFmt, err)
 			return
 		}
 		fmt.Printf("DELETE %d\n", deleted)
@@ -181,7 +183,7 @@ func (s *Shell) handleDelete(stmt *sqlparser.Delete) {
 		// Delete range
 		deleted, err := s.store.DeleteRange([]byte(keyStart), []byte(keyEnd))
 		if err != nil {
-			fmt.Printf("Error: %v\n", err)
+			fmt.Printf(msgErrFmt, err)
 			return
 		}
 		fmt.Printf("DELETE %d\n", deleted)

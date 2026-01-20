@@ -22,6 +22,17 @@ var (
 	GitCommit = "unknown"
 )
 
+// Common error and help message constants
+const (
+	msgDirRequired     = "msgDirRequired"
+	msgDirHelp         = "msgDirHelp"
+	msgErrOpenStore    = "Error opening store: %v\n"
+	msgErrDecodeHexKey = "Error decoding hex key: %v\n"
+	msgErrKeyRequired  = "Error: -key or -key-hex is required"
+	msgErr             = "Error: %v\n"
+	flagKeyHex         = "key-hex"
+)
+
 // versionString returns the version, only appending commit if not already in version
 func versionString() string {
 	if strings.Contains(Version, GitCommit) {
@@ -135,9 +146,9 @@ func requireDir(flagDir string) string {
 
 func cmdGet(args []string) {
 	fs := flag.NewFlagSet("get", flag.ExitOnError)
-	dir := fs.String("dir", "", "Path to store directory (required)")
+	dir := fs.String("dir", "", "msgDirRequired")
 	key := fs.String("key", "", "Key to get (string)")
-	keyHex := fs.String("key-hex", "", "Key to get (hex encoded)")
+	keyHex := fs.String(flagKeyHex, "", "Key to get (hex encoded)")
 	fs.Parse(args)
 
 	storeDir := requireDir(*dir)
@@ -147,13 +158,13 @@ func cmdGet(args []string) {
 		var err error
 		keyBytes, err = hex.DecodeString(*keyHex)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error decoding hex key: %v\n", err)
+			fmt.Fprintf(os.Stderr, msgErrDecodeHexKey, err)
 			os.Exit(1)
 		}
 	} else if *key != "" {
 		keyBytes = []byte(*key)
 	} else {
-		fmt.Fprintln(os.Stderr, "Error: -key or -key-hex is required")
+		fmt.Fprintln(os.Stderr, msgErrKeyRequired)
 		fs.Usage()
 		os.Exit(1)
 	}
@@ -161,7 +172,7 @@ func cmdGet(args []string) {
 	opts := tinykvs.DefaultOptions(storeDir)
 	store, err := tinykvs.Open(storeDir, opts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+		fmt.Fprintf(os.Stderr, msgErrOpenStore, err)
 		os.Exit(1)
 	}
 	defer store.Close()
@@ -172,7 +183,7 @@ func cmdGet(args []string) {
 			fmt.Println("Key not found")
 			os.Exit(0)
 		}
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, msgErr, err)
 		os.Exit(1)
 	}
 
@@ -191,10 +202,10 @@ type putFlags struct {
 
 func cmdPut(args []string) {
 	fs := flag.NewFlagSet("put", flag.ExitOnError)
-	dir := fs.String("dir", "", "Path to store directory (required)")
+	dir := fs.String("dir", "", "msgDirRequired")
 	pf := &putFlags{args: args}
 	fs.StringVar(&pf.key, "key", "", "Key (string)")
-	fs.StringVar(&pf.keyHex, "key-hex", "", "Key (hex encoded)")
+	fs.StringVar(&pf.keyHex, flagKeyHex, "", "Key (hex encoded)")
 	fs.StringVar(&pf.value, "value", "", "Value (string)")
 	fs.StringVar(&pf.valueHex, "value-hex", "", "Value (hex encoded)")
 	fs.Int64Var(&pf.valueInt, "value-int", 0, "Value (int64)")
@@ -222,13 +233,13 @@ func cmdPut(args []string) {
 	opts := tinykvs.DefaultOptions(storeDir)
 	store, err := tinykvs.Open(storeDir, opts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+		fmt.Fprintf(os.Stderr, msgErrOpenStore, err)
 		os.Exit(1)
 	}
 	defer store.Close()
 
 	if err := store.Put(keyBytes, val); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, msgErr, err)
 		os.Exit(1)
 	}
 
@@ -254,7 +265,7 @@ func parseCLIKey(key, keyHex string) ([]byte, error) {
 	if key != "" {
 		return []byte(key), nil
 	}
-	return nil, fmt.Errorf("Error: -key or -key-hex is required")
+	return nil, fmt.Errorf(msgErrKeyRequired)
 }
 
 // parseValue parses the value from put flags.
@@ -358,9 +369,9 @@ func containsFlag(args []string, flag string) bool {
 
 func cmdDelete(args []string) {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
-	dir := fs.String("dir", "", "Path to store directory (required)")
+	dir := fs.String("dir", "", "msgDirRequired")
 	key := fs.String("key", "", "Key to delete (string)")
-	keyHex := fs.String("key-hex", "", "Key to delete (hex encoded)")
+	keyHex := fs.String(flagKeyHex, "", "Key to delete (hex encoded)")
 	flush := fs.Bool("flush", false, "Flush after delete")
 	fs.Parse(args)
 
@@ -371,13 +382,13 @@ func cmdDelete(args []string) {
 		var err error
 		keyBytes, err = hex.DecodeString(*keyHex)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error decoding hex key: %v\n", err)
+			fmt.Fprintf(os.Stderr, msgErrDecodeHexKey, err)
 			os.Exit(1)
 		}
 	} else if *key != "" {
 		keyBytes = []byte(*key)
 	} else {
-		fmt.Fprintln(os.Stderr, "Error: -key or -key-hex is required")
+		fmt.Fprintln(os.Stderr, msgErrKeyRequired)
 		fs.Usage()
 		os.Exit(1)
 	}
@@ -385,13 +396,13 @@ func cmdDelete(args []string) {
 	opts := tinykvs.DefaultOptions(storeDir)
 	store, err := tinykvs.Open(storeDir, opts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+		fmt.Fprintf(os.Stderr, msgErrOpenStore, err)
 		os.Exit(1)
 	}
 	defer store.Close()
 
 	if err := store.Delete(keyBytes); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, msgErr, err)
 		os.Exit(1)
 	}
 
@@ -407,7 +418,7 @@ func cmdDelete(args []string) {
 
 func cmdScan(args []string) {
 	fs := flag.NewFlagSet("scan", flag.ExitOnError)
-	dir := fs.String("dir", "", "Path to store directory (required)")
+	dir := fs.String("dir", "", "msgDirRequired")
 	prefix := fs.String("prefix", "", "Key prefix (string)")
 	prefixHex := fs.String("prefix-hex", "", "Key prefix (hex encoded)")
 	limit := fs.Int("limit", 100, "Maximum number of results")
@@ -431,7 +442,7 @@ func cmdScan(args []string) {
 	opts := tinykvs.DefaultOptions(storeDir)
 	store, err := tinykvs.Open(storeDir, opts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+		fmt.Fprintf(os.Stderr, msgErrOpenStore, err)
 		os.Exit(1)
 	}
 	defer store.Close()
@@ -460,7 +471,7 @@ func cmdScan(args []string) {
 
 func cmdStats(args []string) {
 	fs := flag.NewFlagSet("stats", flag.ExitOnError)
-	dir := fs.String("dir", "", "Path to store directory (required)")
+	dir := fs.String("dir", "", "msgDirRequired")
 	fs.Parse(args)
 
 	storeDir := requireDir(*dir)
@@ -468,7 +479,7 @@ func cmdStats(args []string) {
 	opts := tinykvs.DefaultOptions(storeDir)
 	store, err := tinykvs.Open(storeDir, opts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+		fmt.Fprintf(os.Stderr, msgErrOpenStore, err)
 		os.Exit(1)
 	}
 	defer store.Close()
@@ -510,7 +521,7 @@ func cmdStats(args []string) {
 
 func cmdCompact(args []string) {
 	fs := flag.NewFlagSet("compact", flag.ExitOnError)
-	dir := fs.String("dir", "", "Path to store directory (required)")
+	dir := fs.String("dir", "", "msgDirRequired")
 	fs.Parse(args)
 
 	storeDir := requireDir(*dir)
@@ -518,7 +529,7 @@ func cmdCompact(args []string) {
 	opts := tinykvs.DefaultOptions(storeDir)
 	store, err := tinykvs.Open(storeDir, opts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+		fmt.Fprintf(os.Stderr, msgErrOpenStore, err)
 		os.Exit(1)
 	}
 	defer store.Close()
@@ -559,7 +570,7 @@ func cmdCompact(args []string) {
 
 func cmdRepair(args []string) {
 	fs := flag.NewFlagSet("repair", flag.ExitOnError)
-	dir := fs.String("dir", "", "Path to store directory")
+	dir := fs.String("dir", "", "msgDirHelp")
 	dryRun := fs.Bool("dry-run", false, "Show what would be deleted without deleting")
 	fs.Parse(args)
 
@@ -674,9 +685,9 @@ func parseUint32(s string) (uint32, error) {
 
 func cmdInfo(args []string) {
 	fs := flag.NewFlagSet("info", flag.ExitOnError)
-	dir := fs.String("dir", "", "Path to store directory")
+	dir := fs.String("dir", "", "msgDirHelp")
 	key := fs.String("key", "", "Key to look up (string)")
-	keyHex := fs.String("key-hex", "", "Key to look up (hex encoded)")
+	keyHex := fs.String(flagKeyHex, "", "Key to look up (hex encoded)")
 	fs.Parse(args)
 
 	storeDir := requireDir(*dir)
@@ -686,13 +697,13 @@ func cmdInfo(args []string) {
 		var err error
 		keyBytes, err = hex.DecodeString(*keyHex)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error decoding hex key: %v\n", err)
+			fmt.Fprintf(os.Stderr, msgErrDecodeHexKey, err)
 			os.Exit(1)
 		}
 	} else if *key != "" {
 		keyBytes = []byte(*key)
 	} else {
-		fmt.Fprintln(os.Stderr, "Error: -key or -key-hex is required")
+		fmt.Fprintln(os.Stderr, msgErrKeyRequired)
 		fs.Usage()
 		os.Exit(1)
 	}
@@ -700,7 +711,7 @@ func cmdInfo(args []string) {
 	opts := tinykvs.DefaultOptions(storeDir)
 	store, err := tinykvs.Open(storeDir, opts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+		fmt.Fprintf(os.Stderr, msgErrOpenStore, err)
 		os.Exit(1)
 	}
 	defer store.Close()
@@ -712,7 +723,7 @@ func cmdInfo(args []string) {
 		return
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, msgErr, err)
 		os.Exit(1)
 	}
 
@@ -749,7 +760,7 @@ func valueTypeName(t tinykvs.ValueType) string {
 
 func cmdExport(args []string) {
 	fs := flag.NewFlagSet("export", flag.ExitOnError)
-	dir := fs.String("dir", "", "Path to store directory")
+	dir := fs.String("dir", "", "msgDirHelp")
 	output := fs.String("output", "", "Output file path (required)")
 	prefix := fs.String("prefix", "", "Only export keys with this prefix")
 	prefixHex := fs.String("prefix-hex", "", "Only export keys with this prefix (hex)")
@@ -778,7 +789,7 @@ func cmdExport(args []string) {
 	opts := tinykvs.DefaultOptions(storeDir)
 	store, err := tinykvs.Open(storeDir, opts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+		fmt.Fprintf(os.Stderr, msgErrOpenStore, err)
 		os.Exit(1)
 	}
 	defer store.Close()
@@ -833,7 +844,7 @@ func cmdExport(args []string) {
 
 func cmdImport(args []string) {
 	fs := flag.NewFlagSet("import", flag.ExitOnError)
-	dir := fs.String("dir", "", "Path to store directory")
+	dir := fs.String("dir", "", "msgDirHelp")
 	input := fs.String("input", "", "Input file path (required)")
 	fs.Parse(args)
 
@@ -855,7 +866,7 @@ func cmdImport(args []string) {
 	opts := tinykvs.DefaultOptions(storeDir)
 	store, err := tinykvs.Open(storeDir, opts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+		fmt.Fprintf(os.Stderr, msgErrOpenStore, err)
 		os.Exit(1)
 	}
 	defer store.Close()
@@ -922,7 +933,7 @@ func importSingleRecord(store *tinykvs.Store, record []string) bool {
 
 func cmdShell(args []string) {
 	fs := flag.NewFlagSet("shell", flag.ExitOnError)
-	dir := fs.String("dir", "", "Path to store directory (required)")
+	dir := fs.String("dir", "", "msgDirRequired")
 	fs.Parse(args)
 
 	storeDir := requireDir(*dir)
@@ -930,7 +941,7 @@ func cmdShell(args []string) {
 	opts := tinykvs.DefaultOptions(storeDir)
 	store, err := tinykvs.Open(storeDir, opts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+		fmt.Fprintf(os.Stderr, msgErrOpenStore, err)
 		os.Exit(1)
 	}
 	defer store.Close()
