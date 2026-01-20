@@ -577,14 +577,46 @@ func TestScanPrefixJson(t *testing.T) {
 
 // TestAggregateWithNestedFields tests aggregations on nested msgpack fields.
 func TestAggregateWithNestedFields(t *testing.T) {
+	store := setupTestStoreWithStats(t)
+	defer store.Close()
+
+	t.Run("Sum", func(t *testing.T) {
+		assertSum(t, store, "stats:", "views", 1450)
+	})
+
+	t.Run("Avg", func(t *testing.T) {
+		assertAvgApprox(t, store, "stats:", "revenue", 24.75, 0.05)
+	})
+
+	t.Run("Count", func(t *testing.T) {
+		assertCount(t, store, "stats:", 10)
+	})
+
+	t.Run("Min", func(t *testing.T) {
+		assertMin(t, store, "stats:", "views", 100)
+	})
+
+	t.Run("Max", func(t *testing.T) {
+		assertMax(t, store, "stats:", "views", 190)
+	})
+
+	t.Run("Aggregate", func(t *testing.T) {
+		assertAggregate(t, store, "stats:", "views", 1450, 10, 100, 190)
+	})
+
+	t.Run("NestedField", func(t *testing.T) {
+		assertSum(t, store, "stats:", "metadata.score", 90)
+	})
+}
+
+func setupTestStoreWithStats(t *testing.T) *Store {
+	t.Helper()
 	dir := t.TempDir()
 	store, err := Open(dir, DefaultOptions(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
 
-	// Insert records with nested fields using msgpack
 	type Stats struct {
 		Views    int     `msgpack:"views"`
 		Clicks   int     `msgpack:"clicks"`
@@ -595,90 +627,88 @@ func TestAggregateWithNestedFields(t *testing.T) {
 	}
 
 	for i := 0; i < 10; i++ {
-		s := Stats{
-			Views:   100 + i*10,
-			Clicks:  10 + i,
-			Revenue: float64(i) * 5.5,
-		}
+		s := Stats{Views: 100 + i*10, Clicks: 10 + i, Revenue: float64(i) * 5.5}
 		s.Metadata.Score = i * 2
 		key := fmt.Sprintf("stats:%03d", i)
 		if err := PutStruct(store, []byte(key), &s); err != nil {
 			t.Fatalf("PutStruct failed: %v", err)
 		}
 	}
+	return store
+}
 
-	// Test Sum on nested field using store.Sum
-	sumViews, err := store.Sum([]byte("stats:"), "views")
+func assertSum(t *testing.T, store *Store, prefix, field string, want float64) {
+	t.Helper()
+	got, err := store.Sum([]byte(prefix), field)
 	if err != nil {
 		t.Fatalf("Sum failed: %v", err)
 	}
-	// Sum of 100, 110, 120, ..., 190 = 1450
-	if sumViews != 1450 {
-		t.Errorf("Sum(views) = %v, want 1450", sumViews)
+	if got != want {
+		t.Errorf("Sum(%s) = %v, want %v", field, got, want)
 	}
+}
 
-	// Test Avg on float field using store.Avg
-	avgRevenue, err := store.Avg([]byte("stats:"), "revenue")
+func assertAvgApprox(t *testing.T, store *Store, prefix, field string, want, tolerance float64) {
+	t.Helper()
+	got, err := store.Avg([]byte(prefix), field)
 	if err != nil {
 		t.Fatalf("Avg failed: %v", err)
 	}
-	// Avg of 0, 5.5, 11, 16.5, ..., 49.5 = 24.75
-	if avgRevenue < 24.7 || avgRevenue > 24.8 {
-		t.Errorf("Avg(revenue) = %v, want ~24.75", avgRevenue)
+	if got < want-tolerance || got > want+tolerance {
+		t.Errorf("Avg(%s) = %v, want ~%v", field, got, want)
 	}
+}
 
-	// Test Count using store.Count
-	count, err := store.Count([]byte("stats:"))
+func assertCount(t *testing.T, store *Store, prefix string, want int64) {
+	t.Helper()
+	got, err := store.Count([]byte(prefix))
 	if err != nil {
 		t.Fatalf("Count failed: %v", err)
 	}
-	if count != 10 {
-		t.Errorf("Count() = %d, want 10", count)
+	if got != want {
+		t.Errorf("Count() = %d, want %d", got, want)
 	}
+}
 
-	// Test Min and Max on views field
-	minViews, err := store.Min([]byte("stats:"), "views")
+func assertMin(t *testing.T, store *Store, prefix, field string, want float64) {
+	t.Helper()
+	got, err := store.Min([]byte(prefix), field)
 	if err != nil {
 		t.Fatalf("Min failed: %v", err)
 	}
-	if minViews != 100 {
-		t.Errorf("Min(views) = %v, want 100", minViews)
+	if got != want {
+		t.Errorf("Min(%s) = %v, want %v", field, got, want)
 	}
+}
 
-	maxViews, err := store.Max([]byte("stats:"), "views")
+func assertMax(t *testing.T, store *Store, prefix, field string, want float64) {
+	t.Helper()
+	got, err := store.Max([]byte(prefix), field)
 	if err != nil {
 		t.Fatalf("Max failed: %v", err)
 	}
-	if maxViews != 190 {
-		t.Errorf("Max(views) = %v, want 190", maxViews)
+	if got != want {
+		t.Errorf("Max(%s) = %v, want %v", field, got, want)
 	}
+}
 
-	// Test Aggregate (all at once) on views field
-	result, err := store.Aggregate([]byte("stats:"), "views")
+func assertAggregate(t *testing.T, store *Store, prefix, field string, wantSum float64, wantCount int64, wantMin, wantMax float64) {
+	t.Helper()
+	result, err := store.Aggregate([]byte(prefix), field)
 	if err != nil {
 		t.Fatalf("Aggregate failed: %v", err)
 	}
-	if result.Sum != 1450 {
-		t.Errorf("Aggregate.Sum = %v, want 1450", result.Sum)
+	if result.Sum != wantSum {
+		t.Errorf("Aggregate.Sum = %v, want %v", result.Sum, wantSum)
 	}
-	if result.Count != 10 {
-		t.Errorf("Aggregate.Count = %d, want 10", result.Count)
+	if result.Count != wantCount {
+		t.Errorf("Aggregate.Count = %d, want %d", result.Count, wantCount)
 	}
-	if result.Min != 100 {
-		t.Errorf("Aggregate.Min = %v, want 100", result.Min)
+	if result.Min != wantMin {
+		t.Errorf("Aggregate.Min = %v, want %v", result.Min, wantMin)
 	}
-	if result.Max != 190 {
-		t.Errorf("Aggregate.Max = %v, want 190", result.Max)
-	}
-
-	// Test nested field extraction (metadata.score)
-	sumScore, err := store.Sum([]byte("stats:"), "metadata.score")
-	if err != nil {
-		t.Fatalf("Sum on nested field failed: %v", err)
-	}
-	// Sum of 0, 2, 4, 6, 8, 10, 12, 14, 16, 18 = 90
-	if sumScore != 90 {
-		t.Errorf("Sum(metadata.score) = %v, want 90", sumScore)
+	if result.Max != wantMax {
+		t.Errorf("Aggregate.Max = %v, want %v", result.Max, wantMax)
 	}
 }
 
