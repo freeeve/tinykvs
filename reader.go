@@ -477,45 +477,44 @@ func hasPrefix(key, prefix []byte) bool {
 func hasKeyInRange(prefix, minKey, maxKey []byte) bool {
 	// Prefix is before or equal to maxKey AND prefix+\xff... is >= minKey
 	// Simplified: prefix <= maxKey (prefix-wise) AND minKey prefix-matches or is < prefix
-	if len(maxKey) >= len(prefix) {
-		for i := 0; i < len(prefix); i++ {
-			if prefix[i] < maxKey[i] {
-				break // prefix < maxKey prefix, OK
-			} else if prefix[i] > maxKey[i] {
-				return false // prefix > maxKey, no match possible
-			}
-		}
-	} else {
-		// maxKey is shorter than prefix - check if maxKey is a prefix of prefix
-		for i := 0; i < len(maxKey); i++ {
-			if prefix[i] < maxKey[i] {
-				break
-			} else if prefix[i] > maxKey[i] {
-				return false
-			}
-		}
+	if !isPrefixNotAfter(prefix, maxKey) {
+		return false
 	}
+	return couldHavePrefixMatch(prefix, minKey)
+}
 
-	// Check if minKey could have a prefix match
-	if len(minKey) >= len(prefix) {
-		for i := 0; i < len(prefix); i++ {
-			if minKey[i] < prefix[i] {
-				return true // minKey < prefix, might have prefix matches after minKey
-			} else if minKey[i] > prefix[i] {
-				return false // minKey > prefix+\xff..., no prefix matches
-			}
-		}
-		return true // minKey starts with prefix
+// isPrefixNotAfter returns true if prefix <= key (comparing only prefix length bytes).
+func isPrefixNotAfter(prefix, key []byte) bool {
+	compareLen := len(prefix)
+	if len(key) < compareLen {
+		compareLen = len(key)
 	}
-	// minKey is shorter - if minKey < prefix, OK
-	for i := 0; i < len(minKey); i++ {
+	for i := 0; i < compareLen; i++ {
+		if prefix[i] < key[i] {
+			return true // prefix < key
+		}
+		if prefix[i] > key[i] {
+			return false // prefix > key
+		}
+	}
+	return true // equal up to compareLen
+}
+
+// couldHavePrefixMatch returns true if minKey could have keys >= it that match prefix.
+func couldHavePrefixMatch(prefix, minKey []byte) bool {
+	compareLen := len(prefix)
+	if len(minKey) < compareLen {
+		compareLen = len(minKey)
+	}
+	for i := 0; i < compareLen; i++ {
 		if minKey[i] < prefix[i] {
-			return true
-		} else if minKey[i] > prefix[i] {
-			return false
+			return true // minKey < prefix, so keys after minKey could match
+		}
+		if minKey[i] > prefix[i] {
+			return false // minKey > prefix, so no keys with prefix possible
 		}
 	}
-	return true // minKey is prefix of prefix
+	return true // minKey starts with prefix or is prefix of prefix
 }
 
 // prefixScanner merges entries from memtables and SSTables for prefix scanning.
