@@ -306,142 +306,139 @@ func (b *blockBuilder) Entries() []BlockEntry {
 	return b.entries
 }
 
+// blockFooter holds parsed footer data.
+type blockFooter struct {
+	checksum         uint32
+	uncompressedSize uint32
+	compressedSize   uint32
+	compType         uint8
+	compressed       []byte
+}
+
 // DecodeBlock decompresses and parses a block.
 // The returned Block's entries reference the internal decompressed buffer,
 // so the Block should not be modified and is only valid while cached.
 // Call Block.Release() when done to return the buffer to the pool.
 func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
+	footer, err := parseBlockFooter(data, verifyChecksum)
+	if err != nil {
+		return nil, err
+	}
+
+	decompressed, pooled, err := decompressBlockData(footer)
+	if err != nil {
+		return nil, err
+	}
+
+	return parseBlockContents(decompressed, pooled)
+}
+
+// parseBlockFooter validates and parses the block footer.
+func parseBlockFooter(data []byte, verifyChecksum bool) (*blockFooter, error) {
 	if len(data) < blockFooterSize {
 		return nil, ErrCorruptedData
 	}
 
-	// Parse footer: checksum(4) + uncompressed_size(4) + compressed_size(4) + compression_type(1)
 	footer := data[len(data)-blockFooterSize:]
-	checksum := binary.LittleEndian.Uint32(footer[0:])
-	uncompressedSize := binary.LittleEndian.Uint32(footer[4:])
-	compressedSize := binary.LittleEndian.Uint32(footer[8:])
-	compType := footer[12]
-	compressed := data[:len(data)-blockFooterSize]
-
-	if uint32(len(compressed)) != compressedSize {
-		return nil, ErrCorruptedData
+	f := &blockFooter{
+		checksum:         binary.LittleEndian.Uint32(footer[0:]),
+		uncompressedSize: binary.LittleEndian.Uint32(footer[4:]),
+		compressedSize:   binary.LittleEndian.Uint32(footer[8:]),
+		compType:         footer[12],
+		compressed:       data[:len(data)-blockFooterSize],
 	}
 
-	if compType > compressionTypeNone {
+	if uint32(len(f.compressed)) != f.compressedSize {
 		return nil, ErrCorruptedData
 	}
-
-	if verifyChecksum && crc32.ChecksumIEEE(compressed) != checksum {
+	if f.compType > compressionTypeNone {
+		return nil, ErrCorruptedData
+	}
+	if verifyChecksum && crc32.ChecksumIEEE(f.compressed) != f.checksum {
 		return nil, ErrChecksumMismatch
 	}
-
-	// Validate uncompressed size to prevent OOM from malformed data
-	if uncompressedSize > maxBlockSize {
+	if f.uncompressedSize > maxBlockSize {
 		return nil, ErrCorruptedData
 	}
+	return f, nil
+}
 
-	// Get pooled buffer for decompression
-	buf := getDecompressBuffer(int(uncompressedSize))
+// decompressBlockData decompresses block data based on compression type.
+func decompressBlockData(f *blockFooter) (decompressed []byte, pooled bool, err error) {
+	buf := getDecompressBuffer(int(f.uncompressedSize))
+	pooled = true
 
-	// Decompress based on compression type
-	var decompressed []byte
-	var err error
-
-	// Track whether decompressed buffer came from pool
-	pooled := true
-
-	switch compType {
+	switch f.compType {
 	case compressionTypeSnappy:
-		// Validate decompressed length before allocating/decoding
-		// This catches corrupted footers and invalid snappy data early
-		decodedLen, err := snappy.DecodedLen(compressed)
-		if err != nil {
-			putDecompressBuffer(buf)
-			return nil, err
-		}
-		if decodedLen != int(uncompressedSize) {
-			putDecompressBuffer(buf)
-			return nil, ErrCorruptedData
-		}
-		// snappy.Decode checks len(dst), not cap(dst), so pre-size it
-		buf = buf[:uncompressedSize]
-		decompressed, err = snappy.Decode(buf, compressed)
-		if err != nil {
-			putDecompressBuffer(buf)
-			return nil, err
-		}
-		// Verify snappy used our buffer (defensive check)
-		if len(decompressed) > 0 && len(buf) > 0 && &decompressed[0] != &buf[0] {
-			// snappy allocated a new buffer - this shouldn't happen
-			// after DecodedLen validation, but handle it safely
-			putDecompressBuffer(buf)
-			pooled = false // decompressed is not from pool
-		}
+		decompressed, pooled, err = decompressSnappy(f, buf)
 	case compressionTypeNone:
-		decompressed = buf[:len(compressed)]
-		copy(decompressed, compressed)
-	default: // compressionTypeZstd (0) or legacy
-		decoder := zstdDecoderPool.Get().(*zstd.Decoder)
-		decompressed, err = decoder.DecodeAll(compressed, buf)
-		zstdDecoderPool.Put(decoder)
-		if err != nil {
-			putDecompressBuffer(buf)
-			return nil, err
-		}
-		// Check if zstd allocated a new buffer (can happen if buf was too small)
-		if len(decompressed) > 0 && len(buf) > 0 && &decompressed[0] != &buf[0] {
-			putDecompressBuffer(buf)
-			pooled = false
-		}
+		decompressed = buf[:len(f.compressed)]
+		copy(decompressed, f.compressed)
+	default:
+		decompressed, pooled, err = decompressZstd(f, buf)
 	}
 
-	// Parse header
+	if err != nil {
+		putDecompressBuffer(buf)
+	}
+	return decompressed, pooled, err
+}
+
+// decompressSnappy handles snappy decompression.
+func decompressSnappy(f *blockFooter, buf []byte) ([]byte, bool, error) {
+	decodedLen, err := snappy.DecodedLen(f.compressed)
+	if err != nil {
+		return nil, true, err
+	}
+	if decodedLen != int(f.uncompressedSize) {
+		return nil, true, ErrCorruptedData
+	}
+	buf = buf[:f.uncompressedSize]
+	decompressed, err := snappy.Decode(buf, f.compressed)
+	if err != nil {
+		return nil, true, err
+	}
+	pooled := !(len(decompressed) > 0 && len(buf) > 0 && &decompressed[0] != &buf[0])
+	if !pooled {
+		putDecompressBuffer(buf)
+	}
+	return decompressed, pooled, nil
+}
+
+// decompressZstd handles zstd decompression.
+func decompressZstd(f *blockFooter, buf []byte) ([]byte, bool, error) {
+	decoder := zstdDecoderPool.Get().(*zstd.Decoder)
+	decompressed, err := decoder.DecodeAll(f.compressed, buf)
+	zstdDecoderPool.Put(decoder)
+	if err != nil {
+		return nil, true, err
+	}
+	pooled := !(len(decompressed) > 0 && len(buf) > 0 && &decompressed[0] != &buf[0])
+	if !pooled {
+		putDecompressBuffer(buf)
+	}
+	return decompressed, pooled, nil
+}
+
+// parseBlockContents parses entries from decompressed block data.
+func parseBlockContents(decompressed []byte, pooled bool) (*Block, error) {
 	if len(decompressed) < 3 {
-		if pooled {
-			putDecompressBuffer(decompressed)
-		}
+		releaseIfPooled(decompressed, pooled)
 		return nil, ErrCorruptedData
 	}
 
 	blockType := decompressed[0]
 	numEntries := binary.LittleEndian.Uint16(decompressed[1:])
-
-	// Parse entries with zero-copy (point directly into decompressed buffer)
 	entries := make([]BlockEntry, numEntries)
 	pos := 3
 
 	for i := uint16(0); i < numEntries; i++ {
-		if pos+4 > len(decompressed) {
-			if pooled {
-				putDecompressBuffer(decompressed)
-			}
-			return nil, ErrCorruptedData
+		var err error
+		pos, err = parseBlockEntry(decompressed, pos, &entries[i])
+		if err != nil {
+			releaseIfPooled(decompressed, pooled)
+			return nil, err
 		}
-		keyLen := int(binary.LittleEndian.Uint32(decompressed[pos:]))
-		pos += 4
-
-		if pos+keyLen+4 > len(decompressed) {
-			if pooled {
-				putDecompressBuffer(decompressed)
-			}
-			return nil, ErrCorruptedData
-		}
-		// Zero-copy: slice into decompressed buffer
-		entries[i].Key = decompressed[pos : pos+keyLen]
-		pos += keyLen
-
-		valLen := int(binary.LittleEndian.Uint32(decompressed[pos:]))
-		pos += 4
-
-		if pos+valLen > len(decompressed) {
-			if pooled {
-				putDecompressBuffer(decompressed)
-			}
-			return nil, ErrCorruptedData
-		}
-		// Zero-copy: slice into decompressed buffer
-		entries[i].Value = decompressed[pos : pos+valLen]
-		pos += valLen
 	}
 
 	return &Block{
@@ -450,6 +447,39 @@ func DecodeBlock(data []byte, verifyChecksum bool) (*Block, error) {
 		buffer:  decompressed,
 		pooled:  pooled,
 	}, nil
+}
+
+// parseBlockEntry parses a single entry from decompressed data at pos.
+func parseBlockEntry(data []byte, pos int, entry *BlockEntry) (int, error) {
+	if pos+4 > len(data) {
+		return 0, ErrCorruptedData
+	}
+	keyLen := int(binary.LittleEndian.Uint32(data[pos:]))
+	pos += 4
+
+	if pos+keyLen+4 > len(data) {
+		return 0, ErrCorruptedData
+	}
+	entry.Key = data[pos : pos+keyLen]
+	pos += keyLen
+
+	valLen := int(binary.LittleEndian.Uint32(data[pos:]))
+	pos += 4
+
+	if pos+valLen > len(data) {
+		return 0, ErrCorruptedData
+	}
+	entry.Value = data[pos : pos+valLen]
+	pos += valLen
+
+	return pos, nil
+}
+
+// releaseIfPooled returns buffer to pool if it was pooled.
+func releaseIfPooled(buf []byte, pooled bool) {
+	if pooled {
+		putDecompressBuffer(buf)
+	}
 }
 
 // searchBlock performs binary search within a block for a key.
