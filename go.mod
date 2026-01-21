@@ -8,6 +8,7 @@ require (
 	github.com/freeeve/msgpck v0.1.4
 	github.com/golang/snappy v1.0.0
 	github.com/klauspost/compress v1.18.3
+	github.com/minio/minlz v1.0.2-0.20260119185444-845e64f85661
 	github.com/peterh/liner v1.2.2
 )
 

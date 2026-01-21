@@ -549,6 +549,7 @@ func TestCompressionTypes(t *testing.T) {
 		{"zstd", CompressionZstd},
 		{"snappy", CompressionSnappy},
 		{"none", CompressionNone},
+		{"minlz", CompressionMinLZ},
 	}
 
 	for _, tc := range tests {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/golang/snappy"
 	"github.com/klauspost/compress/zstd"
+	"github.com/minio/minlz"
 )
 
 // Pooled zstd decoder for efficient reuse
@@ -112,6 +113,7 @@ const (
 	compressionTypeZstd   uint8 = 0
 	compressionTypeSnappy uint8 = 1
 	compressionTypeNone   uint8 = 2
+	compressionTypeMinLZ  uint8 = 3
 )
 
 // BlockEntry represents a key-value pair within a block.
@@ -254,6 +256,24 @@ func (b *blockBuilder) BuildWithCompression(blockType uint8, compressionType Com
 		compressed = b.compressBuf[:len(buf)]
 		copy(compressed, buf)
 		compType = compressionTypeNone
+	case CompressionMinLZ:
+		// Map compression level to minlz level
+		level := minlz.LevelFastest
+		if compressionLevel >= 3 {
+			level = minlz.LevelSmallest
+		} else if compressionLevel >= 2 {
+			level = minlz.LevelBalanced
+		}
+		var err error
+		compressed, err = minlz.Encode(b.compressBuf[:0], buf, level)
+		if err != nil {
+			return nil, err
+		}
+		// Save buffer if it was reallocated
+		if cap(compressed) > cap(b.compressBuf) {
+			b.compressBuf = compressed[:0]
+		}
+		compType = compressionTypeMinLZ
 	default: // CompressionZstd
 		encoder := getEncoder(compressionLevel)
 		// Reuse compressBuf for zstd output
@@ -351,7 +371,7 @@ func parseBlockFooter(data []byte, verifyChecksum bool) (*blockFooter, error) {
 	if uint32(len(f.compressed)) != f.compressedSize {
 		return nil, ErrCorruptedData
 	}
-	if f.compType > compressionTypeNone {
+	if f.compType > compressionTypeMinLZ {
 		return nil, ErrCorruptedData
 	}
 	if verifyChecksum && crc32.ChecksumIEEE(f.compressed) != f.checksum {
@@ -374,6 +394,8 @@ func decompressBlockData(f *blockFooter) (decompressed []byte, pooled bool, err 
 	case compressionTypeNone:
 		decompressed = buf[:len(f.compressed)]
 		copy(decompressed, f.compressed)
+	case compressionTypeMinLZ:
+		decompressed, pooled, err = decompressMinLZ(f, buf)
 	default:
 		decompressed, pooled, err = decompressZstd(f, buf)
 	}
@@ -410,6 +432,27 @@ func decompressZstd(f *blockFooter, buf []byte) ([]byte, bool, error) {
 	decoder := zstdDecoderPool.Get().(*zstd.Decoder)
 	decompressed, err := decoder.DecodeAll(f.compressed, buf)
 	zstdDecoderPool.Put(decoder)
+	if err != nil {
+		return nil, true, err
+	}
+	pooled := !(len(decompressed) > 0 && len(buf) > 0 && &decompressed[0] != &buf[0])
+	if !pooled {
+		putDecompressBuffer(buf)
+	}
+	return decompressed, pooled, nil
+}
+
+// decompressMinLZ handles minlz decompression.
+func decompressMinLZ(f *blockFooter, buf []byte) ([]byte, bool, error) {
+	decodedLen, err := minlz.DecodedLen(f.compressed)
+	if err != nil {
+		return nil, true, err
+	}
+	if decodedLen != int(f.uncompressedSize) {
+		return nil, true, ErrCorruptedData
+	}
+	buf = buf[:f.uncompressedSize]
+	decompressed, err := minlz.Decode(buf, f.compressed)
 	if err != nil {
 		return nil, true, err
 	}

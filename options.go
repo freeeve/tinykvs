@@ -21,11 +21,12 @@ type Options struct {
 	BlockSize int
 
 	// CompressionType determines which compression algorithm to use.
-	// Default: CompressionZstd
+	// Default: CompressionMinLZ
 	CompressionType CompressionType
 
-	// CompressionLevel is the zstd compression level (ignored for snappy).
-	// 1 = fastest, 3 = default, higher = better compression.
+	// CompressionLevel is the compression level (ignored for snappy/none).
+	// For zstd: 1 = fastest, 3 = default, higher = better compression.
+	// For minlz: 1 = fastest, 2 = balanced, 3 = smallest.
 	// Default: 1 (fastest)
 	CompressionLevel int
 
@@ -112,6 +113,8 @@ const (
 	CompressionSnappy
 	// CompressionNone disables compression.
 	CompressionNone
+	// CompressionMinLZ uses minlz compression (very fast, good compression).
+	CompressionMinLZ
 )
 
 // DefaultOptions returns production-ready defaults for the given directory.
@@ -121,7 +124,8 @@ func DefaultOptions(dir string) Options {
 		MemtableSize:        4 * 1024 * 1024,  // 4MB
 		BlockCacheSize:      64 * 1024 * 1024, // 64MB
 		BlockSize:           16 * 1024,        // 16KB - fast random access
-		CompressionLevel:    1,                // zstd fastest
+		CompressionType:     CompressionMinLZ, // minlz - fast with good compression
+		CompressionLevel:    1,                // fastest
 		BloomFPRate:         0.01,             // 1% false positive
 		CompactionStyle:     CompactionStyleLeveled,
 		L0CompactionTrigger: 4,

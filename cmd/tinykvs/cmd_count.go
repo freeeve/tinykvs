@@ -37,23 +37,32 @@ type blockPrefixStats struct {
 	uncompressedSize int64
 }
 
-func cmdCount(args []string) {
-	fs := flag.NewFlagSet("count", flag.ExitOnError)
+func (c *CLI) cmdCount(args []string) int {
+	fs := flag.NewFlagSet("count", flag.ContinueOnError)
+	fs.SetOutput(c.Stderr)
 	dir := fs.String("dir", "", "Path to store directory (required)")
 	prefixLen := fs.Int("prefix-len", 1, "Number of prefix bytes to group by")
 	workers := fs.Int("workers", 8, "Number of parallel workers")
-	fs.Parse(args)
-
-	storeDir := requireDir(*dir)
-
-	if *prefixLen < 1 || *prefixLen > 8 {
-		fmt.Fprintln(os.Stderr, "Error: -prefix-len must be between 1 and 8")
-		os.Exit(1)
+	if err := fs.Parse(args); err != nil {
+		return 1
 	}
 
-	tables := openStoreAndGetTables(storeDir)
+	storeDir, ok := c.requireDir(*dir)
+	if !ok {
+		return 1
+	}
 
-	fmt.Fprintf(os.Stderr, "Scanning %d SSTables with %d workers (prefix length: %d)...\n",
+	if *prefixLen < 1 || *prefixLen > 8 {
+		fmt.Fprintln(c.Stderr, "Error: -prefix-len must be between 1 and 8")
+		return 1
+	}
+
+	tables, code := c.openStoreAndGetTables(storeDir)
+	if code != 0 {
+		return code
+	}
+
+	fmt.Fprintf(c.Stderr, "Scanning %d SSTables with %d workers (prefix length: %d)...\n",
 		len(tables), *workers, *prefixLen)
 
 	ctx := &countContext{
@@ -65,29 +74,30 @@ func cmdCount(args []string) {
 	workerStats := runCountWorkers(ctx, tables, *workers)
 	merged := mergeWorkerStats(workerStats)
 
-	printCountSummary(ctx, len(tables))
-	printCountResults(merged, ctx.total)
+	c.printCountSummary(ctx, len(tables))
+	c.printCountResults(merged, ctx.total)
+	return 0
 }
 
 // openStoreAndGetTables opens the store for locking and returns the table list.
-func openStoreAndGetTables(storeDir string) map[uint32]*tinykvs.TableMeta {
+func (c *CLI) openStoreAndGetTables(storeDir string) (map[uint32]*tinykvs.TableMeta, int) {
 	opts := tinykvs.DefaultOptions(storeDir)
 	store, err := tinykvs.Open(storeDir, opts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(c.Stderr, "Error opening store: %v\n", err)
+		return nil, 1
 	}
 	defer store.Close()
 
 	manifestPath := filepath.Join(storeDir, "MANIFEST")
 	manifest, err := tinykvs.OpenManifest(manifestPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening manifest: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(c.Stderr, "Error opening manifest: %v\n", err)
+		return nil, 1
 	}
 	tables := manifest.Tables()
 	manifest.Close()
-	return tables
+	return tables, 0
 }
 
 // runCountWorkers processes tables in parallel and returns per-worker stats.
@@ -230,15 +240,15 @@ func mergeWorkerStats(workerStats []map[string]*prefixStats) map[string]*prefixS
 }
 
 // printCountSummary prints the processing summary to stderr.
-func printCountSummary(ctx *countContext, numTables int) {
+func (c *CLI) printCountSummary(ctx *countContext, numTables int) {
 	overallRatio := float64(ctx.totalUncompressed) / float64(ctx.totalCompressed)
-	fmt.Fprintf(os.Stderr, "\rProcessed %d tables, %d total keys\n", numTables, ctx.total)
-	fmt.Fprintf(os.Stderr, "Compressed: %s, Uncompressed: %s, Ratio: %.2fx\n\n",
+	fmt.Fprintf(c.Stderr, "\rProcessed %d tables, %d total keys\n", numTables, ctx.total)
+	fmt.Fprintf(c.Stderr, "Compressed: %s, Uncompressed: %s, Ratio: %.2fx\n\n",
 		formatBytes(ctx.totalCompressed), formatBytes(ctx.totalUncompressed), overallRatio)
 }
 
 // printCountResults prints the sorted prefix statistics table.
-func printCountResults(merged map[string]*prefixStats, total int64) {
+func (c *CLI) printCountResults(merged map[string]*prefixStats, total int64) {
 	type kv struct {
 		prefix string
 		stats  *prefixStats
@@ -251,12 +261,12 @@ func printCountResults(merged map[string]*prefixStats, total int64) {
 		return sorted[i].stats.count > sorted[j].stats.count
 	})
 
-	fmt.Printf("%-20s %12s %7s %10s %12s %6s\n", "Prefix", "Count", "Pct", "Compressed", "Uncompressed", "Ratio")
-	fmt.Println(strings.Repeat("-", 73))
+	fmt.Fprintf(c.Stdout, "%-20s %12s %7s %10s %12s %6s\n", "Prefix", "Count", "Pct", "Compressed", "Uncompressed", "Ratio")
+	fmt.Fprintln(c.Stdout, strings.Repeat("-", 73))
 	for _, kv := range sorted {
 		countPct := float64(kv.stats.count) / float64(total) * 100
 		ratio := float64(kv.stats.uncompressedSize) / float64(kv.stats.compressedSize)
-		fmt.Printf("%-20s %12d %6.2f%% %10s %12s %5.2fx\n",
+		fmt.Fprintf(c.Stdout, "%-20s %12d %6.2f%% %10s %12s %5.2fx\n",
 			formatKey([]byte(kv.prefix)), kv.stats.count, countPct,
 			formatBytes(kv.stats.compressedSize),
 			formatBytes(kv.stats.uncompressedSize), ratio)
