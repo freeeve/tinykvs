@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"hash/crc32"
 	"sync"
+	"sync/atomic"
 
 	"github.com/golang/snappy"
 	"github.com/klauspost/compress/zstd"
@@ -128,17 +129,50 @@ type Block struct {
 	Entries []BlockEntry
 	buffer  []byte // buffer for decompressed data
 	pooled  bool   // true if buffer came from pool and should be returned
+	refcnt  int32  // reference count for cache management
 }
 
-// Release returns the block's buffer to the pool.
-// Call this when the block is no longer needed.
-func (b *Block) Release() {
+// IncRef increments the block's reference count.
+// Call this when taking a reference to a cached block.
+func (b *Block) IncRef() {
+	atomic.AddInt32(&b.refcnt, 1)
+}
+
+// DecRef decrements the block's reference count.
+// When the count reaches zero, the buffer is returned to the pool.
+// Returns true if the block was released (refcount hit 0).
+func (b *Block) DecRef() bool {
+	newCount := atomic.AddInt32(&b.refcnt, -1)
+	if newCount == 0 {
+		b.release()
+		return true
+	}
+	return false
+}
+
+// RefCount returns the current reference count.
+func (b *Block) RefCount() int32 {
+	return atomic.LoadInt32(&b.refcnt)
+}
+
+// release returns the block's buffer to the pool.
+func (b *Block) release() {
 	if b.buffer != nil {
 		if b.pooled {
 			putDecompressBuffer(b.buffer)
 		}
 		b.buffer = nil
 		b.Entries = nil
+	}
+}
+
+// Release returns the block's buffer to the pool.
+// Deprecated: Use DecRef for reference-counted blocks.
+// This method is kept for non-cached blocks that aren't reference counted.
+func (b *Block) Release() {
+	// For non-refcounted blocks (refcnt == 0), release immediately
+	if atomic.LoadInt32(&b.refcnt) == 0 {
+		b.release()
 	}
 }
 

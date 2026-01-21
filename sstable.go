@@ -291,8 +291,9 @@ func (sst *SSTable) Get(key []byte, cache *lruCache, verifyChecksum bool) (Entry
 
 	// Try cache first
 	var block *Block
+	var fromCache bool
 	if cache != nil {
-		block, _ = cache.Get(cacheKey)
+		block, fromCache = cache.Get(cacheKey)
 	}
 
 	// Read from disk if not cached
@@ -310,8 +311,17 @@ func (sst *SSTable) Get(key []byte, cache *lruCache, verifyChecksum bool) (Entry
 
 		// Add to cache
 		if cache != nil {
-			cache.Put(cacheKey, block)
+			cache.Put(cacheKey, block) // Cache takes a reference
+			block.IncRef()             // We also take a reference
+			fromCache = true           // Now we need to DecRef when done
 		}
+	}
+
+	// Ensure we release our reference when done
+	if fromCache {
+		defer block.DecRef()
+	} else {
+		defer block.Release()
 	}
 
 	// Binary search within block

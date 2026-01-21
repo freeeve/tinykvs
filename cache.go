@@ -48,6 +48,7 @@ func NewLRUCache(capacity int64) *lruCache {
 
 // Get retrieves a block from the cache.
 // Returns the block and true if found, nil and false otherwise.
+// The caller must call DecRef() on the block when done with it.
 func (c *lruCache) Get(key cacheKey) (*Block, bool) {
 	if c.capacity == 0 {
 		return nil, false
@@ -59,7 +60,9 @@ func (c *lruCache) Get(key cacheKey) (*Block, bool) {
 	if elem, ok := c.items[key]; ok {
 		c.evictList.MoveToFront(elem)
 		c.hits++
-		return elem.Value.(*cacheEntry).block, true
+		block := elem.Value.(*cacheEntry).block
+		block.IncRef() // Caller takes a reference
+		return block, true
 	}
 
 	c.misses++
@@ -67,10 +70,14 @@ func (c *lruCache) Get(key cacheKey) (*Block, bool) {
 }
 
 // Put adds a block to the cache.
+// The cache takes ownership of the block's reference.
 func (c *lruCache) Put(key cacheKey, block *Block) {
 	if c.capacity == 0 {
 		return
 	}
+
+	// Cache takes ownership - set initial refcount to 1
+	block.IncRef()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -86,9 +93,12 @@ func (c *lruCache) Put(key cacheKey, block *Block) {
 		c.evictList.MoveToFront(elem)
 		entry := elem.Value.(*cacheEntry)
 		c.size -= entry.size
+		oldBlock := entry.block
 		entry.block = block
 		entry.size = blockSize
 		c.size += blockSize
+		// Release old block's cache reference
+		oldBlock.DecRef()
 		return
 	}
 
@@ -119,9 +129,9 @@ func (c *lruCache) evict() {
 	delete(c.items, entry.key)
 	c.evictList.Remove(elem)
 	c.size -= entry.size
-	// Note: We don't call block.Release() here because readers may still have
-	// a reference to this block. The block and its buffer will be garbage
-	// collected when all references are gone.
+	// Release the cache's reference. If no readers hold references,
+	// the buffer is returned to the pool immediately.
+	entry.block.DecRef()
 }
 
 // Remove removes a specific key from the cache.
@@ -138,7 +148,7 @@ func (c *lruCache) Remove(key cacheKey) {
 		delete(c.items, key)
 		c.evictList.Remove(elem)
 		c.size -= entry.size
-		// Note: We don't call block.Release() here - see evict() comment.
+		entry.block.DecRef()
 	}
 }
 
@@ -158,7 +168,7 @@ func (c *lruCache) RemoveByFileID(fileID uint32) {
 			delete(c.items, key)
 			c.evictList.Remove(elem)
 			c.size -= entry.size
-			// Note: We don't call block.Release() here - see evict() comment.
+			entry.block.DecRef()
 		}
 	}
 }
@@ -168,8 +178,11 @@ func (c *lruCache) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Note: We don't call block.Release() here - see evict() comment.
-	// Blocks will be garbage collected when all references are gone.
+	// DecRef all blocks - buffers return to pool when refcount hits 0
+	for _, elem := range c.items {
+		entry := elem.Value.(*cacheEntry)
+		entry.block.DecRef()
+	}
 
 	c.items = make(map[cacheKey]*list.Element)
 	c.evictList.Init()

@@ -345,3 +345,60 @@ func BenchmarkCachePut(b *testing.B) {
 		cache.Put(key, block)
 	}
 }
+
+// BenchmarkCacheEviction measures allocation behavior during cache eviction.
+// With reference counting, evicted blocks should return buffers to the pool.
+func BenchmarkCacheEviction(b *testing.B) {
+	// Small cache to force frequent evictions
+	cache := newLRUCache(16 * 1024) // 16KB cache
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		// Create a block with pooled buffer (simulates real block from DecodeBlock)
+		buf := getDecompressBuffer(4096)
+		block := &Block{
+			Type:    blockTypeData,
+			Entries: []BlockEntry{{Key: []byte("key"), Value: buf[:100]}},
+			buffer:  buf,
+			pooled:  true,
+		}
+
+		key := cacheKey{FileID: 1, BlockOffset: uint64(i * 4096)}
+		cache.Put(key, block)
+	}
+}
+
+// BenchmarkCacheChurn simulates realistic cache usage with gets and puts.
+func BenchmarkCacheChurn(b *testing.B) {
+	cache := newLRUCache(64 * 1024) // 64KB cache
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		// Simulate read: check cache, miss, load, put, use, release
+		key := cacheKey{FileID: 1, BlockOffset: uint64((i % 100) * 4096)}
+
+		block, found := cache.Get(key)
+		if found {
+			// Cache hit - use block then release our reference
+			_ = len(block.Entries)
+			block.DecRef()
+		} else {
+			// Cache miss - create new block with pooled buffer
+			buf := getDecompressBuffer(4096)
+			block = &Block{
+				Type:    blockTypeData,
+				Entries: []BlockEntry{{Key: []byte("key"), Value: buf[:100]}},
+				buffer:  buf,
+				pooled:  true,
+			}
+			cache.Put(key, block)
+			block.IncRef() // We also take a reference
+			_ = len(block.Entries)
+			block.DecRef() // Release our reference
+		}
+	}
+}

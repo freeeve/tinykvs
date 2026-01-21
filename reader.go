@@ -837,16 +837,15 @@ func (s *memtablePrefixSource) close() {
 
 // sstablePrefixSource wraps an SSTable for prefix scanning.
 type sstablePrefixSource struct {
-	sst       *SSTable
-	prefix    []byte
-	cache     *lruCache
-	verify    bool
-	blockIdx  int
-	entryIdx  int
-	block     *Block
-	valid     bool
-	fromCache bool       // True if current block came from cache (don't release it)
-	stats     *ScanStats // Shared stats counter (may be nil)
+	sst      *SSTable
+	prefix   []byte
+	cache    *lruCache
+	verify   bool
+	blockIdx int
+	entryIdx int
+	block    *Block
+	valid    bool
+	stats    *ScanStats // Shared stats counter (may be nil)
 }
 
 func (s *sstablePrefixSource) seekToPrefix() {
@@ -932,10 +931,10 @@ func (s *sstablePrefixSource) searchNextBlocks() {
 	}
 }
 
-// releaseCurrentBlock releases the current block if owned.
+// releaseCurrentBlock releases the current block's reference.
 func (s *sstablePrefixSource) releaseCurrentBlock() {
-	if s.block != nil && !s.fromCache {
-		s.block.Release()
+	if s.block != nil {
+		s.block.DecRef()
 	}
 	s.block = nil
 }
@@ -961,9 +960,9 @@ func (s *sstablePrefixSource) loadBlock() error {
 		return ErrKeyNotFound
 	}
 
-	// Release previous block if we owned it
-	if s.block != nil && !s.fromCache {
-		s.block.Release()
+	// Release previous block's reference
+	if s.block != nil {
+		s.block.DecRef()
 		s.block = nil
 	}
 
@@ -973,8 +972,8 @@ func (s *sstablePrefixSource) loadBlock() error {
 	// Try cache first
 	if s.cache != nil {
 		if cached, found := s.cache.Get(cacheKey); found {
+			// cache.Get already called IncRef for us
 			s.block = cached
-			s.fromCache = true
 			if s.stats != nil {
 				atomic.AddInt64(&s.stats.BlocksLoaded, 1)
 				atomic.AddInt64(&s.stats.BlocksCacheHit, 1)
@@ -995,10 +994,10 @@ func (s *sstablePrefixSource) loadBlock() error {
 	}
 
 	if s.cache != nil {
-		s.cache.Put(cacheKey, block)
-		s.fromCache = true // Now in cache, don't release
+		s.cache.Put(cacheKey, block) // Cache takes a reference
+		block.IncRef()               // We also take a reference
 	} else {
-		s.fromCache = false // Not cached, we own it
+		block.IncRef() // We take a reference
 	}
 	s.block = block
 	if s.stats != nil {
@@ -1069,9 +1068,9 @@ func (s *sstablePrefixSource) entry() Entry {
 }
 
 func (s *sstablePrefixSource) close() {
-	// Release block if we own it (not from cache)
-	if s.block != nil && !s.fromCache {
-		s.block.Release()
+	// Release our reference to the block
+	if s.block != nil {
+		s.block.DecRef()
 		s.block = nil
 	}
 }
@@ -1395,17 +1394,16 @@ func (s *memtableRangeSource) close() {
 
 // sstableRangeSource wraps an SSTable for range scanning.
 type sstableRangeSource struct {
-	sst       *SSTable
-	start     []byte
-	end       []byte
-	cache     *lruCache
-	verify    bool
-	blockIdx  int
-	entryIdx  int
-	block     *Block
-	valid     bool
-	fromCache bool
-	stats     *ScanStats
+	sst      *SSTable
+	start    []byte
+	end      []byte
+	cache    *lruCache
+	verify   bool
+	blockIdx int
+	entryIdx int
+	block    *Block
+	valid    bool
+	stats    *ScanStats
 }
 
 func (s *sstableRangeSource) seekToStart() {
@@ -1443,9 +1441,9 @@ func (s *sstableRangeSource) seekToStart() {
 	}
 
 	// Not found in this block, try next block
-	// Release old block and clear it so we load the new block
-	if s.block != nil && !s.fromCache {
-		s.block.Release()
+	// Release our reference to the block
+	if s.block != nil {
+		s.block.DecRef()
 	}
 	s.block = nil
 	s.blockIdx++
@@ -1477,9 +1475,9 @@ func (s *sstableRangeSource) loadBlock() error {
 		return ErrKeyNotFound
 	}
 
-	// Release previous block if we owned it
-	if s.block != nil && !s.fromCache {
-		s.block.Release()
+	// Release previous block's reference
+	if s.block != nil {
+		s.block.DecRef()
 		s.block = nil
 	}
 
@@ -1489,8 +1487,8 @@ func (s *sstableRangeSource) loadBlock() error {
 	// Try cache first
 	if s.cache != nil {
 		if cached, found := s.cache.Get(cacheKey); found {
+			// cache.Get already called IncRef for us
 			s.block = cached
-			s.fromCache = true
 			if s.stats != nil {
 				atomic.AddInt64(&s.stats.BlocksLoaded, 1)
 				atomic.AddInt64(&s.stats.BlocksCacheHit, 1)
@@ -1511,10 +1509,10 @@ func (s *sstableRangeSource) loadBlock() error {
 	}
 
 	if s.cache != nil {
-		s.cache.Put(cacheKey, block)
-		s.fromCache = true
+		s.cache.Put(cacheKey, block) // Cache takes a reference
+		block.IncRef()               // We also take a reference
 	} else {
-		s.fromCache = false
+		block.IncRef() // We take a reference
 	}
 	s.block = block
 	if s.stats != nil {
@@ -1574,8 +1572,8 @@ func (s *sstableRangeSource) entry() Entry {
 }
 
 func (s *sstableRangeSource) close() {
-	if s.block != nil && !s.fromCache {
-		s.block.Release()
+	if s.block != nil {
+		s.block.DecRef()
 		s.block = nil
 	}
 }
